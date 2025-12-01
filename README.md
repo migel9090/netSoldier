@@ -23,7 +23,8 @@ Full context, decisions, architecture and the 173-step roadmap: [`context/`](con
 
 ## Status
 
-Greenfield — executing roadmap step 0 of 172 (see [`context/04-roadmap.md`](context/04-roadmap.md)).
+Phase 0 (DevSecOps foundation) in progress — see the [173-step roadmap](context/04-roadmap.md).
+Conventions for commits, branching and reviews: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Ethics & privacy
 
