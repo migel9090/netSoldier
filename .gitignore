@@ -1,0 +1,72 @@
+# ── Go ──
+bin/
+*.test
+coverage.out
+coverage.html
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+
+# ── Node / SvelteKit ──
+node_modules/
+.svelte-kit/
+apps/web-ui/build/
+.pnpm-store/
+npm-debug.log*
+pnpm-debug.log*
+
+# ── Terraform ──
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+!*.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+*.tfplan
+
+# ── Ansible ──
+*.retry
+
+# ── Secrets safety net ──
+# SOPS-ENCRYPTED files ARE committed; plaintext secrets never.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+age.agekey
+keys.txt
+*.dec
+*.dec.*
+kubeconfig
+*.kubeconfig
+
+# ── Runtime data (inventory DBs, captures, logs) ──
+# PCAP corpus is fetched via manifest (see detections/pcap-corpus), never committed.
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.pcap
+*.pcapng
+
+# ── OS / editors ──
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
