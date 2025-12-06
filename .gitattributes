@@ -1,0 +1,54 @@
+# Enforce LF line endings in the repo (CRLF only in working tree on Windows).
+* text=auto eol=lf
+
+# Source code
+*.go      text diff=golang
+*.py      text diff=python
+*.js      text
+*.ts      text
+*.svelte  text
+*.html    text
+*.css     text
+*.scss    text
+*.json    text
+*.yaml    text
+*.yml     text
+*.toml    text
+*.tf      text diff=hcl
+*.hcl     text diff=hcl
+*.sh      text eol=lf
+*.bash    text eol=lf
+*.sql     text
+
+# Documentation
+*.md      text diff=markdown
+*.txt     text
+
+# Config
+.editorconfig    text
+.gitattributes   text
+.gitignore       text
+Dockerfile*      text
+Makefile         text
+Taskfile.yml     text
+
+# Binary — never normalize, never diff
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.gz      binary
+*.tar     binary
+*.zip     binary
+*.pcap    binary
+*.pcapng  binary
+
+# Lock files — track but don't diff (noisy)
+go.sum            text -diff
+pnpm-lock.yaml    text -diff
+poetry.lock       text -diff
+uv.lock           text -diff
+
+# Generated — linguist exclusion (GitHub stats)
+**/vendor/** linguist-vendored
