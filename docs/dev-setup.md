@@ -100,16 +100,34 @@ docker buildx build --builder netsoldier-builder \
   --platform linux/amd64,linux/arm64 \
   -t netsoldier/detection-engine:dev apps/detection-engine/
 
-# Push to registry (when GHCR is configured)
+# Push to GHCR
 docker buildx build --builder netsoldier-builder \
   --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/<org>/detection-engine:dev --push apps/detection-engine/
+  -t ghcr.io/migel9090/detection-engine:dev --push apps/detection-engine/
 
 # Load single-platform into local Docker (for testing)
 docker buildx build --builder netsoldier-builder \
   --platform linux/amd64 --load \
   -t netsoldier/detection-engine:dev apps/detection-engine/
 ```
+
+## Container registry (GHCR)
+
+Images are published to `ghcr.io/migel9090/<service>`. In CI, the
+`GITHUB_TOKEN` with `packages: write` handles authentication automatically.
+For local pushes:
+
+```bash
+echo $GITHUB_TOKEN | docker login ghcr.io -u migel9090 --password-stdin
+```
+
+Image naming convention: `ghcr.io/migel9090/<service>:<version>` and
+`ghcr.io/migel9090/<service>:sha-<short-sha>`. Deployment manifests pin
+**digests** (immutable), not tags.
+
+The repo's default `GITHUB_TOKEN` permission is **read-only** — each
+workflow must explicitly declare `permissions: { packages: write }` to
+push images. This follows least-privilege.
 
 ## What the CI adds beyond pre-commit
 
