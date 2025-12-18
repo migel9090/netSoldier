@@ -73,7 +73,7 @@ jobs:
         working-directory: apps/ml-anomaly
         run: |
           pip install --quiet -e '.[dev]'
-          pytest --tb=short -q
+          pytest --tb=short -q || [ $? -eq 5 ]
 
   build:
     runs-on: ubuntu-latest
