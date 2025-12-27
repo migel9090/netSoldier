@@ -19,11 +19,9 @@ Monorepo with a bleeding-edge supply-chain-hardened pipeline: GitHub Actions (SH
 
 Hybrid: mature open-source engines (Suricata, Zeek, ntopng, AdGuard Home, RITA, MISP, ClickHouse) + a custom Go/Python correlation-and-control plane (`detection-engine`, `device-inventory`, `threat-intel-sync`, `killswitch-controller`, `ml-anomaly`, SvelteKit `web-ui`). Two deployment profiles: `proxmox-soc` (full stack, ~8 GB server) and `pi-edge` (minimal, Raspberry Pi).
 
-Full context, decisions, architecture and the 173-step roadmap: [`context/`](context/).
-
 ## Status
 
-Phase 0 (DevSecOps foundation) in progress — see the [173-step roadmap](context/04-roadmap.md).
+Phase 0 (DevSecOps foundation) in progress — see the 173-step roadmap.
 Conventions for commits, branching and reviews: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Ethics & privacy

@@ -4,7 +4,7 @@
 - **Status:** Living document (update with each phase)
 - **Scope:** full netSoldier system — monitoring, detection, killswitch, DevSecOps pipeline
 - **Method:** STRIDE per component/data-flow, with risk ratings and planned mitigations
-- **Reference:** [ADR-0001](adr/0001-architektura.md), [`context/03-architecture.md`](../context/03-architecture.md)
+- **Reference:** [ADR-0001](adr/0001-architektura.md)
 
 ## 1. System description
 
