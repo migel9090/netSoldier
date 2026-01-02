@@ -167,6 +167,7 @@ Pre-commit catches issues at commit time. CI (steps 14–24) adds:
 - Grype (SCA — dependency vulnerabilities, blocks on critical/high → SARIF)
 - Checkov (IaC scan — Dockerfiles, GitHub Actions, Terraform, K8s → SARIF, informational)
 - KICS (IaC scan — blocks on HIGH severity → SARIF)
-- TruffleHog nightly (historical secret scanning with verification)
+- Gitleaks (CI gate — secret detection on every push/PR → SARIF)
+- TruffleHog nightly (full history scan with `--only-verified` — alerts on active leaked credentials)
 - Multi-arch image builds + SBOM + cosign signing + SLSA provenance
 - PCAP corpus replay (detection regression testing)
