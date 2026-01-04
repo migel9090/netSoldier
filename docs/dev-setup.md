@@ -169,5 +169,6 @@ Pre-commit catches issues at commit time. CI (steps 14–24) adds:
 - KICS (IaC scan — blocks on HIGH severity → SARIF)
 - Gitleaks (CI gate — secret detection on every push/PR → SARIF)
 - TruffleHog nightly (full history scan with `--only-verified` — alerts on active leaked credentials)
-- Multi-arch image builds + SBOM + cosign signing + SLSA provenance
+- SBOM generation (Syft → CycloneDX JSON, uploaded as build artifact)
+- Multi-arch image builds + cosign signing + SLSA provenance
 - PCAP corpus replay (detection regression testing)
