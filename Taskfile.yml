@@ -130,14 +130,6 @@ tasks:
     cmds:
       - docker run --rm -p 8080:8080 {{.REGISTRY}}/{{.IMAGE}}:{{.TAG}}
 
-  deploy:
-    desc: Deploy to cluster (available after ArgoCD setup, step 33+)
-    cmds:
-      - echo "Deployment targets are configured after ArgoCD setup (steps 33-37)."
-      - echo "Manual deploy:"
-      - echo "  kubectl apply -k deploy/kustomize/overlays/proxmox-soc/"
-      - echo "  argocd app sync netsoldier"
-
   pre-commit:
     desc: Run all pre-commit hooks
     cmds:
