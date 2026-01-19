@@ -1,0 +1,4 @@
+proxmox_endpoint  = "https://pve.local:8006"
+proxmox_api_token = "terraform@pam!provisioner=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+proxmox_insecure  = true
+proxmox_node      = "pve"
