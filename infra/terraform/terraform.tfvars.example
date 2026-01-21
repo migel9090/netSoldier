@@ -2,3 +2,20 @@ proxmox_endpoint  = "https://pve.local:8006"
 proxmox_api_token = "terraform@pam!provisioner=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 proxmox_insecure  = true
 proxmox_node      = "pve"
+
+# k3s VM
+k3s_cpu_cores = 4
+k3s_memory_mb = 6144
+k3s_disk_gb   = 48
+storage_pool  = "local-lvm"
+
+# Network
+network_bridge = "vmbr0"
+k3s_ip         = "192.168.1.100/24"
+gateway        = "192.168.1.1"
+dns_servers    = ["192.168.1.1"]
+
+# Cloud-init
+cloud_image_url = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+vm_user         = "netsoldier"
+ssh_public_key  = "ssh-ed25519 AAAA... user@host"
