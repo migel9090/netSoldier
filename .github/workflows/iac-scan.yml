@@ -39,6 +39,30 @@ jobs:
           sarif_file: checkov.sarif
           category: checkov
 
+  terraform:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+
+      - name: Format check
+        run: terraform fmt -check -recursive
+
+      - name: Init (providers only)
+        run: terraform init -backend=false
+
+      - name: Validate
+        run: terraform validate
+
   kics:
     runs-on: ubuntu-latest
     steps:
