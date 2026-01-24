@@ -1,0 +1,11 @@
+---
+- name: Common OS setup
+  ansible.builtin.include_tasks: common.yml
+
+- name: Debian/Ubuntu server setup
+  ansible.builtin.include_tasks: debian.yml
+  when: "'proxmox_soc' in group_names"
+
+- name: Raspberry Pi OS setup
+  ansible.builtin.include_tasks: raspbian.yml
+  when: "'pi_edge' in group_names"

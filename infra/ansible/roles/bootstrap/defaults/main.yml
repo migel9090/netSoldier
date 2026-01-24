@@ -1,0 +1,13 @@
+---
+bootstrap_timezone: "Europe/Warsaw"
+bootstrap_locale: "en_US.UTF-8"
+bootstrap_packages:
+  - curl
+  - wget
+  - gnupg
+  - ca-certificates
+  - apt-transport-https
+  - software-properties-common
+  - python3-apt
+  - jq
+  - locales

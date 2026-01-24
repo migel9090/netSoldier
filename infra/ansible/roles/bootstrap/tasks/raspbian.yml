@@ -1,0 +1,9 @@
+---
+# Raspberry Pi OS Bookworm stores cmdline at /boot/firmware/cmdline.txt
+- name: Enable cgroup memory (required for container runtimes)
+  ansible.builtin.lineinfile:
+    path: /boot/firmware/cmdline.txt
+    backrefs: true
+    regexp: '^((?!.*cgroup_memory=1).+)$'
+    line: '\1 cgroup_memory=1 cgroup_enable=memory'
+  notify: reboot required

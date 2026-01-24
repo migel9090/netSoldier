@@ -1,0 +1,51 @@
+---
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Upgrade all packages
+  ansible.builtin.apt:
+    upgrade: dist
+    autoremove: true
+
+- name: Install common packages
+  ansible.builtin.apt:
+    name: "{{ bootstrap_packages }}"
+    state: present
+
+- name: Set timezone symlink
+  ansible.builtin.file:
+    src: "/usr/share/zoneinfo/{{ bootstrap_timezone }}"
+    dest: /etc/localtime
+    state: link
+    force: true
+
+- name: Write timezone name
+  ansible.builtin.copy:
+    content: "{{ bootstrap_timezone }}\n"
+    dest: /etc/timezone
+    mode: "0644"
+
+- name: Ensure locale is generated
+  ansible.builtin.lineinfile:
+    path: /etc/locale.gen
+    regexp: '^#?\s*{{ bootstrap_locale }}'
+    line: "{{ bootstrap_locale }} UTF-8"
+  register: locale_gen
+
+- name: Regenerate locales
+  ansible.builtin.command:
+    cmd: locale-gen
+  when: locale_gen.changed
+  changed_when: true
+
+- name: Set default locale
+  ansible.builtin.copy:
+    content: "LANG={{ bootstrap_locale }}\n"
+    dest: /etc/default/locale
+    mode: "0644"
+
+- name: Set hostname
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
