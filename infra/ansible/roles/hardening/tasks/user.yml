@@ -1,0 +1,19 @@
+---
+- name: Ensure service user has sudo
+  ansible.builtin.user:
+    name: "{{ hardening_user }}"
+    shell: /bin/bash
+    groups: sudo
+    append: true
+
+- name: Grant passwordless sudo
+  ansible.builtin.copy:
+    content: "{{ hardening_user }} ALL=(ALL) NOPASSWD:ALL\n"
+    dest: "/etc/sudoers.d/{{ hardening_user }}"
+    mode: "0440"
+    validate: "visudo -cf %s"
+
+- name: Lock root password
+  ansible.builtin.user:
+    name: root
+    password_lock: true

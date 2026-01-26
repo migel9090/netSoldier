@@ -1,0 +1,10 @@
+---
+hardening_user: netsoldier
+hardening_ssh_port: 22
+
+hardening_ufw_rules:
+  - { port: "22", proto: tcp, comment: "SSH" }
+
+hardening_fail2ban_maxretry: 5
+hardening_fail2ban_bantime: 3600
+hardening_fail2ban_findtime: 600

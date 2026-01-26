@@ -1,0 +1,41 @@
+---
+- name: Disable unused filesystems
+  ansible.builtin.copy:
+    content: |
+      install cramfs /bin/false
+      install freevxfs /bin/false
+      install jffs2 /bin/false
+      install hfs /bin/false
+      install hfsplus /bin/false
+      install udf /bin/false
+    dest: /etc/modprobe.d/cis-filesystems.conf
+    mode: "0644"
+
+- name: Kernel hardening sysctl
+  ansible.builtin.copy:
+    content: |
+      fs.suid_dumpable = 0
+      kernel.randomize_va_space = 2
+      net.ipv4.conf.all.accept_source_route = 0
+      net.ipv4.conf.default.accept_source_route = 0
+      net.ipv4.tcp_syncookies = 1
+      net.ipv4.conf.all.log_martians = 1
+      net.ipv4.conf.default.log_martians = 1
+      net.ipv4.conf.all.accept_redirects = 0
+      net.ipv4.conf.default.accept_redirects = 0
+      net.ipv4.conf.all.send_redirects = 0
+      net.ipv4.conf.default.send_redirects = 0
+      net.ipv4.icmp_echo_ignore_broadcasts = 1
+    dest: /etc/sysctl.d/90-cis-hardening.conf
+    mode: "0644"
+  notify: reload sysctl
+
+- name: Restrict /etc/shadow permissions
+  ansible.builtin.file:
+    path: /etc/shadow
+    mode: "0640"
+
+- name: Restrict /etc/gshadow permissions
+  ansible.builtin.file:
+    path: /etc/gshadow
+    mode: "0640"

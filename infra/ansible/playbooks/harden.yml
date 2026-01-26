@@ -1,0 +1,6 @@
+---
+- name: Harden OS
+  hosts: all
+  become: true
+  roles:
+    - hardening

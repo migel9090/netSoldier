@@ -1,0 +1,7 @@
+---
+- ansible.builtin.include_tasks: user.yml
+- ansible.builtin.include_tasks: ssh.yml
+- ansible.builtin.include_tasks: firewall.yml
+- ansible.builtin.include_tasks: fail2ban.yml
+- ansible.builtin.include_tasks: unattended.yml
+- ansible.builtin.include_tasks: cis.yml
