@@ -1,0 +1,4 @@
+---
+k3s_version: ""
+k3s_tls_san: "{{ ansible_host }}"
+k3s_kubeconfig_local_path: "{{ playbook_dir }}/../kubeconfig"

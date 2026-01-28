@@ -1,0 +1,6 @@
+---
+- name: Install k3s
+  hosts: proxmox_soc
+  become: true
+  roles:
+    - k3s_server

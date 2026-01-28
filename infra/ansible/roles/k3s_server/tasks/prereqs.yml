@@ -1,0 +1,37 @@
+---
+- name: Load container kernel modules on boot
+  ansible.builtin.copy:
+    content: |
+      overlay
+      br_netfilter
+    dest: /etc/modules-load.d/k3s.conf
+    mode: "0644"
+
+- name: Load kernel modules now
+  ansible.builtin.command:
+    cmd: modprobe {{ item }}
+  loop:
+    - overlay
+    - br_netfilter
+  changed_when: false
+
+- name: Container networking sysctl
+  ansible.builtin.copy:
+    content: |
+      net.bridge.bridge-nf-call-iptables = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward = 1
+    dest: /etc/sysctl.d/99-k3s.conf
+    mode: "0644"
+  notify: reload sysctl
+
+- name: Disable swap
+  ansible.builtin.command:
+    cmd: swapoff -a
+  changed_when: false
+
+- name: Remove swap from fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: '\sswap\s'
+    state: absent

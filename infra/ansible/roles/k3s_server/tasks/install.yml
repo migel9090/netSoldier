@@ -1,0 +1,25 @@
+---
+- name: Download k3s install script
+  ansible.builtin.get_url:
+    url: https://get.k3s.io
+    dest: /tmp/k3s-install.sh
+    mode: "0755"
+
+- name: Install k3s server
+  ansible.builtin.command:
+    cmd: /tmp/k3s-install.sh
+    creates: /usr/local/bin/k3s
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+    INSTALL_K3S_EXEC: >-
+      server
+      --disable traefik
+      --disable servicelb
+      --write-kubeconfig-mode 644
+      --tls-san {{ k3s_tls_san }}
+
+- name: Ensure k3s is running
+  ansible.builtin.systemd:
+    name: k3s
+    enabled: true
+    state: started

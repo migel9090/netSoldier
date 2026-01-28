@@ -1,0 +1,7 @@
+---
+hardening_ufw_rules:
+  - { port: "22", proto: tcp, comment: "SSH" }
+  - { port: "6443", proto: tcp, comment: "k3s API" }
+  - { port: "10250", proto: tcp, comment: "kubelet" }
+  - { port: "80", proto: tcp, comment: "HTTP" }
+  - { port: "443", proto: tcp, comment: "HTTPS" }
