@@ -1,0 +1,6 @@
+---
+- name: Install Podman edge
+  hosts: pi_edge
+  become: true
+  roles:
+    - podman_edge

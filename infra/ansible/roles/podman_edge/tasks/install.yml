@@ -1,0 +1,26 @@
+---
+- name: Install Podman
+  ansible.builtin.apt:
+    name:
+      - podman
+      - slirp4netns
+      - uidmap
+    state: present
+
+- name: Create Quadlet directory
+  ansible.builtin.file:
+    path: /etc/containers/systemd
+    state: directory
+    mode: "0755"
+
+- name: Check for auto-update timer
+  ansible.builtin.stat:
+    path: /usr/lib/systemd/system/podman-auto-update.timer
+  register: auto_update_timer
+
+- name: Enable Podman auto-update timer
+  ansible.builtin.systemd:
+    name: podman-auto-update.timer
+    enabled: true
+    state: started
+  when: auto_update_timer.stat.exists

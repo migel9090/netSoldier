@@ -1,0 +1,4 @@
+---
+podman_ghcr_user: migel9090
+podman_ghcr_token: ""
+podman_registry: ghcr.io/migel9090

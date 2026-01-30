@@ -1,0 +1,20 @@
+---
+- name: Create containers config directory
+  ansible.builtin.file:
+    path: /etc/containers
+    state: directory
+    mode: "0755"
+
+- name: Configure GHCR authentication
+  ansible.builtin.copy:
+    content: |
+      {
+        "auths": {
+          "ghcr.io": {
+            "auth": "{{ (podman_ghcr_user + ':' + podman_ghcr_token) | b64encode }}"
+          }
+        }
+      }
+    dest: /etc/containers/auth.json
+    mode: "0600"
+  when: podman_ghcr_token | default('') | length > 0
