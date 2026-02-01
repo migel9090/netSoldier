@@ -1,0 +1,5 @@
+---
+- ansible.builtin.include_tasks: install.yml
+- ansible.builtin.include_tasks: wait.yml
+- ansible.builtin.include_tasks: password.yml
+  when: argocd_admin_password | length > 0

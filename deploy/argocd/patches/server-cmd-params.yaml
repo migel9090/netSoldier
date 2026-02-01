@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+data:
+  # TLS terminated at ingress; until ingress controller is deployed, use port-forward:
+  #   kubectl port-forward svc/argocd-server -n argocd 8080:80
+  server.insecure: "true"

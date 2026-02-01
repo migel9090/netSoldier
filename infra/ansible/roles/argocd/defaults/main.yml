@@ -1,0 +1,6 @@
+---
+argocd_version: "v2.13.3"
+argocd_namespace: argocd
+argocd_kubeconfig: "{{ playbook_dir }}/../kubeconfig"
+argocd_admin_password: ""
+argocd_deploy_dir: "{{ playbook_dir }}/../../deploy/argocd"
