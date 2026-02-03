@@ -1,0 +1,3 @@
+creation_rules:
+  - path_regex: '\.sops\.(yaml|yml|json)$'
+    age: 'AGE_PUBLIC_KEY_PLACEHOLDER'

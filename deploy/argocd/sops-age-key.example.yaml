@@ -1,0 +1,14 @@
+# Kubernetes Secret holding the age private key for SOPS decryption.
+# Created automatically by scripts/sops-age-setup.sh.
+# DO NOT commit the real Secret — apply it directly to the cluster.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sops-age-key
+  namespace: argocd
+type: Opaque
+stringData:
+  keys.txt: |
+    # created: 2026-02-01T00:00:00Z
+    # public key: age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    AGE-SECRET-KEY-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
