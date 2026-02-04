@@ -17,7 +17,7 @@ WRN leaks found: 2
 - CI run: 26912715009 (conclusion: failure)
 - SARIF artifact uploaded (`gitleaks-results.sarif.zip`, artifact ID 7396575844)
 - Semgrep also independently flagged the secret (defense in depth)
-- Note: AWS documentation example keys (`AKIAIOSFODNN7EXAMPLE`) are allowlisted by gitleaks — confirmed by first test iteration passing; second iteration with non-allowlisted key correctly blocked
+- Note: AWS documentation example keys (`AKIA…EXAMPLE`) are allowlisted by gitleaks — confirmed by first test iteration passing; second iteration with non-allowlisted key correctly blocked
 
 PR #4 closed without merge, branch deleted.
 
@@ -105,7 +105,7 @@ Audit mode logs all outbound network connections without blocking, building a ba
 
 ## 6. Observations and follow-ups
 
-- **AWS example keys bypass:** gitleaks allowlists well-known example keys (e.g. `AKIAIOSFODNN7EXAMPLE`). This is correct behavior — they are documented fake keys.
+- **AWS example keys bypass:** gitleaks allowlists well-known example keys (e.g. `AKIA…EXAMPLE`). This is correct behavior — they are documented fake keys.
 - **Harden-Runner Node.js 20 deprecation:** step-security/harden-runner still runs on Node.js 20. Node.js 20 deprecation deadline is June 16, 2026. Cosmetic warning only — no functional impact.
 - **SLSA provenance intermittent skips:** provenance job was skipped on some push-to-main CI runs while succeeding on others. Likely caused by the build job not outputting a digest on cached/unchanged builds. To investigate in a future step.
 - **Dependabot configured:** weekly scans for Go, Python, npm, GitHub Actions; monthly for Docker base images. Automerge OFF, branch protection enforces PR review.
