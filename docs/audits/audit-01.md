@@ -6,7 +6,7 @@
 
 ## 1. Planted secret blocked by gitleaks
 
-**Test:** PR #4 with a planted fake AWS key (`AKIA5X7PCHQRCJTTWBMZ` + secret key) in `test-secret.txt`.
+**Test:** PR #4 with a planted fake AWS key (`AKIA…REDACTED` + secret key) in `test-secret.txt`.
 
 **Result:** BLOCKED — gitleaks detected 2 leaks and failed the check.
 
