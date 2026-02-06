@@ -1,0 +1,22 @@
+---
+- name: Install Kyverno
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Apply Kyverno kustomize manifests
+      ansible.builtin.command:
+        cmd: kubectl apply -k {{ playbook_dir }}/../../deploy/kyverno/
+      environment:
+        KUBECONFIG: "{{ playbook_dir }}/../kubeconfig"
+      register: kyverno_apply
+      changed_when: "'configured' in kyverno_apply.stdout or 'created' in kyverno_apply.stdout"
+
+    - name: Wait for Kyverno admission controller
+      ansible.builtin.command:
+        cmd: >-
+          kubectl rollout status deployment/kyverno-admission-controller
+          -n kyverno --timeout=300s
+      environment:
+        KUBECONFIG: "{{ playbook_dir }}/../kubeconfig"
+      changed_when: false

@@ -1,0 +1,32 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+  annotations:
+    policies.kyverno.io/title: Verify cosign image signatures
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: verify-cosign-signature
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/migel9090/*"
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    issuer: "https://token.actions.githubusercontent.com"
+                    subject: "https://github.com/migel9090/netSoldier/*"
+                    rekor:
+                      url: "https://rekor.sigstore.dev"
