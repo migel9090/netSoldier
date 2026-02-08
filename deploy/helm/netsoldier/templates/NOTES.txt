@@ -1,0 +1,6 @@
+netSoldier deployed to namespace {{ .Release.Namespace }}.
+
+Components:
+{{- if index .Values "detection-engine" "enabled" }}
+  - detection-engine: kubectl port-forward svc/detection-engine 8080:8080 -n {{ .Release.Namespace }}
+{{- end }}

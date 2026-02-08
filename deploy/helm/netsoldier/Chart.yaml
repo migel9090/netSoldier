@@ -1,0 +1,11 @@
+apiVersion: v2
+name: netsoldier
+description: netSoldier home-network security monitor — umbrella chart
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+dependencies:
+  - name: detection-engine
+    version: "0.1.0"
+    condition: detection-engine.enabled

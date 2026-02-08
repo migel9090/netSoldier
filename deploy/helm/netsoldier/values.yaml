@@ -1,0 +1,8 @@
+global:
+  namespace: netsoldier
+  image:
+    registry: ghcr.io
+    owner: migel9090
+
+detection-engine:
+  enabled: true
