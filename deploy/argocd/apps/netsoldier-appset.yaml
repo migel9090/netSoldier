@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: netsoldier-profiles
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - profile: proxmox-soc
+          - profile: pi-edge
+  template:
+    metadata:
+      name: "netsoldier-{{profile}}"
+      namespace: argocd
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/migel9090/netSoldier.git
+        targetRevision: main
+        path: "deploy/kustomize/overlays/{{profile}}"
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: netsoldier
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
