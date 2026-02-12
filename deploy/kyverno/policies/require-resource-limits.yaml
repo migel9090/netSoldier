@@ -23,6 +23,7 @@ spec:
                 - kube-system
                 - kyverno
                 - argocd
+                - observability
       validate:
         message: "All containers must have CPU and memory limits defined."
         pattern:

@@ -23,6 +23,7 @@ spec:
                 - kube-system
                 - kyverno
                 - argocd
+                - observability
       validate:
         message: "Containers must use a read-only root filesystem (securityContext.readOnlyRootFilesystem: true)."
         pattern:

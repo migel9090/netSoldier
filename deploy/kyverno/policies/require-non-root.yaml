@@ -23,6 +23,7 @@ spec:
                 - kube-system
                 - kyverno
                 - argocd
+                - observability
       validate:
         message: >-
           Running as root is not allowed. Either the pod or all containers

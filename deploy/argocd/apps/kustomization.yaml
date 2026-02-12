@@ -5,3 +5,4 @@ resources:
   - argocd-self.yaml
   - kyverno-app.yaml
   - netsoldier-appset.yaml
+  - observability-app.yaml
