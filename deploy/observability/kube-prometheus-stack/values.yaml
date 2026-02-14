@@ -24,6 +24,12 @@ prometheus:
 
 grafana:
   adminPassword: changeme
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      url: http://loki.observability.svc:3100
+      access: proxy
+      isDefault: false
   persistence:
     enabled: true
     size: 1Gi

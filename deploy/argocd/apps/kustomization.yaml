@@ -6,3 +6,5 @@ resources:
   - kyverno-app.yaml
   - netsoldier-appset.yaml
   - observability-app.yaml
+  - loki-app.yaml
+  - alloy-app.yaml
