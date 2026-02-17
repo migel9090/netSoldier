@@ -8,3 +8,5 @@ resources:
   - observability-app.yaml
   - loki-app.yaml
   - alloy-app.yaml
+  - tempo-app.yaml
+  - otel-collector-app.yaml
