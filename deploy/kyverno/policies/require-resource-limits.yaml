@@ -24,6 +24,7 @@ spec:
                 - kyverno
                 - argocd
                 - observability
+                - dns
       validate:
         message: "All containers must have CPU and memory limits defined."
         pattern:

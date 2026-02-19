@@ -24,6 +24,7 @@ spec:
                 - kyverno
                 - argocd
                 - observability
+                - dns
       validate:
         message: "Containers must use a read-only root filesystem (securityContext.readOnlyRootFilesystem: true)."
         pattern:

@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: adguard-config
+  namespace: dns
+data:
+  AdGuardHome.yaml: |
+    http:
+      address: 0.0.0.0:3000
+      session_ttl: 720h
+    users:
+      - name: admin
+        password: "$2a$10$CLzU6RhWctvKwixMKjEzxukm.kq9OPVXMk7V603rKrtgqHEaL4.J6"
+    dns:
+      bind_hosts:
+        - 0.0.0.0
+      port: 53
+      upstream_dns:
+        - https://dns.cloudflare.com/dns-query
+        - https://dns.google/dns-query
+      bootstrap_dns:
+        - 1.1.1.1
+        - 8.8.8.8
+      all_servers: true
+      cache_size: 4194304
+      cache_optimistic: true
+      protection_enabled: true
+      filtering_enabled: true
+      blocking_mode: default
+      blocked_response_ttl: 10
+    querylog:
+      enabled: true
+      file_enabled: true
+      interval: 168h
+      size_memory: 1000
+    statistics:
+      enabled: true
+      interval: 168h
+    filters:
+      - enabled: true
+        url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
+        name: AdGuard DNS filter
+        id: 1
+      - enabled: true
+        url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt
+        name: AdAway Default Blocklist
+        id: 2
+    schema_version: 29

@@ -24,6 +24,7 @@ spec:
                 - kyverno
                 - argocd
                 - observability
+                - dns
       validate:
         message: >-
           Running as root is not allowed. Either the pod or all containers
