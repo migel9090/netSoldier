@@ -10,6 +10,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/adguard"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/threatlist"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/tracing"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -33,8 +36,27 @@ func main() {
 		}()
 	}
 
+	agClient := adguard.NewClient(
+		envOr("ADGUARD_URL", "http://adguard-web.dns.svc:3000"),
+		envOr("ADGUARD_USER", "admin"),
+		envOr("ADGUARD_PASSWORD", "changeme"),
+	)
+
+	tlPath := envOr("THREATLIST_PATH", "/etc/detection-engine/domains.txt")
+	matcher, err := threatlist.LoadFromFile(tlPath)
+	if err != nil {
+		slog.Error("threatlist load failed", "path", tlPath, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("threatlist loaded", "path", tlPath, "domains", matcher.Size())
+
+	pollInterval := parseDuration(envOr("POLL_INTERVAL", "30s"), 30*time.Second)
+	engine := detection.New(agClient, matcher, pollInterval)
+	go engine.Run(ctx)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.HandleFunc("GET /alerts", engine.HandleAlerts)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
 	addr := envOr("LISTEN_ADDR", ":8080")
@@ -75,4 +97,12 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func parseDuration(s string, fallback time.Duration) time.Duration {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return fallback
+	}
+	return d
 }

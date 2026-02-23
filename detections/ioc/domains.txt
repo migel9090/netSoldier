@@ -1,0 +1,21 @@
+# Static domain indicators for detection-engine
+# Format: one domain per line, # comments, blank lines ignored
+#
+# This is the bootstrap list for testing the detection pipeline.
+# Production threat feeds are loaded dynamically by threat-intel-sync
+# (roadmap steps 52-55) which pulls from ThreatFox, URLhaus, etc.
+
+# === Validation / e2e test entries (RFC 2606 reserved) ===
+evil.example.com
+c2-callback.example.com
+malware-drop.example.com
+phishing-login.example.com
+exfil-data.example.com
+
+# === Sinkholed domains (safe for detection testing) ===
+# These well-known domains were used in past campaigns and are now
+# sinkholed by security researchers.  They resolve to researcher-
+# controlled IPs and serve no malicious content.
+iuqerfsodp9ifjaposdfjhgosurijfaewrwergwea.com
+aafrede.com
+qeocidywufjkawhnwkf.com
