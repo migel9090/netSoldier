@@ -14,6 +14,7 @@ import (
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/threatlist"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/tracing"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/webhook"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -52,6 +53,20 @@ func main() {
 
 	pollInterval := parseDuration(envOr("POLL_INTERVAL", "30s"), 30*time.Second)
 	engine := detection.New(agClient, matcher, pollInterval)
+
+	if webhookURL := os.Getenv("WEBHOOK_URL"); webhookURL != "" {
+		sender := webhook.NewSender(webhookURL, envOr("WEBHOOK_SECRET", ""), 3)
+		go sender.Run(ctx)
+		engine.OnAlert = func(a detection.Alert) {
+			sender.Send(webhookPayload{
+				Event:   "threat_detected",
+				Alert:   a,
+				Service: "detection-engine",
+			})
+		}
+		slog.Info("webhook enabled", "url", webhookURL)
+	}
+
 	go engine.Run(ctx)
 
 	mux := http.NewServeMux()
@@ -105,4 +120,10 @@ func parseDuration(s string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+type webhookPayload struct {
+	Event   string          `json:"event"`
+	Alert   detection.Alert `json:"alert"`
+	Service string          `json:"service"`
 }

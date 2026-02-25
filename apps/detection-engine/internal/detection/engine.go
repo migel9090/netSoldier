@@ -63,6 +63,7 @@ type Engine struct {
 	matcher  *threatlist.Matcher
 	interval time.Duration
 	lastSeen time.Time
+	OnAlert  func(Alert)
 
 	mu     sync.RWMutex
 	alerts []Alert
@@ -144,10 +145,14 @@ func (e *Engine) poll(ctx context.Context) {
 
 func (e *Engine) addAlert(a Alert) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.alerts = append(e.alerts, a)
 	if len(e.alerts) > maxAlerts {
 		e.alerts = e.alerts[len(e.alerts)-maxAlerts:]
+	}
+	e.mu.Unlock()
+
+	if e.OnAlert != nil {
+		e.OnAlert(a)
 	}
 }
 
