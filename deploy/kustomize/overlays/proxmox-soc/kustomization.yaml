@@ -9,3 +9,5 @@ commonLabels:
 
 patches:
   - path: patches/detection-engine-resources.yaml
+  - path: patches/device-inventory-resources.yaml
+  - path: patches/web-ui-resources.yaml

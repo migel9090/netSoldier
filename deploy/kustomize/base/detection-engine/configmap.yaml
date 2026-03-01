@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: detection-engine-threatlist
+data:
+  domains.txt: |
+    evil.example.com
+    c2-callback.example.com
+    malware-drop.example.com
+    phishing-login.example.com
+    exfil-data.example.com
+    iuqerfsodp9ifjaposdfjhgosurijfaewrwergwea.com
+    aafrede.com
+    qeocidywufjkawhnwkf.com

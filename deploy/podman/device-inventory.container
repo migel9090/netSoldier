@@ -1,0 +1,13 @@
+[Unit]
+Description=netSoldier Device Inventory (DHCP listener)
+
+[Container]
+ContainerName=device-inventory
+Image=ghcr.io/migel9090/device-inventory:main
+Network=host
+Environment=LISTEN_ADDR=:8081
+Environment=DB_PATH=/data/devices.db
+Volume=device-inventory-data:/data
+
+[Install]
+WantedBy=multi-user.target

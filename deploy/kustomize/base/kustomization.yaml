@@ -6,3 +6,5 @@ namespace: netsoldier
 resources:
   - namespace.yaml
   - detection-engine/
+  - device-inventory/
+  - web-ui/

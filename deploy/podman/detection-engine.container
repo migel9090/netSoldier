@@ -1,0 +1,18 @@
+[Unit]
+Description=netSoldier Detection Engine
+After=adguard.service
+
+[Container]
+ContainerName=detection-engine
+Image=ghcr.io/migel9090/detection-engine:main
+Network=host
+Environment=LISTEN_ADDR=:8080
+Environment=ADGUARD_URL=http://localhost:3000
+Environment=ADGUARD_USER=admin
+Environment=ADGUARD_PASSWORD=changeme
+Environment=THREATLIST_PATH=/etc/detection-engine/domains.txt
+Environment=POLL_INTERVAL=30s
+Volume=/opt/netsoldier/detections/ioc:/etc/detection-engine:ro
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=AdGuard Home DNS Resolver
+
+[Container]
+ContainerName=adguard
+Image=adguard/adguardhome:v0.107.55
+Network=host
+Volume=adguard-conf:/opt/adguardhome/conf
+Volume=adguard-work:/opt/adguardhome/work
+
+[Install]
+WantedBy=multi-user.target

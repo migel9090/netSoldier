@@ -1,0 +1,14 @@
+[Unit]
+Description=netSoldier Web Dashboard
+After=detection-engine.service device-inventory.service
+
+[Container]
+ContainerName=web-ui
+Image=ghcr.io/migel9090/web-ui:main
+Network=host
+Environment=PORT=8082
+Environment=DEVICE_INVENTORY_URL=http://localhost:8081
+Environment=DETECTION_ENGINE_URL=http://localhost:8080
+
+[Install]
+WantedBy=multi-user.target
