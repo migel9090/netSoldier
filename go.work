@@ -5,4 +5,5 @@ use (
 	./apps/device-inventory
 	./apps/killswitch-controller
 	./apps/threat-intel-sync
+	./tests/e2e
 )
