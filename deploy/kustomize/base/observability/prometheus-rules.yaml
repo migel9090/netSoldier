@@ -1,0 +1,52 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: netsoldier-alerts
+spec:
+  groups:
+    - name: netsoldier.rules
+      rules:
+        - alert: NetSoldierServiceDown
+          expr: up{job=~"detection-engine|device-inventory"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.job }} is down"
+            description: >-
+              {{ $labels.job }} in namespace {{ $labels.namespace }}
+              has been unreachable for over 2 minutes.
+
+        - alert: DetectionEnginePollErrors
+          expr: rate(detection_engine_poll_errors_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Detection engine cannot poll AdGuard"
+            description: >-
+              detection-engine has sustained AdGuard querylog poll errors
+              ({{ $value | printf "%.2f" }}/s over 5 m).
+
+        - alert: WebhookDeliveryFailures
+          expr: rate(detection_engine_webhook_deliveries_total{result="failure"}[5m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Webhook delivery failures"
+            description: >-
+              detection-engine webhook deliveries are failing
+              ({{ $value | printf "%.2f" }}/s over 5 m).
+
+        - alert: WebhookQueueDrops
+          expr: rate(detection_engine_webhook_deliveries_total{result="dropped"}[5m]) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Webhook queue is dropping alerts"
+            description: >-
+              detection-engine webhook queue is full and dropping alerts
+              ({{ $value | printf "%.2f" }}/s over 5 m). The downstream
+              receiver may be unreachable or too slow.

@@ -8,3 +8,4 @@ resources:
   - detection-engine/
   - device-inventory/
   - web-ui/
+  - observability/

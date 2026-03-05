@@ -1,0 +1,413 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netsoldier-system-health
+  labels:
+    grafana_dashboard: "1"
+data:
+  netsoldier-system-health.json: |-
+    {
+      "uid": "netsoldier-system-health",
+      "title": "netSoldier — System Health",
+      "tags": ["netsoldier"],
+      "schemaVersion": 39,
+      "version": 1,
+      "timezone": "browser",
+      "editable": true,
+      "time": { "from": "now-1h", "to": "now" },
+      "refresh": "30s",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "selected": true, "text": "Prometheus", "value": "prometheus" }
+          }
+        ]
+      },
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 100,
+          "type": "row",
+          "title": "Service Status",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false
+        },
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "detection-engine",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+          "targets": [
+            { "expr": "up{job=\"detection-engine\"}", "instant": true, "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": { "text": "DOWN", "color": "red", "index": 0 },
+                    "1": { "text": "UP", "color": "green", "index": 1 }
+                  }
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "green", "value": 1 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "value"
+          }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "device-inventory",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+          "targets": [
+            { "expr": "up{job=\"device-inventory\"}", "instant": true, "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": { "text": "DOWN", "color": "red", "index": 0 },
+                    "1": { "text": "UP", "color": "green", "index": 1 }
+                  }
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "green", "value": 1 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "value"
+          }
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Threat List Size",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+          "targets": [
+            { "expr": "detection_engine_threatlist_domains_total", "instant": true, "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [ { "color": "blue", "value": null } ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Total Alerts",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+          "targets": [
+            { "expr": "detection_engine_alerts_generated_total", "instant": true, "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 10 },
+                  { "color": "red", "value": 50 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "area"
+          }
+        },
+        {
+          "id": 200,
+          "type": "row",
+          "title": "Detection Pipeline",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+          "collapsed": false
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Queries Checked",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "targets": [
+            {
+              "expr": "rate(detection_engine_queries_checked_total[$__rate_interval])",
+              "legendFormat": "queries/s",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Alerts Generated",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "targets": [
+            {
+              "expr": "rate(detection_engine_alerts_generated_total[$__rate_interval])",
+              "legendFormat": "alerts/s",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "color": { "mode": "fixed", "fixedColor": "orange" },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 300,
+          "type": "row",
+          "title": "Reliability",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+          "collapsed": false
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "AdGuard Poll Errors",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+          "targets": [
+            {
+              "expr": "rate(detection_engine_poll_errors_total[$__rate_interval])",
+              "legendFormat": "errors/s",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "color": { "mode": "fixed", "fixedColor": "red" },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "Webhook Deliveries",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+          "targets": [
+            {
+              "expr": "rate(detection_engine_webhook_deliveries_total[$__rate_interval])",
+              "legendFormat": "{{ result }}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "success" },
+                "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } } ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "failure" },
+                "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "dropped" },
+                "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } } ]
+              }
+            ]
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 400,
+          "type": "row",
+          "title": "Infrastructure",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+          "collapsed": false
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "DHCP Packets",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+          "targets": [
+            {
+              "expr": "rate(device_inventory_dhcp_packets_total[$__rate_interval])",
+              "legendFormat": "packets/s",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Goroutines",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+          "targets": [
+            {
+              "expr": "go_goroutines{job=~\"detection-engine|device-inventory\"}",
+              "legendFormat": "{{ job }}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "RSS Memory",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+          "targets": [
+            {
+              "expr": "process_resident_memory_bytes{job=~\"detection-engine|device-inventory\"}",
+              "legendFormat": "{{ job }}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        }
+      ]
+    }
