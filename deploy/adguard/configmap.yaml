@@ -16,23 +16,40 @@ data:
         - 0.0.0.0
       port: 53
       upstream_dns:
+        # Primary: DoH — HTTP/2 based, most compatible
         - https://dns.cloudflare.com/dns-query
         - https://dns.google/dns-query
+        # Additional: DoT — TLS-encrypted, lower overhead
+        - tls://dns.quad9.net
+      fallback_dns:
+        # Fallback: DoT endpoints for when DoH is unreachable
+        - tls://1dot1dot1dot1.cloudflare-dns.com
+        - tls://dns.google
       bootstrap_dns:
+        # Plain DNS needed to resolve DoH/DoT hostnames on first start
         - 1.1.1.1
         - 8.8.8.8
+        - 9.9.9.9
       all_servers: true
+      fastest_addr: false
       cache_size: 4194304
+      cache_ttl_min: 300
+      cache_ttl_max: 86400
       cache_optimistic: true
+      enable_dnssec: true
+      anonymize_client_ip: false
       protection_enabled: true
       filtering_enabled: true
       blocking_mode: default
       blocked_response_ttl: 10
+      edns_client_subnet:
+        enabled: false
     querylog:
       enabled: true
       file_enabled: true
       interval: 168h
-      size_memory: 1000
+      size_memory: 5000
+      anonymize_client_ip: false
     statistics:
       enabled: true
       interval: 168h
@@ -45,4 +62,79 @@ data:
         url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt
         name: AdAway Default Blocklist
         id: 2
+      # threat-intel-sync (step 55) will manage dynamic IoC lists via the
+      # AdGuard API at runtime — no static entry needed here.
+    user_rules: []
+    clients:
+      runtime_sources:
+        whois: false
+        arp: true
+        rdns: true
+        dhcp: true
+        hosts: true
+      persistent:
+        # ── Infrastructure — no filtering, queries logged for baseline ──
+        - name: "router"
+          ids:
+            - "192.168.1.1"
+          tags:
+            - device_other
+          filtering_enabled: false
+          safebrowsing_enabled: false
+          parental_enabled: false
+          safesearch:
+            enabled: false
+          use_global_blocked_services: true
+          blocked_services: []
+          upstreams: []
+          ignore_querylog: false
+          ignore_statistics: false
+        - name: "pi-sensor"
+          ids:
+            - "192.168.1.10"
+          tags:
+            - device_other
+          filtering_enabled: false
+          safebrowsing_enabled: false
+          parental_enabled: false
+          safesearch:
+            enabled: false
+          use_global_blocked_services: true
+          blocked_services: []
+          upstreams: []
+          ignore_querylog: false
+          ignore_statistics: false
+        # ── Admin devices — standard filtering ──────────────────────────
+        - name: "workstation"
+          ids:
+            - "192.168.1.100"
+          tags:
+            - device_pc
+          filtering_enabled: true
+          safebrowsing_enabled: true
+          parental_enabled: false
+          safesearch:
+            enabled: false
+          use_global_blocked_services: true
+          blocked_services: []
+          upstreams: []
+          ignore_querylog: false
+          ignore_statistics: false
+        # ── IoT devices — strict filtering, security-focused upstream ───
+        - name: "iot-devices"
+          ids:
+            - "192.168.1.200/29"
+          tags:
+            - device_other
+          filtering_enabled: true
+          safebrowsing_enabled: true
+          parental_enabled: false
+          safesearch:
+            enabled: false
+          use_global_blocked_services: true
+          blocked_services: []
+          upstreams:
+            - tls://dns.quad9.net
+          ignore_querylog: false
+          ignore_statistics: false
     schema_version: 29
