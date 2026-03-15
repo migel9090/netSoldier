@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/abusech"
+	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/ioc"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/misp"
 )
 
@@ -19,7 +21,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	configureSources()
+	store := ioc.NewStore()
+	configureSources(store)
 
 	addr := envOr("LISTEN_ADDR", ":8083")
 	mux := http.NewServeMux()
@@ -42,7 +45,7 @@ func main() {
 	}()
 
 	<-ctx.Done()
-	slog.Info("shutting down")
+	slog.Info("shutting down", "ioc_count", store.Len())
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -51,7 +54,7 @@ func main() {
 	}
 }
 
-func configureSources() {
+func configureSources(store *ioc.Store) {
 	if url := os.Getenv("MISP_URL"); url != "" {
 		key := envOr("MISP_API_KEY", "")
 		if key == "" {
@@ -61,6 +64,17 @@ func configureSources() {
 		_ = misp.NewClient(url, key)
 		slog.Info("source configured", "source", "misp", "url", url)
 	}
+
+	_ = abusech.NewThreatFoxClient()
+	slog.Info("source configured", "source", "threatfox")
+
+	_ = abusech.NewURLhausClient()
+	slog.Info("source configured", "source", "urlhaus")
+
+	_ = abusech.NewFeodoClient()
+	slog.Info("source configured", "source", "feodo")
+
+	_ = store
 }
 
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {
