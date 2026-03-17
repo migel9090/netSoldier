@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/abusech"
+	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/greynoise"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/ioc"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/misp"
+	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/spamhaus"
 )
 
 func main() {
@@ -73,6 +75,16 @@ func configureSources(store *ioc.Store) {
 
 	_ = abusech.NewFeodoClient()
 	slog.Info("source configured", "source", "feodo")
+
+	if key := os.Getenv("GREYNOISE_API_KEY"); key != "" {
+		_ = greynoise.NewClient(key)
+		slog.Info("source configured", "source", "greynoise")
+	} else {
+		slog.Info("source skipped (no GREYNOISE_API_KEY)", "source", "greynoise")
+	}
+
+	_ = spamhaus.NewClient()
+	slog.Info("source configured", "source", "spamhaus-drop")
 
 	_ = store
 }
