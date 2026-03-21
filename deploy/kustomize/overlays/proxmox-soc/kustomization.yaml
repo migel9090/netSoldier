@@ -3,6 +3,7 @@ kind: Kustomization
 
 resources:
   - ../../base
+  - ../../base/misp
 
 commonLabels:
   app.kubernetes.io/instance: proxmox-soc

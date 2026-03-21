@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: misp-config
+data:
+  BASE_URL: "https://misp.netsoldier.local"
+  ADMIN_EMAIL: "admin@netsoldier.local"
+  ADMIN_ORG: "netSoldier"
+  REDIS_FQDN: "misp-redis"
+  MYSQL_HOST: "misp-mariadb"
+  MYSQL_PORT: "3306"
+  MYSQL_DATABASE: "misp"
+  MYSQL_USER: "misp"
+  WORKERS_ENABLED: "true"
+  CRON_USER_ID: "1"
+  # Feed scheduler: default feeds loaded via MISP API after first boot.
+  # threat-intel-sync connects to MISP at MISP_URL using the admin API
+  # key stored in the SOPS-encrypted Secret.
+  #
+  # Recommended feeds (configure in MISP UI → Sync Actions → Feeds):
+  #   - CIRCL OSINT Feed (https://www.circl.lu/doc/misp/feed-osint/)
+  #   - Botvrij.eu (https://www.botvrij.eu/data/feed-osint/)
+  #   - abuse.ch ThreatFox (https://threatfox.abuse.ch/export/misp/)
+  #   - abuse.ch URLhaus (https://urlhaus.abuse.ch/downloads/misp/)
+  #
+  # Schedule pull frequency in MISP → Server Settings → Scheduled Tasks.
