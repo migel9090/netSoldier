@@ -77,6 +77,19 @@ func (s *Store) Upsert(mac, ip, hostname, fingerprint, vendorClass string) error
 	return err
 }
 
+// EnrichByIP updates hostname for an existing device found by IP address.
+// Only sets hostname if the new value is non-empty; always bumps last_seen.
+func (s *Store) EnrichByIP(ip, hostname string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(`
+		UPDATE devices SET
+			hostname  = CASE WHEN ? != '' THEN ? ELSE hostname END,
+			last_seen = ?
+		WHERE ip = ?`,
+		hostname, hostname, now, ip)
+	return err
+}
+
 func (s *Store) List() ([]Device, error) {
 	rows, err := s.db.Query(`
 		SELECT mac, ip, hostname, fingerprint, vendor_class, first_seen, last_seen

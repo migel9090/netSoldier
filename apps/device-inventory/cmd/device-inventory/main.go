@@ -12,6 +12,10 @@ import (
 
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/api"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/dhcp"
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/lldp"
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/mdns"
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/ssdp"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -65,6 +69,10 @@ func main() {
 		}
 	}()
 
+	discoveryCh := make(chan discovery.Info, 64)
+	startDiscoveryListeners(ctx, discoveryCh)
+	go processDiscoveries(ctx, db, discoveryCh)
+
 	handler := api.NewHandler(db)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /devices", handler.ListDevices)
@@ -101,6 +109,47 @@ func main() {
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func startDiscoveryListeners(ctx context.Context, ch chan<- discovery.Info) {
+	go func() {
+		if err := mdns.NewListener(ch).Run(ctx); err != nil {
+			slog.Error("mdns listener failed", "error", err)
+		}
+	}()
+	go func() {
+		if err := ssdp.NewListener(ch).Run(ctx); err != nil {
+			slog.Error("ssdp listener failed", "error", err)
+		}
+	}()
+	go func() {
+		if err := lldp.NewListener(ch).Run(ctx); err != nil {
+			slog.Error("lldp listener failed", "error", err)
+		}
+	}()
+}
+
+func processDiscoveries(ctx context.Context, db *store.Store, ch <-chan discovery.Info) {
+	for {
+		select {
+		case info := <-ch:
+			if info.MAC != "" {
+				if err := db.Upsert(info.MAC, info.IP, info.Hostname, "", ""); err != nil {
+					slog.Error("discovery upsert failed", "protocol", info.Protocol, "error", err)
+				} else {
+					slog.Info("device discovered", "protocol", info.Protocol, "mac", info.MAC, "hostname", info.Hostname)
+				}
+			} else if info.IP != "" && info.Hostname != "" {
+				if err := db.EnrichByIP(info.IP, info.Hostname); err != nil {
+					slog.Error("discovery enrich failed", "protocol", info.Protocol, "error", err)
+				} else {
+					slog.Debug("device enriched", "protocol", info.Protocol, "ip", info.IP, "hostname", info.Hostname)
+				}
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func envOr(key, fallback string) string {
