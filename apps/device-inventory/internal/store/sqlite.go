@@ -14,6 +14,7 @@ type Device struct {
 	Hostname    string    `json:"hostname"`
 	Fingerprint string    `json:"dhcp_fingerprint"`
 	VendorClass string    `json:"vendor_class"`
+	Vendor      string    `json:"vendor"`
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
 }
@@ -47,6 +48,7 @@ func Open(path string) (*Store, error) {
 		hostname     TEXT NOT NULL DEFAULT '',
 		fingerprint  TEXT NOT NULL DEFAULT '',
 		vendor_class TEXT NOT NULL DEFAULT '',
+		vendor       TEXT NOT NULL DEFAULT '',
 		first_seen   TEXT NOT NULL,
 		last_seen    TEXT NOT NULL
 	)`)
@@ -55,6 +57,9 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("create table: %w", err)
 	}
 
+	// schema migration: add vendor column if upgrading from older schema
+	db.Exec(`ALTER TABLE devices ADD COLUMN vendor TEXT NOT NULL DEFAULT ''`)
+
 	return &Store{db: db}, nil
 }
 
@@ -62,18 +67,19 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-func (s *Store) Upsert(mac, ip, hostname, fingerprint, vendorClass string) error {
+func (s *Store) Upsert(mac, ip, hostname, fingerprint, vendorClass, vendor string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.Exec(`
-		INSERT INTO devices (mac, ip, hostname, fingerprint, vendor_class, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO devices (mac, ip, hostname, fingerprint, vendor_class, vendor, first_seen, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(mac) DO UPDATE SET
 			ip           = CASE WHEN excluded.ip != '' THEN excluded.ip ELSE devices.ip END,
 			hostname     = CASE WHEN excluded.hostname != '' THEN excluded.hostname ELSE devices.hostname END,
 			fingerprint  = CASE WHEN excluded.fingerprint != '' THEN excluded.fingerprint ELSE devices.fingerprint END,
 			vendor_class = CASE WHEN excluded.vendor_class != '' THEN excluded.vendor_class ELSE devices.vendor_class END,
+			vendor       = CASE WHEN excluded.vendor != '' THEN excluded.vendor ELSE devices.vendor END,
 			last_seen    = excluded.last_seen`,
-		mac, ip, hostname, fingerprint, vendorClass, now, now)
+		mac, ip, hostname, fingerprint, vendorClass, vendor, now, now)
 	return err
 }
 
@@ -92,7 +98,7 @@ func (s *Store) EnrichByIP(ip, hostname string) error {
 
 func (s *Store) List() ([]Device, error) {
 	rows, err := s.db.Query(`
-		SELECT mac, ip, hostname, fingerprint, vendor_class, first_seen, last_seen
+		SELECT mac, ip, hostname, fingerprint, vendor_class, vendor, first_seen, last_seen
 		FROM devices ORDER BY last_seen DESC`)
 	if err != nil {
 		return nil, err
@@ -103,7 +109,7 @@ func (s *Store) List() ([]Device, error) {
 	for rows.Next() {
 		var d Device
 		var first, last string
-		if err := rows.Scan(&d.MAC, &d.IP, &d.Hostname, &d.Fingerprint, &d.VendorClass, &first, &last); err != nil {
+		if err := rows.Scan(&d.MAC, &d.IP, &d.Hostname, &d.Fingerprint, &d.VendorClass, &d.Vendor, &first, &last); err != nil {
 			return nil, err
 		}
 		d.FirstSeen, _ = time.Parse(time.RFC3339, first)

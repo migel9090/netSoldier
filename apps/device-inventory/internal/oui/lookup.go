@@ -1,0 +1,177 @@
+package oui
+
+import "strings"
+
+// Lookup returns the manufacturer name for a MAC address, or "" if unknown.
+// Accepts any common format (aa:bb:cc:dd:ee:ff, AA-BB-CC-DD-EE-FF, etc.).
+func Lookup(mac string) string {
+	if len(mac) < 8 {
+		return ""
+	}
+	prefix := strings.ToUpper(mac[:8])
+	prefix = strings.ReplaceAll(prefix, "-", ":")
+	if v, ok := db[prefix]; ok {
+		return v
+	}
+	return ""
+}
+
+var db = map[string]string{
+	// ── Apple ──────────────────────────────────────────
+	"00:03:93": "Apple", "00:0A:27": "Apple", "00:0A:95": "Apple",
+	"00:0D:93": "Apple", "00:11:24": "Apple", "00:14:51": "Apple",
+	"00:16:CB": "Apple", "00:17:F2": "Apple", "00:19:E3": "Apple",
+	"00:1B:63": "Apple", "00:1C:B3": "Apple", "00:1D:4F": "Apple",
+	"00:1E:52": "Apple", "00:1F:5B": "Apple", "00:1F:F3": "Apple",
+	"00:21:E9": "Apple", "00:22:41": "Apple", "00:23:12": "Apple",
+	"00:23:32": "Apple", "00:23:6C": "Apple", "00:23:DF": "Apple",
+	"00:24:36": "Apple", "00:25:00": "Apple", "00:25:4B": "Apple",
+	"00:25:BC": "Apple", "00:26:08": "Apple", "00:26:4A": "Apple",
+	"00:26:B0": "Apple", "00:26:BB": "Apple", "00:50:E4": "Apple",
+	"00:C6:10": "Apple", "04:0C:CE": "Apple", "04:15:52": "Apple",
+	"04:26:65": "Apple", "04:F7:E4": "Apple", "08:66:98": "Apple",
+	"14:99:E2": "Apple", "18:AF:61": "Apple", "20:78:F0": "Apple",
+	"24:A0:74": "Apple", "28:6A:BA": "Apple", "2C:BE:08": "Apple",
+	"34:36:3B": "Apple", "38:C9:86": "Apple", "3C:15:C2": "Apple",
+	"40:A6:D9": "Apple", "44:D8:84": "Apple", "48:D7:05": "Apple",
+	"54:26:96": "Apple", "5C:F7:E6": "Apple", "60:03:08": "Apple",
+	"64:A3:CB": "Apple", "68:5B:35": "Apple", "6C:94:66": "Apple",
+	"70:11:24": "Apple", "74:E2:F5": "Apple", "78:7B:8A": "Apple",
+	"7C:D1:C3": "Apple", "80:E6:50": "Apple", "84:FC:FE": "Apple",
+	"88:66:A5": "Apple", "8C:85:90": "Apple", "90:84:0D": "Apple",
+	"98:01:A7": "Apple", "9C:20:7B": "Apple", "A4:D1:D2": "Apple",
+	"AC:BC:32": "Apple", "B0:34:95": "Apple", "B8:17:C2": "Apple",
+	"BC:52:B7": "Apple", "C0:CE:CD": "Apple", "C8:2A:14": "Apple",
+	"CC:08:E0": "Apple", "D0:03:4B": "Apple", "D4:61:9D": "Apple",
+	"DC:2B:2A": "Apple", "E0:B9:BA": "Apple", "E4:25:E7": "Apple",
+	"F0:B4:79": "Apple", "F4:5C:89": "Apple", "F8:1E:DF": "Apple",
+	// ── Samsung ───────────────────────────────────────
+	"00:07:AB": "Samsung", "00:12:FB": "Samsung", "00:15:99": "Samsung",
+	"00:16:32": "Samsung", "00:17:D5": "Samsung", "00:18:AF": "Samsung",
+	"00:1A:8A": "Samsung", "00:1C:43": "Samsung", "00:1D:25": "Samsung",
+	"00:1E:E1": "Samsung", "00:1E:E2": "Samsung", "00:21:19": "Samsung",
+	"00:23:39": "Samsung", "00:23:99": "Samsung", "00:23:D6": "Samsung",
+	"00:23:D7": "Samsung", "00:24:54": "Samsung", "00:24:90": "Samsung",
+	"00:24:91": "Samsung", "00:25:66": "Samsung", "00:25:67": "Samsung",
+	"00:26:37": "Samsung", "08:D4:2B": "Samsung", "10:1D:C0": "Samsung",
+	"14:49:E0": "Samsung", "30:C7:AE": "Samsung", "34:23:BA": "Samsung",
+	"44:4E:1A": "Samsung", "50:01:BB": "Samsung", "54:92:BE": "Samsung",
+	"5C:3A:45": "Samsung", "78:52:1A": "Samsung", "84:25:DB": "Samsung",
+	"8C:71:F8": "Samsung", "94:35:0A": "Samsung", "A8:7C:01": "Samsung",
+	"BC:85:56": "Samsung", "C0:BD:D1": "Samsung", "D0:22:BE": "Samsung",
+	"E4:7C:F9": "Samsung", "F0:25:B7": "Samsung", "F4:7B:5E": "Samsung",
+	// ── Google ─────────────────────────────────────────
+	"08:9E:08": "Google", "20:DF:B9": "Google", "30:FD:38": "Google",
+	"3C:5A:B4": "Google", "48:D6:D5": "Google", "54:60:09": "Google",
+	"6C:AD:F8": "Google", "94:EB:2C": "Google", "A4:77:33": "Google",
+	"F4:F5:D8": "Google", "F4:F5:E8": "Google",
+	// ── Amazon ─────────────────────────────────────────
+	"00:FC:8B": "Amazon", "0C:47:C9": "Amazon", "10:CE:A9": "Amazon",
+	"14:91:82": "Amazon", "18:74:2E": "Amazon", "34:D2:70": "Amazon",
+	"38:F7:3D": "Amazon", "40:B4:CD": "Amazon", "44:65:0D": "Amazon",
+	"50:DC:E7": "Amazon", "68:37:E9": "Amazon", "68:54:FD": "Amazon",
+	"74:C2:46": "Amazon", "84:D6:D0": "Amazon", "A0:02:DC": "Amazon",
+	"AC:63:BE": "Amazon", "B0:FC:0D": "Amazon", "F0:F0:A4": "Amazon",
+	"FC:65:DE": "Amazon", "FC:A1:83": "Amazon",
+	// ── Intel ──────────────────────────────────────────
+	"00:02:B3": "Intel", "00:03:47": "Intel", "00:0E:0C": "Intel",
+	"00:11:11": "Intel", "00:13:02": "Intel", "00:13:20": "Intel",
+	"00:13:CE": "Intel", "00:13:E8": "Intel", "00:15:00": "Intel",
+	"00:15:17": "Intel", "00:16:76": "Intel", "00:16:EA": "Intel",
+	"00:18:DE": "Intel", "00:19:D1": "Intel", "00:1B:21": "Intel",
+	"00:1B:77": "Intel", "00:1C:BF": "Intel", "00:1D:E0": "Intel",
+	"00:1E:64": "Intel", "00:1E:65": "Intel", "00:1F:3B": "Intel",
+	"00:1F:3C": "Intel", "00:20:7B": "Intel", "00:21:5C": "Intel",
+	"00:21:6A": "Intel", "00:22:FA": "Intel", "00:22:FB": "Intel",
+	"00:24:D6": "Intel", "00:24:D7": "Intel", "00:27:10": "Intel",
+	// ── Raspberry Pi ───────────────────────────────────
+	"28:CD:C1": "Raspberry Pi", "B8:27:EB": "Raspberry Pi",
+	"D8:3A:DD": "Raspberry Pi", "DC:A6:32": "Raspberry Pi",
+	"E4:5F:01": "Raspberry Pi",
+	// ── Network equipment ──────────────────────────────
+	"00:00:0C": "Cisco", "00:01:42": "Cisco", "00:01:64": "Cisco",
+	"00:0C:85": "Cisco", "00:0D:BC": "Cisco", "00:12:D9": "Cisco",
+	"00:16:C7": "Cisco", "00:17:0E": "Cisco", "00:17:94": "Cisco",
+	"00:18:18": "Cisco", "00:18:B9": "Cisco", "00:19:06": "Cisco",
+	"00:1A:A1": "Cisco", "00:1B:53": "Cisco", "00:1C:0E": "Cisco",
+	"24:01:C7": "Cisco", "B0:7D:47": "Cisco",
+	"00:14:6C": "Netgear", "00:1B:2F": "Netgear", "00:1E:2A": "Netgear",
+	"00:1F:33": "Netgear", "00:22:3F": "Netgear", "00:24:B2": "Netgear",
+	"00:26:F2": "Netgear", "20:E5:2A": "Netgear", "2C:B0:5D": "Netgear",
+	"04:A1:51": "Netgear", "6C:B0:CE": "Netgear",
+	"18:E8:29": "Ubiquiti", "24:5A:4C": "Ubiquiti", "44:D9:E7": "Ubiquiti",
+	"68:72:51": "Ubiquiti", "74:83:C2": "Ubiquiti", "78:8A:20": "Ubiquiti",
+	"80:2A:A8": "Ubiquiti", "B4:FB:E4": "Ubiquiti", "DC:9F:DB": "Ubiquiti",
+	"FC:EC:DA": "Ubiquiti",
+	"00:0C:42": "MikroTik", "00:17:0F": "MikroTik", "2C:C8:1B": "MikroTik",
+	"48:8F:5A": "MikroTik", "4C:5E:0C": "MikroTik", "64:D1:54": "MikroTik",
+	"6C:3B:6B": "MikroTik", "74:4D:28": "MikroTik", "B8:69:F4": "MikroTik",
+	"CC:2D:E0": "MikroTik", "D4:CA:6D": "MikroTik", "E4:8D:8C": "MikroTik",
+	// ── TP-Link ────────────────────────────────────────
+	"00:1D:0F": "TP-Link", "00:23:CD": "TP-Link", "00:27:19": "TP-Link",
+	"10:FE:ED": "TP-Link", "14:CC:20": "TP-Link", "14:CF:92": "TP-Link",
+	"18:A6:F7": "TP-Link", "1C:3B:F3": "TP-Link", "30:B5:C2": "TP-Link",
+	"50:C7:BF": "TP-Link", "54:C8:0F": "TP-Link", "60:32:B1": "TP-Link",
+	"64:56:01": "TP-Link", "78:44:76": "TP-Link", "98:DA:C4": "TP-Link",
+	"B0:4E:26": "TP-Link", "C0:25:E9": "TP-Link", "E8:DE:27": "TP-Link",
+	// ── Smart home / IoT ───────────────────────────────
+	"00:17:88": "Philips", "00:B5:6D": "Philips Hue",
+	"00:04:20": "Sonos", "34:7E:5C": "Sonos", "48:A6:B8": "Sonos",
+	"5C:AA:FD": "Sonos", "78:28:CA": "Sonos", "94:9F:3E": "Sonos",
+	"B8:E9:37": "Sonos",
+	"7C:2F:80": "Ring", "34:3E:A4": "Ring",
+	"00:1D:C9": "GainSpan", "18:B4:30": "Nest", "64:16:66": "Nest",
+	"24:0A:C4": "Espressif", "30:AE:A4": "Espressif",
+	"A4:CF:12": "Espressif", "AC:67:B2": "Espressif",
+	"BC:DD:C2": "Espressif", "CC:50:E3": "Espressif",
+	"DC:4F:22": "Espressif", "EC:FA:BC": "Espressif",
+	"B0:A7:32": "Tuya", "D8:1F:12": "Tuya",
+	// ── Microsoft / Xbox ───────────────────────────────
+	"00:03:FF": "Microsoft", "00:0D:3A": "Microsoft",
+	"00:12:5A": "Microsoft", "00:15:5D": "Microsoft",
+	"00:17:FA": "Microsoft", "00:1D:D8": "Microsoft",
+	"00:22:48": "Microsoft", "00:25:AE": "Microsoft",
+	"28:18:78": "Microsoft", "60:45:BD": "Microsoft",
+	"7C:1E:52": "Microsoft", "B4:0E:DE": "Microsoft",
+	// ── Dell / HP / Lenovo ─────────────────────────────
+	"00:06:5B": "Dell", "00:08:74": "Dell", "00:0B:DB": "Dell",
+	"00:0D:56": "Dell", "00:0F:1F": "Dell", "00:11:43": "Dell",
+	"00:12:3F": "Dell", "00:13:72": "Dell", "00:14:22": "Dell",
+	"00:15:C5": "Dell", "00:18:8B": "Dell", "00:19:B9": "Dell",
+	"00:1A:A0": "Dell", "00:1C:23": "Dell", "00:1D:09": "Dell",
+	"00:1E:4F": "Dell", "00:1E:C9": "Dell", "00:21:70": "Dell",
+	"00:21:9B": "Dell", "00:22:19": "Dell", "00:24:E8": "Dell",
+	"00:25:64": "Dell",
+	"00:01:E6": "HP", "00:02:A5": "HP", "00:08:02": "HP",
+	"00:0B:CD": "HP", "00:0D:9D": "HP", "00:0E:7F": "HP",
+	"00:0F:20": "HP", "00:10:83": "HP", "00:11:0A": "HP",
+	"00:11:85": "HP", "00:12:79": "HP", "00:13:21": "HP",
+	"00:14:38": "HP", "00:15:60": "HP", "00:17:A4": "HP",
+	"00:18:FE": "HP", "00:1A:4B": "HP", "00:1B:78": "HP",
+	"00:1C:C4": "HP", "00:1E:0B": "HP", "00:21:5A": "HP",
+	"00:22:64": "HP", "00:24:81": "HP", "00:25:B3": "HP",
+	"00:0C:F1": "Lenovo", "00:09:2D": "Lenovo",
+	// ── Broadcom / Qualcomm / MediaTek ─────────────────
+	"00:05:B5": "Broadcom", "00:10:18": "Broadcom",
+	"00:90:4C": "Broadcom", "00:1A:2B": "Broadcom",
+	"00:03:7F": "Qualcomm", "00:0A:F5": "Qualcomm",
+	"00:24:D4": "Xiaomi", "28:6C:07": "Xiaomi",
+	"34:CE:00": "Xiaomi", "50:64:2B": "Xiaomi",
+	"58:44:98": "Xiaomi", "64:09:80": "Xiaomi",
+	"78:11:DC": "Xiaomi", "7C:1D:D9": "Xiaomi",
+	"8C:DE:F9": "Xiaomi", "9C:99:A0": "Xiaomi",
+	"AC:C1:EE": "Xiaomi", "F0:B4:29": "Xiaomi",
+	"FC:D7:33": "Xiaomi",
+	// ── TV / Streaming ─────────────────────────────────
+	"00:04:9F": "LG", "00:1C:62": "LG", "00:1E:75": "LG",
+	"00:22:A9": "LG", "00:AA:70": "LG", "10:68:3F": "LG",
+	"20:3D:BD": "LG", "34:FC:EF": "LG", "58:A2:B5": "LG",
+	"A8:23:FE": "LG", "CC:2D:83": "LG",
+	"00:E0:91": "LG",
+	"AC:3A:7A": "Roku", "B0:A7:37": "Roku", "C8:3A:6B": "Roku",
+	"D4:E2:2F": "Roku", "DC:3A:5E": "Roku",
+	"00:04:4B": "Nvidia", "00:0A:E6": "Nvidia", "48:B0:2D": "Nvidia",
+	// ── Misc ───────────────────────────────────────────
+	"B4:2E:99": "Gree", "10:27:F5": "Hon Hai/Foxconn",
+	"00:09:B0": "Ericsson", "00:17:10": "Casa Systems",
+}

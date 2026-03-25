@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/api"
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/arp"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/dhcp"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/lldp"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/mdns"
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/oui"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/ssdp"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
@@ -58,7 +60,8 @@ func main() {
 			select {
 			case info := <-deviceCh:
 				dhcpPacketsTotal.Inc()
-				if err := db.Upsert(info.MAC, info.IP, info.Hostname, info.Fingerprint, info.VendorClass); err != nil {
+				vendor := oui.Lookup(info.MAC)
+				if err := db.Upsert(info.MAC, info.IP, info.Hostname, info.Fingerprint, info.VendorClass, vendor); err != nil {
 					slog.Error("device upsert failed", "mac", info.MAC, "error", err)
 				} else {
 					slog.Info("device seen", "mac", info.MAC, "ip", info.IP, "hostname", info.Hostname)
@@ -127,6 +130,30 @@ func startDiscoveryListeners(ctx context.Context, ch chan<- discovery.Info) {
 			slog.Error("lldp listener failed", "error", err)
 		}
 	}()
+	go func() {
+		if err := arp.NewListener(ch).Run(ctx); err != nil {
+			slog.Error("arp listener failed", "error", err)
+		}
+	}()
+
+	if subnet := os.Getenv("ARP_SCAN_SUBNET"); subnet != "" {
+		interval := 5 * time.Minute
+		if v := os.Getenv("ARP_SCAN_INTERVAL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil {
+				interval = d
+			}
+		}
+		scanner, err := arp.NewScanner(subnet, interval)
+		if err != nil {
+			slog.Error("arp scanner init failed", "subnet", subnet, "error", err)
+		} else {
+			go func() {
+				if err := scanner.Run(ctx); err != nil {
+					slog.Error("arp scanner failed", "error", err)
+				}
+			}()
+		}
+	}
 }
 
 func processDiscoveries(ctx context.Context, db *store.Store, ch <-chan discovery.Info) {
@@ -134,7 +161,8 @@ func processDiscoveries(ctx context.Context, db *store.Store, ch <-chan discover
 		select {
 		case info := <-ch:
 			if info.MAC != "" {
-				if err := db.Upsert(info.MAC, info.IP, info.Hostname, "", ""); err != nil {
+				vendor := oui.Lookup(info.MAC)
+				if err := db.Upsert(info.MAC, info.IP, info.Hostname, "", "", vendor); err != nil {
 					slog.Error("discovery upsert failed", "protocol", info.Protocol, "error", err)
 				} else {
 					slog.Info("device discovered", "protocol", info.Protocol, "mac", info.MAC, "hostname", info.Hostname)
