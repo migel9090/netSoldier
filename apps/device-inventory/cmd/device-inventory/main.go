@@ -14,6 +14,7 @@ import (
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/arp"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/dhcp"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/fingerbank"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/lldp"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/mdns"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/oui"
@@ -61,10 +62,15 @@ func main() {
 			case info := <-deviceCh:
 				dhcpPacketsTotal.Inc()
 				vendor := oui.Lookup(info.MAC)
-				if err := db.Upsert(info.MAC, info.IP, info.Hostname, info.Fingerprint, info.VendorClass, vendor); err != nil {
+				var osName, devType string
+				if p := fingerbank.Lookup(info.Fingerprint, info.VendorClass); p != nil {
+					osName = p.OS
+					devType = p.DeviceType
+				}
+				if err := db.UpsertFull(info.MAC, info.IP, info.Hostname, info.Fingerprint, info.VendorClass, vendor, osName, devType); err != nil {
 					slog.Error("device upsert failed", "mac", info.MAC, "error", err)
 				} else {
-					slog.Info("device seen", "mac", info.MAC, "ip", info.IP, "hostname", info.Hostname)
+					slog.Info("device seen", "mac", info.MAC, "ip", info.IP, "hostname", info.Hostname, "os", osName, "type", devType)
 				}
 			case <-ctx.Done():
 				return

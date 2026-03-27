@@ -1,8 +1,11 @@
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -15,6 +18,9 @@ type Device struct {
 	Fingerprint string    `json:"dhcp_fingerprint"`
 	VendorClass string    `json:"vendor_class"`
 	Vendor      string    `json:"vendor"`
+	OS          string    `json:"os"`
+	DeviceType  string    `json:"device_type"`
+	StableID    string    `json:"stable_id,omitempty"`
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
 }
@@ -49,6 +55,9 @@ func Open(path string) (*Store, error) {
 		fingerprint  TEXT NOT NULL DEFAULT '',
 		vendor_class TEXT NOT NULL DEFAULT '',
 		vendor       TEXT NOT NULL DEFAULT '',
+		os           TEXT NOT NULL DEFAULT '',
+		device_type  TEXT NOT NULL DEFAULT '',
+		stable_id    TEXT NOT NULL DEFAULT '',
 		first_seen   TEXT NOT NULL,
 		last_seen    TEXT NOT NULL
 	)`)
@@ -57,8 +66,10 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("create table: %w", err)
 	}
 
-	// schema migration: add vendor column if upgrading from older schema
-	db.Exec(`ALTER TABLE devices ADD COLUMN vendor TEXT NOT NULL DEFAULT ''`)
+	for _, col := range []string{"vendor", "os", "device_type", "stable_id"} {
+		db.Exec(fmt.Sprintf(`ALTER TABLE devices ADD COLUMN %s TEXT NOT NULL DEFAULT ''`, col))
+	}
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_stable_id ON devices(stable_id) WHERE stable_id != ''`)
 
 	return &Store{db: db}, nil
 }
@@ -68,19 +79,84 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) Upsert(mac, ip, hostname, fingerprint, vendorClass, vendor string) error {
+	return s.UpsertFull(mac, ip, hostname, fingerprint, vendorClass, vendor, "", "")
+}
+
+// UpsertFull inserts or updates a device with OS/device_type profiling.
+// For MAC-randomized devices it correlates by vendorClass+hostname to
+// track the same physical device across MAC rotations.
+func (s *Store) UpsertFull(mac, ip, hostname, fingerprint, vendorClass, vendor, os, deviceType string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	if IsRandomizedMAC(mac) && (vendorClass != "" || hostname != "") {
+		sid := StableID(vendorClass, hostname)
+		res, err := s.db.Exec(`
+			UPDATE devices SET
+				mac          = ?,
+				ip           = CASE WHEN ? != '' THEN ? ELSE ip END,
+				hostname     = CASE WHEN ? != '' THEN ? ELSE hostname END,
+				fingerprint  = CASE WHEN ? != '' THEN ? ELSE fingerprint END,
+				vendor_class = CASE WHEN ? != '' THEN ? ELSE vendor_class END,
+				vendor       = CASE WHEN ? != '' THEN ? ELSE vendor END,
+				os           = CASE WHEN ? != '' THEN ? ELSE os END,
+				device_type  = CASE WHEN ? != '' THEN ? ELSE device_type END,
+				last_seen    = ?
+			WHERE stable_id = ?`,
+			mac,
+			ip, ip, hostname, hostname,
+			fingerprint, fingerprint, vendorClass, vendorClass,
+			vendor, vendor, os, os, deviceType, deviceType,
+			now, sid)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			return nil
+		}
+		return s.insertDevice(mac, ip, hostname, fingerprint, vendorClass, vendor, os, deviceType, sid, now)
+	}
+
+	return s.insertDevice(mac, ip, hostname, fingerprint, vendorClass, vendor, os, deviceType, "", now)
+}
+
+func (s *Store) insertDevice(mac, ip, hostname, fingerprint, vendorClass, vendor, os, deviceType, stableID, now string) error {
 	_, err := s.db.Exec(`
-		INSERT INTO devices (mac, ip, hostname, fingerprint, vendor_class, vendor, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO devices (mac, ip, hostname, fingerprint, vendor_class, vendor, os, device_type, stable_id, first_seen, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(mac) DO UPDATE SET
 			ip           = CASE WHEN excluded.ip != '' THEN excluded.ip ELSE devices.ip END,
 			hostname     = CASE WHEN excluded.hostname != '' THEN excluded.hostname ELSE devices.hostname END,
 			fingerprint  = CASE WHEN excluded.fingerprint != '' THEN excluded.fingerprint ELSE devices.fingerprint END,
 			vendor_class = CASE WHEN excluded.vendor_class != '' THEN excluded.vendor_class ELSE devices.vendor_class END,
 			vendor       = CASE WHEN excluded.vendor != '' THEN excluded.vendor ELSE devices.vendor END,
+			os           = CASE WHEN excluded.os != '' THEN excluded.os ELSE devices.os END,
+			device_type  = CASE WHEN excluded.device_type != '' THEN excluded.device_type ELSE devices.device_type END,
+			stable_id    = CASE WHEN excluded.stable_id != '' THEN excluded.stable_id ELSE devices.stable_id END,
 			last_seen    = excluded.last_seen`,
-		mac, ip, hostname, fingerprint, vendorClass, vendor, now, now)
+		mac, ip, hostname, fingerprint, vendorClass, vendor, os, deviceType, stableID, now, now)
 	return err
+}
+
+// IsRandomizedMAC returns true if the MAC has the locally-administered bit set,
+// indicating a privacy-randomized address (iOS 14+, Android 10+, Windows 10+).
+func IsRandomizedMAC(mac string) bool {
+	mac = strings.ReplaceAll(mac, "-", ":")
+	parts := strings.SplitN(mac, ":", 2)
+	if len(parts) == 0 {
+		return false
+	}
+	b, err := strconv.ParseUint(parts[0], 16, 8)
+	if err != nil {
+		return false
+	}
+	return b&0x02 != 0
+}
+
+// StableID computes a deterministic identifier from DHCP attributes that
+// remain constant across MAC randomization rotations.
+func StableID(vendorClass, hostname string) string {
+	h := sha256.Sum256([]byte(vendorClass + "|" + hostname))
+	return fmt.Sprintf("%x", h[:6])
 }
 
 // EnrichByIP updates hostname for an existing device found by IP address.
@@ -98,7 +174,7 @@ func (s *Store) EnrichByIP(ip, hostname string) error {
 
 func (s *Store) List() ([]Device, error) {
 	rows, err := s.db.Query(`
-		SELECT mac, ip, hostname, fingerprint, vendor_class, vendor, first_seen, last_seen
+		SELECT mac, ip, hostname, fingerprint, vendor_class, vendor, os, device_type, stable_id, first_seen, last_seen
 		FROM devices ORDER BY last_seen DESC`)
 	if err != nil {
 		return nil, err
@@ -109,7 +185,8 @@ func (s *Store) List() ([]Device, error) {
 	for rows.Next() {
 		var d Device
 		var first, last string
-		if err := rows.Scan(&d.MAC, &d.IP, &d.Hostname, &d.Fingerprint, &d.VendorClass, &d.Vendor, &first, &last); err != nil {
+		if err := rows.Scan(&d.MAC, &d.IP, &d.Hostname, &d.Fingerprint, &d.VendorClass, &d.Vendor,
+			&d.OS, &d.DeviceType, &d.StableID, &first, &last); err != nil {
 			return nil, err
 		}
 		d.FirstSeen, _ = time.Parse(time.RFC3339, first)
