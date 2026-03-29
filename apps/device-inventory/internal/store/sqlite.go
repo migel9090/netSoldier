@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ type Device struct {
 	OS          string    `json:"os"`
 	DeviceType  string    `json:"device_type"`
 	StableID    string    `json:"stable_id,omitempty"`
+	Labels      []string  `json:"labels"`
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
 }
@@ -58,6 +60,7 @@ func Open(path string) (*Store, error) {
 		os           TEXT NOT NULL DEFAULT '',
 		device_type  TEXT NOT NULL DEFAULT '',
 		stable_id    TEXT NOT NULL DEFAULT '',
+		labels       TEXT NOT NULL DEFAULT '[]',
 		first_seen   TEXT NOT NULL,
 		last_seen    TEXT NOT NULL
 	)`)
@@ -69,6 +72,7 @@ func Open(path string) (*Store, error) {
 	for _, col := range []string{"vendor", "os", "device_type", "stable_id"} {
 		db.Exec(fmt.Sprintf(`ALTER TABLE devices ADD COLUMN %s TEXT NOT NULL DEFAULT ''`, col))
 	}
+	db.Exec(`ALTER TABLE devices ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_stable_id ON devices(stable_id) WHERE stable_id != ''`)
 
 	return &Store{db: db}, nil
@@ -137,6 +141,47 @@ func (s *Store) insertDevice(mac, ip, hostname, fingerprint, vendorClass, vendor
 	return err
 }
 
+// SetLabels replaces the label set for a device identified by MAC.
+func (s *Store) SetLabels(mac string, labels []string) error {
+	b, err := json.Marshal(labels)
+	if err != nil {
+		return fmt.Errorf("marshal labels: %w", err)
+	}
+	res, err := s.db.Exec(`UPDATE devices SET labels = ? WHERE mac = ?`, string(b), mac)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("device %s not found", mac)
+	}
+	return nil
+}
+
+// GetDevice returns a single device by MAC, or nil if not found.
+func (s *Store) GetDevice(mac string) (*Device, error) {
+	var d Device
+	var first, last, labelsJSON string
+	err := s.db.QueryRow(`
+		SELECT mac, ip, hostname, fingerprint, vendor_class, vendor, os, device_type, stable_id, labels, first_seen, last_seen
+		FROM devices WHERE mac = ?`, mac).Scan(
+		&d.MAC, &d.IP, &d.Hostname, &d.Fingerprint, &d.VendorClass, &d.Vendor,
+		&d.OS, &d.DeviceType, &d.StableID, &labelsJSON, &first, &last)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	json.Unmarshal([]byte(labelsJSON), &d.Labels)
+	if d.Labels == nil {
+		d.Labels = []string{}
+	}
+	d.FirstSeen, _ = time.Parse(time.RFC3339, first)
+	d.LastSeen, _ = time.Parse(time.RFC3339, last)
+	return &d, nil
+}
+
 // IsRandomizedMAC returns true if the MAC has the locally-administered bit set,
 // indicating a privacy-randomized address (iOS 14+, Android 10+, Windows 10+).
 func IsRandomizedMAC(mac string) bool {
@@ -174,7 +219,7 @@ func (s *Store) EnrichByIP(ip, hostname string) error {
 
 func (s *Store) List() ([]Device, error) {
 	rows, err := s.db.Query(`
-		SELECT mac, ip, hostname, fingerprint, vendor_class, vendor, os, device_type, stable_id, first_seen, last_seen
+		SELECT mac, ip, hostname, fingerprint, vendor_class, vendor, os, device_type, stable_id, labels, first_seen, last_seen
 		FROM devices ORDER BY last_seen DESC`)
 	if err != nil {
 		return nil, err
@@ -184,10 +229,14 @@ func (s *Store) List() ([]Device, error) {
 	devices := make([]Device, 0)
 	for rows.Next() {
 		var d Device
-		var first, last string
+		var first, last, labelsJSON string
 		if err := rows.Scan(&d.MAC, &d.IP, &d.Hostname, &d.Fingerprint, &d.VendorClass, &d.Vendor,
-			&d.OS, &d.DeviceType, &d.StableID, &first, &last); err != nil {
+			&d.OS, &d.DeviceType, &d.StableID, &labelsJSON, &first, &last); err != nil {
 			return nil, err
+		}
+		json.Unmarshal([]byte(labelsJSON), &d.Labels)
+		if d.Labels == nil {
+			d.Labels = []string{}
 		}
 		d.FirstSeen, _ = time.Parse(time.RFC3339, first)
 		d.LastSeen, _ = time.Parse(time.RFC3339, last)
