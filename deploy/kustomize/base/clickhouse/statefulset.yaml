@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+spec:
+  serviceName: clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: server
+    spec:
+      serviceAccountName: clickhouse
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        fsGroup: 101
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:24.3-alpine
+          ports:
+            - name: http
+              containerPort: 8123
+              protocol: TCP
+            - name: native
+              containerPort: 9000
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: "1"
+              memory: 2Gi
+            requests:
+              cpu: 250m
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+            - name: config-override
+              mountPath: /etc/clickhouse-server/config.d/memory-limits.xml
+              subPath: memory-limits.xml
+            - name: users-override
+              mountPath: /etc/clickhouse-server/users.d/users-override.xml
+              subPath: users-override.xml
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d
+            - name: tmp
+              mountPath: /tmp
+            - name: log
+              mountPath: /var/log/clickhouse-server
+      volumes:
+        - name: config-override
+          configMap:
+            name: clickhouse-config
+            items:
+              - key: memory-limits.xml
+                path: memory-limits.xml
+        - name: users-override
+          configMap:
+            name: clickhouse-config
+            items:
+              - key: users-override.xml
+                path: users-override.xml
+        - name: init-sql
+          configMap:
+            name: clickhouse-init
+        - name: tmp
+          emptyDir: {}
+        - name: log
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi

@@ -4,6 +4,7 @@ kind: Kustomization
 resources:
   - ../../base
   - ../../base/misp
+  - ../../base/clickhouse
 
 commonLabels:
   app.kubernetes.io/instance: proxmox-soc

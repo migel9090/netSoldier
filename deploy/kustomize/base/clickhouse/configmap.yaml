@@ -1,0 +1,111 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-config
+data:
+  memory-limits.xml: |
+    <clickhouse>
+        <max_server_memory_usage_ratio>0.5</max_server_memory_usage_ratio>
+        <background_pool_size>4</background_pool_size>
+        <background_schedule_pool_size>2</background_schedule_pool_size>
+        <mark_cache_size>536870912</mark_cache_size>
+    </clickhouse>
+  users-override.xml: |
+    <clickhouse>
+        <profiles>
+            <default>
+                <max_memory_usage>1073741824</max_memory_usage>
+                <max_execution_time>60</max_execution_time>
+            </default>
+        </profiles>
+    </clickhouse>
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-init
+data:
+  001_database.sql: |
+    CREATE DATABASE IF NOT EXISTS netsoldier;
+  002_devices.sql: |
+    CREATE TABLE IF NOT EXISTS netsoldier.devices (
+        mac          String,
+        ip           String,
+        hostname     String,
+        fingerprint  String,
+        vendor_class String,
+        vendor       String,
+        os           String,
+        device_type  String,
+        stable_id    String,
+        labels       Array(String),
+        first_seen   DateTime,
+        last_seen    DateTime,
+        updated_at   DateTime DEFAULT now()
+    ) ENGINE = ReplacingMergeTree(updated_at)
+    ORDER BY mac;
+    CREATE TABLE IF NOT EXISTS netsoldier.device_events (
+        timestamp    DateTime,
+        mac          String,
+        ip           String,
+        hostname     String,
+        vendor       String,
+        protocol     LowCardinality(String),
+        event_type   LowCardinality(String)
+    ) ENGINE = MergeTree()
+    ORDER BY (timestamp, mac)
+    TTL timestamp + INTERVAL 30 DAY;
+  003_network_flows.sql: |
+    CREATE TABLE IF NOT EXISTS netsoldier.network_flows (
+        timestamp    DateTime,
+        src_ip       String,
+        src_port     UInt16,
+        dst_ip       String,
+        dst_port     UInt16,
+        protocol     UInt8,
+        bytes_in     UInt64,
+        bytes_out    UInt64,
+        packets_in   UInt32,
+        packets_out  UInt32,
+        duration_ms  UInt32,
+        tcp_flags    UInt8,
+        vlan_id      UInt16
+    ) ENGINE = MergeTree()
+    ORDER BY (timestamp, src_ip, dst_ip)
+    TTL timestamp + INTERVAL 30 DAY;
+  004_dns_queries.sql: |
+    CREATE TABLE IF NOT EXISTS netsoldier.dns_queries (
+        timestamp    DateTime,
+        client_ip    String,
+        domain       String,
+        query_type   LowCardinality(String),
+        answer       String,
+        status       LowCardinality(String),
+        response_ms  UInt16,
+        blocked      UInt8
+    ) ENGINE = MergeTree()
+    ORDER BY (timestamp, client_ip, domain)
+    TTL timestamp + INTERVAL 30 DAY;
+  005_alerts.sql: |
+    CREATE TABLE IF NOT EXISTS netsoldier.alerts (
+        timestamp    DateTime,
+        id           String,
+        domain       String,
+        client_ip    String,
+        query_type   LowCardinality(String),
+        matched_ioc  String,
+        severity     LowCardinality(String),
+        source       LowCardinality(String),
+        acknowledged UInt8 DEFAULT 0
+    ) ENGINE = ReplacingMergeTree()
+    ORDER BY (timestamp, id);
+  006_events.sql: |
+    CREATE TABLE IF NOT EXISTS netsoldier.events (
+        timestamp    DateTime,
+        source       LowCardinality(String),
+        level        LowCardinality(String),
+        message      String,
+        metadata     String
+    ) ENGINE = MergeTree()
+    ORDER BY (timestamp, source)
+    TTL timestamp + INTERVAL 90 DAY;
