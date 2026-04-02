@@ -1,0 +1,26 @@
+[Unit]
+Description=netSoldier Fluent Bit (edge log shipper)
+After=detection-engine.service device-inventory.service
+
+[Container]
+ContainerName=fluent-bit
+Image=fluent/fluent-bit:3.0
+Network=host
+Environment=VECTOR_HOST=192.168.1.100
+Environment=VECTOR_PORT=24224
+
+# Main config and parsers.
+Volume=/opt/netsoldier/fluent-bit:/fluent-bit/etc:ro
+
+# Filesystem buffer for retry/backpressure.
+Volume=fluent-bit-cache:/fluent-bit/cache
+
+# Journald socket for reading container logs.
+Volume=/run/log/journal:/run/log/journal:ro
+Volume=/etc/machine-id:/etc/machine-id:ro
+
+# Suricata EVE log (read-only, available after Suricata deployment).
+Volume=/var/log/suricata:/var/log/suricata:ro
+
+[Install]
+WantedBy=multi-user.target
