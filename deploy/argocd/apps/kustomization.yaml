@@ -10,4 +10,5 @@ resources:
   - alloy-app.yaml
   - tempo-app.yaml
   - otel-collector-app.yaml
+  - vector-app.yaml
   - adguard-app.yaml

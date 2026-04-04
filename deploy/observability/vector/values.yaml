@@ -1,0 +1,211 @@
+role: Aggregator
+
+replicas: 1
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+service:
+  enabled: true
+  ports:
+    - name: fluent
+      port: 24224
+      protocol: TCP
+    - name: api
+      port: 8686
+      protocol: TCP
+
+customConfig:
+  data_dir: /vector-data-dir
+
+  api:
+    enabled: true
+    address: "0.0.0.0:8686"
+
+  # ── Sources ─────────────────────────────────────────────────
+  sources:
+    fluent_input:
+      type: fluent
+      address: "0.0.0.0:24224"
+
+    vector_metrics:
+      type: internal_metrics
+
+  # ── Transforms ──────────────────────────────────────────────
+  transforms:
+    # Route events by Fluent Bit tag.
+    route_by_tag:
+      type: route
+      inputs: ["fluent_input"]
+      route:
+        suricata: '.tag == "suricata.eve"'
+        journal: 'starts_with!(.tag, "journal.")'
+
+    # Remap Suricata EVE flow events → ClickHouse network_flows schema.
+    suricata_flows:
+      type: remap
+      inputs: ["route_by_tag.suricata"]
+      drop_on_abort: true
+      source: |-
+        if .event_type != "flow" { abort }
+        .timestamp = .flow.start ?? .timestamp ?? now()
+        .src_port = to_int(.src_port) ?? 0
+        .dst_port = to_int(.dest_port) ?? 0
+        .protocol = to_int(.proto) ?? 0
+        .bytes_in = to_int(.flow.bytes_toclient) ?? 0
+        .bytes_out = to_int(.flow.bytes_toserver) ?? 0
+        .packets_in = to_int(.flow.pkts_toclient) ?? 0
+        .packets_out = to_int(.flow.pkts_toserver) ?? 0
+        .duration_ms = (to_int(.flow.age) ?? 0) * 1000
+        .tcp_flags = 0
+        .vlan_id = to_int(.vlan) ?? 0
+        del(.flow); del(.event_type); del(.proto)
+
+    # Remap Suricata DNS events → ClickHouse dns_queries schema.
+    suricata_dns:
+      type: remap
+      inputs: ["route_by_tag.suricata"]
+      drop_on_abort: true
+      source: |-
+        if .event_type != "dns" { abort }
+        .timestamp = .timestamp ?? now()
+        .client_ip = .src_ip ?? ""
+        .domain = .dns.rrname ?? ""
+        .query_type = .dns.rrtype ?? ""
+        .answer = join(.dns.answers ?? [], ",") ?? ""
+        .status = .dns.rcode ?? ""
+        .response_ms = 0
+        .blocked = 0
+        del(.dns); del(.event_type)
+
+    # Remap Suricata alert events → ClickHouse alerts schema.
+    suricata_alerts:
+      type: remap
+      inputs: ["route_by_tag.suricata"]
+      drop_on_abort: true
+      source: |-
+        if .event_type != "alert" { abort }
+        .timestamp = .timestamp ?? now()
+        .id = join(["SUR", to_string(.alert.signature_id) ?? "0"], "-")
+        .domain = .dns.rrname ?? .dest_ip ?? ""
+        .client_ip = .src_ip ?? ""
+        .query_type = ""
+        .matched_ioc = .alert.signature ?? ""
+        .severity = if to_int(.alert.severity) ?? 3 <= 1 { "critical" } else if to_int(.alert.severity) ?? 3 == 2 { "high" } else { "medium" }
+        .source = "suricata"
+        .acknowledged = 0
+        del(.alert); del(.event_type)
+
+    # Remap Suricata misc events → ClickHouse events schema.
+    suricata_events:
+      type: remap
+      inputs: ["route_by_tag.suricata"]
+      drop_on_abort: true
+      source: |-
+        types = ["flow", "dns", "alert"]
+        if includes(types, .event_type) { abort }
+        .timestamp = .timestamp ?? now()
+        .source = "suricata"
+        .level = "info"
+        .message = join(["event_type=", .event_type ?? "unknown"], "")
+        .metadata = encode_json(.)
+
+    # Prepare journal logs for Loki: extract structured fields.
+    journal_remap:
+      type: remap
+      inputs: ["route_by_tag.journal"]
+      source: |-
+        ._source = ._source ?? .SYSTEMD_UNIT ?? "unknown"
+        ._profile = ._profile ?? "unknown"
+        ._edge_host = ._edge_host ?? "unknown"
+
+    # GeoIP enrichment placeholder (uncomment when MaxMind GeoLite2 is mounted):
+    #
+    # geoip_src:
+    #   type: geoip
+    #   inputs: ["route_by_tag.suricata"]
+    #   database: /geoip/GeoLite2-ASN.mmdb
+    #   source: src_ip
+    #   target: src_geo
+    #
+    # geoip_dst:
+    #   type: geoip
+    #   inputs: ["geoip_src"]
+    #   database: /geoip/GeoLite2-ASN.mmdb
+    #   source: dest_ip
+    #   target: dst_geo
+    #
+    # To activate: mount GeoLite2-ASN.mmdb, update suricata transform
+    # inputs to chain through geoip_src → geoip_dst, add persistence
+    # volume for the database file.
+
+  # ── Sinks ───────────────────────────────────────────────────
+  sinks:
+    clickhouse_flows:
+      type: clickhouse
+      inputs: ["suricata_flows"]
+      endpoint: "http://clickhouse.netsoldier.svc:8123"
+      database: netsoldier
+      table: network_flows
+      skip_unknown_fields: true
+      batch:
+        max_bytes: 1048576
+        timeout_secs: 5
+
+    clickhouse_dns:
+      type: clickhouse
+      inputs: ["suricata_dns"]
+      endpoint: "http://clickhouse.netsoldier.svc:8123"
+      database: netsoldier
+      table: dns_queries
+      skip_unknown_fields: true
+      batch:
+        max_bytes: 1048576
+        timeout_secs: 5
+
+    clickhouse_alerts:
+      type: clickhouse
+      inputs: ["suricata_alerts"]
+      endpoint: "http://clickhouse.netsoldier.svc:8123"
+      database: netsoldier
+      table: alerts
+      skip_unknown_fields: true
+      batch:
+        max_bytes: 524288
+        timeout_secs: 3
+
+    clickhouse_events:
+      type: clickhouse
+      inputs: ["suricata_events"]
+      endpoint: "http://clickhouse.netsoldier.svc:8123"
+      database: netsoldier
+      table: events
+      skip_unknown_fields: true
+      batch:
+        max_bytes: 1048576
+        timeout_secs: 10
+
+    loki:
+      type: loki
+      inputs: ["journal_remap", "route_by_tag.suricata"]
+      endpoint: "http://loki.observability.svc:3100"
+      labels:
+        source: "{{ _source }}"
+        profile: "{{ _profile }}"
+        host: "{{ _edge_host }}"
+      out_of_order_action: accept
+      encoding:
+        codec: json
+      batch:
+        max_bytes: 524288
+        timeout_secs: 5
+
+    vector_metrics_prom:
+      type: prometheus_exporter
+      inputs: ["vector_metrics"]
+      address: "0.0.0.0:9090"
