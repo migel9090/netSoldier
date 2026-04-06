@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/adguard"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/capture"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/threatlist"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/tracing"
@@ -68,6 +69,28 @@ func main() {
 	}
 
 	go engine.Run(ctx)
+
+	if spanIface := os.Getenv("SPAN_INTERFACE"); spanIface != "" {
+		flowCh := make(chan capture.FlowRecord, 256)
+		idleTimeout := parseDuration(envOr("FLOW_IDLE_TIMEOUT", "30s"), 30*time.Second)
+		cap := capture.New(spanIface, flowCh, idleTimeout)
+		go func() {
+			if err := cap.Run(ctx); err != nil {
+				slog.Error("capture failed", "interface", spanIface, "error", err)
+			}
+		}()
+		go func() {
+			for rec := range flowCh {
+				slog.Debug("flow",
+					"src", rec.SrcIP, "dst", rec.DstIP,
+					"proto", rec.Protocol,
+					"bytes", rec.BytesIn+rec.BytesOut,
+					"duration_ms", rec.DurationMs,
+				)
+			}
+		}()
+		slog.Info("capture enabled", "interface", spanIface, "idle_timeout", idleTimeout)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
