@@ -62,8 +62,9 @@ type Engine struct {
 	adguard  *adguard.Client
 	matcher  *threatlist.Matcher
 	interval time.Duration
-	lastSeen time.Time
-	OnAlert  func(Alert)
+	lastSeen    time.Time
+	OnAlert     func(Alert)
+	OnDNSAnswer func(ip, domain string, ttl int)
 
 	mu     sync.RWMutex
 	alerts []Alert
@@ -111,6 +112,15 @@ func (e *Engine) poll(ctx context.Context) {
 
 		queriesChecked.Inc()
 		domain := strings.ToLower(strings.TrimSuffix(entry.Question.Host, "."))
+
+		if e.OnDNSAnswer != nil {
+			for _, ans := range entry.Answer {
+				if ans.Type == "A" || ans.Type == "AAAA" {
+					e.OnDNSAnswer(ans.Value, domain, ans.TTL)
+				}
+			}
+		}
+
 		matched, ok := e.matcher.Match(domain)
 		if !ok {
 			continue

@@ -13,6 +13,11 @@ type QueryLogEntry struct {
 		Host string `json:"host"`
 		Type string `json:"type"`
 	} `json:"question"`
+	Answer []struct {
+		Value string `json:"value"`
+		Type  string `json:"type"`
+		TTL   int    `json:"ttl"`
+	} `json:"answer"`
 	Client string    `json:"client"`
 	Time   time.Time `json:"time"`
 	Reason string    `json:"reason"`

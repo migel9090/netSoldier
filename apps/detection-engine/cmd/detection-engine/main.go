@@ -12,6 +12,7 @@ import (
 
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/adguard"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/capture"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/correlator"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/threatlist"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/tracing"
@@ -52,8 +53,14 @@ func main() {
 	}
 	slog.Info("threatlist loaded", "path", tlPath, "domains", matcher.Size())
 
+	dnsCache := correlator.NewDNSCache()
+
 	pollInterval := parseDuration(envOr("POLL_INTERVAL", "30s"), 30*time.Second)
 	engine := detection.New(agClient, matcher, pollInterval)
+
+	engine.OnDNSAnswer = func(ip, domain string, ttl int) {
+		dnsCache.Set(ip, domain, ttl)
+	}
 
 	if webhookURL := os.Getenv("WEBHOOK_URL"); webhookURL != "" {
 		sender := webhook.NewSender(webhookURL, envOr("WEBHOOK_SECRET", ""), 3)
@@ -79,17 +86,20 @@ func main() {
 				slog.Error("capture failed", "interface", spanIface, "error", err)
 			}
 		}()
-		go func() {
-			for rec := range flowCh {
-				slog.Debug("flow",
-					"src", rec.SrcIP, "dst", rec.DstIP,
-					"proto", rec.Protocol,
-					"bytes", rec.BytesIn+rec.BytesOut,
-					"duration_ms", rec.DurationMs,
-				)
-			}
-		}()
-		slog.Info("capture enabled", "interface", spanIface, "idle_timeout", idleTimeout)
+
+		devURL := envOr("DEVICE_INVENTORY_URL", "http://device-inventory:8081")
+		devCache := correlator.NewDeviceCache(devURL)
+		go devCache.RefreshLoop(ctx, 30*time.Second)
+
+		var chWriter *correlator.CHWriter
+		if chURL := os.Getenv("CLICKHOUSE_URL"); chURL != "" {
+			chWriter = correlator.NewCHWriter(chURL, envOr("CLICKHOUSE_DATABASE", "netsoldier"))
+		}
+
+		cor := correlator.New(dnsCache, devCache, chWriter, flowCh)
+		go cor.Run(ctx)
+
+		slog.Info("capture + correlator enabled", "interface", spanIface, "idle_timeout", idleTimeout)
 	}
 
 	mux := http.NewServeMux()
