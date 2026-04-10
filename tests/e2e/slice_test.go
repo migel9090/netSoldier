@@ -90,7 +90,7 @@ func TestVerticalSlice(t *testing.T) {
 	assertEq(t, "alert.client_ip", "192.168.1.42", wp.Alert.ClientIP)
 	assertEq(t, "alert.matched_ioc", "evil.example.com", wp.Alert.MatchedIoC)
 	assertEq(t, "alert.severity", "high", wp.Alert.Severity)
-	assertEq(t, "alert.source", "threatfox-static", wp.Alert.Source)
+	assertEq(t, "alert.source", "local", wp.Alert.Source)
 	if wp.Alert.ID == "" {
 		t.Error("alert.id is empty")
 	}

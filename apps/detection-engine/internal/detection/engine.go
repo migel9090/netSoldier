@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/adguard"
-	"github.com/migel9090/netSoldier/apps/detection-engine/internal/threatlist"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/iocmatch"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -56,11 +56,15 @@ type Alert struct {
 	MatchedIoC string    `json:"matched_ioc"`
 	Severity   string    `json:"severity"`
 	Source     string    `json:"source"`
+	Confidence int       `json:"confidence,omitempty"`
+	MitreID    string    `json:"mitre_id,omitempty"`
+	MitreName  string    `json:"mitre_name,omitempty"`
+	Threat     string    `json:"threat,omitempty"`
 }
 
 type Engine struct {
 	adguard  *adguard.Client
-	matcher  *threatlist.Matcher
+	matcher  *iocmatch.Matcher
 	interval time.Duration
 	lastSeen    time.Time
 	OnAlert     func(Alert)
@@ -70,7 +74,7 @@ type Engine struct {
 	alerts []Alert
 }
 
-func New(ag *adguard.Client, m *threatlist.Matcher, interval time.Duration) *Engine {
+func New(ag *adguard.Client, m *iocmatch.Matcher, interval time.Duration) *Engine {
 	threatlistDomains.Set(float64(m.Size()))
 	return &Engine{
 		adguard:  ag,
@@ -121,36 +125,54 @@ func (e *Engine) poll(ctx context.Context) {
 			}
 		}
 
-		matched, ok := e.matcher.Match(domain)
-		if !ok {
-			continue
+		if ioc, ok := e.matcher.MatchDomain(domain); ok {
+			e.emitAlert(entry, domain, ioc)
 		}
 
-		id := fmt.Sprintf("DET-%d", alertCounter.Add(1))
-		alert := Alert{
-			ID:         id,
-			Timestamp:  entry.Time,
-			Domain:     domain,
-			ClientIP:   entry.Client,
-			QueryType:  entry.Question.Type,
-			MatchedIoC: matched,
-			Severity:   "high",
-			Source:     "threatfox-static",
+		for _, ans := range entry.Answer {
+			if ans.Type == "A" || ans.Type == "AAAA" {
+				if ioc, ok := e.matcher.MatchIP(ans.Value); ok {
+					e.emitAlert(entry, domain+" (→"+ans.Value+")", ioc)
+				}
+			}
 		}
-
-		e.addAlert(alert)
-		alertsGenerated.Inc()
-		slog.Warn("threat detected",
-			"id", id,
-			"domain", domain,
-			"client", entry.Client,
-			"matched_ioc", matched,
-		)
 	}
 
 	if len(entries) > 0 && entries[0].Time.After(e.lastSeen) {
 		e.lastSeen = entries[0].Time
 	}
+}
+
+func (e *Engine) emitAlert(entry adguard.QueryLogEntry, domain string, ioc iocmatch.IoC) {
+	id := fmt.Sprintf("DET-%d", alertCounter.Add(1))
+	alert := Alert{
+		ID:         id,
+		Timestamp:  entry.Time,
+		Domain:     domain,
+		ClientIP:   entry.Client,
+		QueryType:  entry.Question.Type,
+		MatchedIoC: ioc.Value,
+		Severity:   ioc.Severity,
+		Source:     ioc.Source,
+		Confidence: ioc.Confidence,
+		MitreID:    ioc.MitreID,
+		MitreName:  ioc.MitreName,
+		Threat:     ioc.Threat,
+	}
+	if alert.Severity == "" {
+		alert.Severity = "high"
+	}
+	if alert.Source == "" {
+		alert.Source = "local"
+	}
+
+	e.addAlert(alert)
+	alertsGenerated.Inc()
+	slog.Warn("threat detected",
+		"id", id, "domain", domain, "client", entry.Client,
+		"matched_ioc", ioc.Value, "severity", alert.Severity,
+		"mitre", ioc.MitreID,
+	)
 }
 
 func (e *Engine) addAlert(a Alert) {

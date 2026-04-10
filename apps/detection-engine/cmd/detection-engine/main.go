@@ -14,7 +14,7 @@ import (
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/capture"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/correlator"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
-	"github.com/migel9090/netSoldier/apps/detection-engine/internal/threatlist"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/iocmatch"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/tracing"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/webhook"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -45,13 +45,19 @@ func main() {
 		envOr("ADGUARD_PASSWORD", "changeme"),
 	)
 
+	matcher := iocmatch.New()
 	tlPath := envOr("THREATLIST_PATH", "/etc/detection-engine/domains.txt")
-	matcher, err := threatlist.LoadFromFile(tlPath)
-	if err != nil {
-		slog.Error("threatlist load failed", "path", tlPath, "error", err)
-		os.Exit(1)
+	if staticIoCs, err := iocmatch.LoadDomainsFromFile(tlPath); err != nil {
+		slog.Warn("static threatlist not loaded", "path", tlPath, "error", err)
+	} else {
+		matcher.Add(staticIoCs)
+		slog.Info("static threatlist loaded", "path", tlPath, "domains", len(staticIoCs))
 	}
-	slog.Info("threatlist loaded", "path", tlPath, "domains", matcher.Size())
+
+	if tiURL := os.Getenv("THREAT_INTEL_URL"); tiURL != "" {
+		syncInterval := parseDuration(envOr("IOC_SYNC_INTERVAL", "5m"), 5*time.Minute)
+		go iocmatch.SyncLoop(ctx, matcher, tiURL, syncInterval)
+	}
 
 	dnsCache := correlator.NewDNSCache()
 
