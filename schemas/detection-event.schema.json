@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/migel9090/netSoldier/schemas/detection-event.schema.json",
+  "title": "netSoldier Detection Event",
+  "description": "Canonical detection event produced by the detection-engine. Version 1.0.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "timestamp",
+    "domain",
+    "matched_ioc",
+    "ioc_type",
+    "client_ip",
+    "severity",
+    "confidence",
+    "source"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Schema version. Bumped on breaking changes."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^DET-[0-9]+$",
+      "description": "Unique detection identifier."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the detection occurred (RFC 3339)."
+    },
+    "domain": {
+      "type": "string",
+      "description": "Queried domain or domain(→IP) that matched."
+    },
+    "matched_ioc": {
+      "type": "string",
+      "description": "The IoC value that matched (domain, IP, hash)."
+    },
+    "ioc_type": {
+      "type": "string",
+      "enum": ["domain", "ip", "url", "ja3", "ja4", "md5", "sha256"],
+      "description": "Type of the matched indicator."
+    },
+    "client_ip": {
+      "type": "string",
+      "format": "ipv4",
+      "description": "IP address of the client that triggered the detection."
+    },
+    "client_mac": {
+      "type": "string",
+      "pattern": "^([0-9a-f]{2}:){5}[0-9a-f]{2}$",
+      "description": "MAC address of the client device (if known)."
+    },
+    "client_name": {
+      "type": "string",
+      "description": "Hostname or friendly name of the client device."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["critical", "high", "medium", "low"],
+      "description": "Derived from IoC confidence: ≥90=critical, ≥70=high, ≥50=medium, <50=low."
+    },
+    "confidence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "IoC confidence score (0-100)."
+    },
+    "source": {
+      "type": "string",
+      "description": "IoC feed source (local, threatfox, feodo, spamhaus, misp, etc.)."
+    },
+    "threat": {
+      "type": "string",
+      "description": "Malware family or threat campaign name."
+    },
+    "mitre_id": {
+      "type": "string",
+      "pattern": "^T[0-9]{4}(\\.[0-9]{3})?$",
+      "description": "MITRE ATT&CK technique ID (e.g. T1071, T1071.004)."
+    },
+    "mitre_name": {
+      "type": "string",
+      "description": "MITRE ATT&CK technique name."
+    },
+    "query_type": {
+      "type": "string",
+      "description": "DNS query type (A, AAAA, CNAME, etc.)."
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Arbitrary tags from the IoC source."
+    }
+  },
+  "additionalProperties": false
+}
