@@ -220,7 +220,7 @@ func goBuild(t *testing.T, root, appPath string) string {
 	bin := filepath.Join(t.TempDir(), name)
 	cmd := exec.Command("go", "build", "-o", bin, "./cmd/"+name)
 	cmd.Dir = filepath.Join(root, appPath)
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOWORK=off")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build %s:\n%s\n%v", appPath, out, err)
 	}
