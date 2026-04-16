@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/actions"
 	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/policy"
 	"github.com/migel9090/netSoldier/libs/events"
 )
@@ -24,20 +25,34 @@ func main() {
 	slog.Info("policy loaded",
 		"auto_confidence", pol.AutoMinConfidence,
 		"auto_severity", pol.AutoMinSeverity,
-		"pending_confidence", pol.PendMinConfidence,
-		"pending_severity", pol.PendMinSeverity,
 		"default_ttl", pol.DefaultTTL,
 		"default_action", pol.DefaultAction,
-		"allowlist_macs", pol.Allowlist.MACs(),
-		"allowlist_ips", pol.Allowlist.IPs(),
 	)
+
+	var audit actions.AuditWriter
+	if chURL := os.Getenv("CLICKHOUSE_URL"); chURL != "" {
+		audit = actions.NewCHAuditWriter(chURL, envOr("CLICKHOUSE_DATABASE", "netsoldier"))
+		slog.Info("audit log enabled", "clickhouse", chURL)
+	} else {
+		audit = actions.NopAuditWriter{}
+		slog.Warn("audit log disabled (no CLICKHOUSE_URL)")
+	}
+
+	store := actions.NewStore(audit)
+	go store.RunTTLRevert(ctx)
 
 	addr := envOr("LISTEN_ADDR", ":8084")
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.HandleFunc("GET /policy", handleGetPolicy(pol))
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store))
 	mux.HandleFunc("GET /allowlist", handleGetAllowlist(pol))
+	mux.HandleFunc("GET /actions/pending", handleListByState(store, events.StatePending))
+	mux.HandleFunc("GET /actions/active", handleListByState(store, events.StateActive))
+	mux.HandleFunc("GET /actions/{id}", handleGetAction(store))
+	mux.HandleFunc("POST /actions/{id}/approve", handleApprove(store))
+	mux.HandleFunc("POST /actions/{id}/reject", handleReject(store))
+	mux.HandleFunc("POST /actions/{id}/revert", handleRevert(store))
 
 	srv := &http.Server{
 		Addr:         addr,
@@ -84,7 +99,7 @@ func handleGetPolicy(pol *policy.Policy) http.HandlerFunc {
 	}
 }
 
-func handleEvaluate(pol *policy.Policy) http.HandlerFunc {
+func handleEvaluate(pol *policy.Policy, store *actions.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var ev events.DetectionEvent
 		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
@@ -94,14 +109,20 @@ func handleEvaluate(pol *policy.Policy) http.HandlerFunc {
 
 		decision := pol.Evaluate(ev)
 
-		slog.Info("policy evaluated",
-			"detection_id", ev.ID,
-			"action", decision.Action,
-			"reason", decision.Reason,
-		)
+		var action *events.EnforcementAction
+		switch decision.Action {
+		case "auto_block":
+			action = store.Create(ev.ID, ev.ClientMAC, ev.ClientIP, decision.ActionType, decision.Reason, decision.TTLSeconds, true)
+			store.Activate(action.ID)
+		case "pending":
+			action = store.Create(ev.ID, ev.ClientMAC, ev.ClientIP, decision.ActionType, decision.Reason, decision.TTLSeconds, false)
+		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(decision)
+		json.NewEncoder(w).Encode(map[string]any{
+			"decision": decision,
+			"action":   action,
+		})
 	}
 }
 
@@ -112,6 +133,81 @@ func handleGetAllowlist(pol *policy.Policy) http.HandlerFunc {
 			"macs": pol.Allowlist.MACs(),
 			"ips":  pol.Allowlist.IPs(),
 		})
+	}
+}
+
+func handleListByState(store *actions.Store, state string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(store.ListByState(state))
+	}
+}
+
+func handleGetAction(store *actions.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		a := store.Get(r.PathValue("id"))
+		if a == nil {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(a)
+	}
+}
+
+func handleApprove(store *actions.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ApprovedBy string `json:"approved_by"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.ApprovedBy == "" {
+			req.ApprovedBy = "operator"
+		}
+		id := r.PathValue("id")
+		if err := store.Approve(id, req.ApprovedBy); err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusConflict)
+			return
+		}
+		store.Activate(id)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(store.Get(id))
+	}
+}
+
+func handleReject(store *actions.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Reason string `json:"reason"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.Reason == "" {
+			req.Reason = "rejected by operator"
+		}
+		if err := store.Reject(r.PathValue("id"), req.Reason); err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusConflict)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(store.Get(r.PathValue("id")))
+	}
+}
+
+func handleRevert(store *actions.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Reason string `json:"reason"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.Reason == "" {
+			req.Reason = "manual revert"
+		}
+		if err := store.Revert(r.PathValue("id"), req.Reason); err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusConflict)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(store.Get(r.PathValue("id")))
 	}
 }
 
