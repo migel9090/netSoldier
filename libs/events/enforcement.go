@@ -33,10 +33,11 @@ type EnforcementAction struct {
 	DetectionID string `json:"detection_id"`
 
 	// Enforcement details.
-	ActionType string `json:"action_type"` // ActionDNSSinkhole, ActionARPIsolate, ActionSwitchACL
-	State      string `json:"state"`       // StatePending..StateRejected
-	TargetMAC  string `json:"target_mac"`
-	TargetIP   string `json:"target_ip,omitempty"`
+	ActionType    string `json:"action_type"` // ActionDNSSinkhole, ActionARPIsolate, ActionSwitchACL
+	State         string `json:"state"`       // StatePending..StateRejected
+	TargetMAC     string `json:"target_mac"`
+	TargetIP      string `json:"target_ip,omitempty"`
+	BlockedDomain string `json:"blocked_domain,omitempty"` // for dns_sinkhole
 
 	// Policy.
 	PolicyRule   string `json:"policy_rule"`

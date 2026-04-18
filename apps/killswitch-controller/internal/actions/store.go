@@ -13,12 +13,17 @@ import (
 
 var actionCounter atomic.Int64
 
+// RevertHook is called when an action is reverted (TTL or manual) so
+// the enforcement driver can unapply the block.
+type RevertHook func(action *events.EnforcementAction)
+
 // Store manages enforcement actions through their lifecycle.
 // Thread-safe for concurrent API and TTL-revert access.
 type Store struct {
-	mu      sync.RWMutex
-	actions map[string]*events.EnforcementAction
-	audit   AuditWriter
+	mu       sync.RWMutex
+	actions  map[string]*events.EnforcementAction
+	audit    AuditWriter
+	OnRevert RevertHook
 }
 
 // AuditWriter records every state transition for accountability.
@@ -49,7 +54,7 @@ func NewStore(audit AuditWriter) *Store {
 
 // Create inserts a new enforcement action. For auto-approved actions,
 // state starts at Approved; otherwise Pending.
-func (s *Store) Create(detectionID, targetMAC, targetIP, actionType, policyRule string, ttl int, autoApproved bool) *events.EnforcementAction {
+func (s *Store) Create(detectionID, targetMAC, targetIP, actionType, policyRule string, ttl int, autoApproved bool, domain string) *events.EnforcementAction {
 	id := fmt.Sprintf("ACT-%d", actionCounter.Add(1))
 	now := time.Now()
 
@@ -75,6 +80,7 @@ func (s *Store) Create(detectionID, targetMAC, targetIP, actionType, policyRule 
 		State:         state,
 		TargetMAC:     targetMAC,
 		TargetIP:      targetIP,
+		BlockedDomain: domain,
 		PolicyRule:    policyRule,
 		AutoApproved:  autoApproved,
 		TTLSeconds:    ttl,
@@ -126,6 +132,11 @@ func (s *Store) Revert(id, reason string) error {
 
 	s.writeAudit(from, events.StateReverted, "system", reason, a)
 	slog.Info("action reverted", "id", id, "reason", reason)
+
+	if s.OnRevert != nil {
+		copy := *a
+		go s.OnRevert(&copy)
+	}
 	return nil
 }
 
