@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -39,18 +40,39 @@ func main() {
 		slog.Warn("audit log disabled (no CLICKHOUSE_URL)")
 	}
 
-	var sinkhole drivers.Driver
+	driverMap := make(map[string]drivers.Driver)
+
 	agURL := envOr("ADGUARD_URL", "http://adguard-web.dns.svc:3000")
 	agUser := envOr("ADGUARD_USER", "admin")
 	agPass := envOr("ADGUARD_PASSWORD", "changeme")
-	sinkhole = drivers.NewSinkholeDriver(agURL, agUser, agPass)
-	slog.Info("driver configured", "driver", sinkhole.Name(), "adguard", agURL)
+	driverMap[events.ActionDNSSinkhole] = drivers.NewSinkholeDriver(agURL, agUser, agPass)
+	slog.Info("driver configured", "driver", "dns_sinkhole", "adguard", agURL)
+
+	if gwIP := os.Getenv("ARP_GATEWAY_IP"); gwIP != "" {
+		ifName := envOr("ARP_INTERFACE", "eth0")
+		arpDrv, err := drivers.NewARPIsolateDriver(ifName, net.ParseIP(gwIP))
+		if err != nil {
+			slog.Error("arp-isolate driver init failed", "error", err)
+		} else {
+			driverMap[events.ActionARPIsolate] = arpDrv
+		}
+	} else {
+		slog.Info("arp-isolate driver disabled (no ARP_GATEWAY_IP)")
+	}
+
+	resolveDriver := func(actionType string) drivers.Driver {
+		if d, ok := driverMap[actionType]; ok {
+			return d
+		}
+		return driverMap[events.ActionDNSSinkhole]
+	}
 
 	store := actions.NewStore(audit)
 	store.OnRevert = func(action *events.EnforcementAction) {
+		drv := resolveDriver(action.ActionType)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := sinkhole.Revert(ctx, action); err != nil {
+		if err := drv.Revert(ctx, action); err != nil {
 			slog.Error("driver revert on TTL failed", "action_id", action.ID, "error", err)
 		}
 	}
@@ -60,14 +82,14 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.HandleFunc("GET /policy", handleGetPolicy(pol))
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, sinkhole))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolveDriver))
 	mux.HandleFunc("GET /allowlist", handleGetAllowlist(pol))
 	mux.HandleFunc("GET /actions/pending", handleListByState(store, events.StatePending))
 	mux.HandleFunc("GET /actions/active", handleListByState(store, events.StateActive))
 	mux.HandleFunc("GET /actions/{id}", handleGetAction(store))
-	mux.HandleFunc("POST /actions/{id}/approve", handleApprove(store, sinkhole))
+	mux.HandleFunc("POST /actions/{id}/approve", handleApprove(store, resolveDriver))
 	mux.HandleFunc("POST /actions/{id}/reject", handleReject(store))
-	mux.HandleFunc("POST /actions/{id}/revert", handleRevert(store, sinkhole))
+	mux.HandleFunc("POST /actions/{id}/revert", handleRevert(store, resolveDriver))
 
 	srv := &http.Server{
 		Addr:         addr,
@@ -114,7 +136,7 @@ func handleGetPolicy(pol *policy.Policy) http.HandlerFunc {
 	}
 }
 
-func handleEvaluate(pol *policy.Policy, store *actions.Store, drv drivers.Driver) http.HandlerFunc {
+func handleEvaluate(pol *policy.Policy, store *actions.Store, resolve func(string) drivers.Driver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var ev events.DetectionEvent
 		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
@@ -128,7 +150,7 @@ func handleEvaluate(pol *policy.Policy, store *actions.Store, drv drivers.Driver
 		switch decision.Action {
 		case "auto_block":
 			action = store.Create(ev.ID, ev.ClientMAC, ev.ClientIP, decision.ActionType, decision.Reason, decision.TTLSeconds, true, ev.Domain)
-			if err := drv.Apply(r.Context(), action); err != nil {
+			if err := resolve(decision.ActionType).Apply(r.Context(), action); err != nil {
 				slog.Error("driver apply failed", "action_id", action.ID, "error", err)
 			} else {
 				store.Activate(action.ID)
@@ -174,7 +196,7 @@ func handleGetAction(store *actions.Store) http.HandlerFunc {
 	}
 }
 
-func handleApprove(store *actions.Store, drv drivers.Driver) http.HandlerFunc {
+func handleApprove(store *actions.Store, resolve func(string) drivers.Driver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			ApprovedBy string `json:"approved_by"`
@@ -189,7 +211,7 @@ func handleApprove(store *actions.Store, drv drivers.Driver) http.HandlerFunc {
 			return
 		}
 		action := store.Get(id)
-		if err := drv.Apply(r.Context(), action); err != nil {
+		if err := resolve(action.ActionType).Apply(r.Context(), action); err != nil {
 			slog.Error("driver apply failed on approve", "action_id", id, "error", err)
 		} else {
 			store.Activate(id)
@@ -217,7 +239,7 @@ func handleReject(store *actions.Store) http.HandlerFunc {
 	}
 }
 
-func handleRevert(store *actions.Store, drv drivers.Driver) http.HandlerFunc {
+func handleRevert(store *actions.Store, resolve func(string) drivers.Driver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Reason string `json:"reason"`
@@ -229,7 +251,7 @@ func handleRevert(store *actions.Store, drv drivers.Driver) http.HandlerFunc {
 		id := r.PathValue("id")
 		action := store.Get(id)
 		if action != nil {
-			if err := drv.Revert(r.Context(), action); err != nil {
+			if err := resolve(action.ActionType).Revert(r.Context(), action); err != nil {
 				slog.Error("driver revert failed", "action_id", id, "error", err)
 			}
 		}
