@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -58,6 +59,21 @@ func main() {
 		}
 	} else {
 		slog.Info("arp-isolate driver disabled (no ARP_GATEWAY_IP)")
+	}
+
+	if swURL := os.Getenv("SWITCH_WEBHOOK_URL"); swURL != "" {
+		quarantineVLAN := 0
+		if v := os.Getenv("SWITCH_QUARANTINE_VLAN"); v != "" {
+			fmt.Sscanf(v, "%d", &quarantineVLAN)
+		}
+		driverMap[events.ActionSwitchACL] = drivers.NewSwitchPortDriver(swURL, quarantineVLAN)
+		mode := "disable_port"
+		if quarantineVLAN > 0 {
+			mode = fmt.Sprintf("quarantine_vlan_%d", quarantineVLAN)
+		}
+		slog.Info("driver configured", "driver", "switch_acl", "webhook", swURL, "mode", mode)
+	} else {
+		slog.Info("switch-acl driver disabled (no SWITCH_WEBHOOK_URL)")
 	}
 
 	resolveDriver := func(actionType string) drivers.Driver {
