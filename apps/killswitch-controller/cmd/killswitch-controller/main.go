@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,45 +39,32 @@ func main() {
 		slog.Info("audit log enabled", "clickhouse", chURL)
 	} else {
 		audit = actions.NopAuditWriter{}
-		slog.Warn("audit log disabled (no CLICKHOUSE_URL)")
 	}
 
 	driverMap := make(map[string]drivers.Driver)
 
 	agURL := envOr("ADGUARD_URL", "http://adguard-web.dns.svc:3000")
-	agUser := envOr("ADGUARD_USER", "admin")
-	agPass := envOr("ADGUARD_PASSWORD", "changeme")
-	driverMap[events.ActionDNSSinkhole] = drivers.NewSinkholeDriver(agURL, agUser, agPass)
-	slog.Info("driver configured", "driver", "dns_sinkhole", "adguard", agURL)
+	driverMap[events.ActionDNSSinkhole] = drivers.NewSinkholeDriver(agURL, envOr("ADGUARD_USER", "admin"), envOr("ADGUARD_PASSWORD", "changeme"))
 
 	if gwIP := os.Getenv("ARP_GATEWAY_IP"); gwIP != "" {
-		ifName := envOr("ARP_INTERFACE", "eth0")
-		arpDrv, err := drivers.NewARPIsolateDriver(ifName, net.ParseIP(gwIP))
-		if err != nil {
-			slog.Error("arp-isolate driver init failed", "error", err)
-		} else {
+		if arpDrv, err := drivers.NewARPIsolateDriver(envOr("ARP_INTERFACE", "eth0"), net.ParseIP(gwIP)); err == nil {
 			driverMap[events.ActionARPIsolate] = arpDrv
+		} else {
+			slog.Error("arp-isolate driver failed", "error", err)
 		}
-	} else {
-		slog.Info("arp-isolate driver disabled (no ARP_GATEWAY_IP)")
 	}
 
 	if swURL := os.Getenv("SWITCH_WEBHOOK_URL"); swURL != "" {
-		quarantineVLAN := 0
-		if v := os.Getenv("SWITCH_QUARANTINE_VLAN"); v != "" {
-			fmt.Sscanf(v, "%d", &quarantineVLAN)
-		}
-		driverMap[events.ActionSwitchACL] = drivers.NewSwitchPortDriver(swURL, quarantineVLAN)
-		mode := "disable_port"
-		if quarantineVLAN > 0 {
-			mode = fmt.Sprintf("quarantine_vlan_%d", quarantineVLAN)
-		}
-		slog.Info("driver configured", "driver", "switch_acl", "webhook", swURL, "mode", mode)
-	} else {
-		slog.Info("switch-acl driver disabled (no SWITCH_WEBHOOK_URL)")
+		var vlan int
+		fmt.Sscanf(envOr("SWITCH_QUARANTINE_VLAN", "0"), "%d", &vlan)
+		driverMap[events.ActionSwitchACL] = drivers.NewSwitchPortDriver(swURL, vlan)
 	}
 
-	resolveDriver := func(actionType string) drivers.Driver {
+	for name := range driverMap {
+		slog.Info("driver configured", "driver", name)
+	}
+
+	resolve := func(actionType string) drivers.Driver {
 		if d, ok := driverMap[actionType]; ok {
 			return d
 		}
@@ -84,39 +72,42 @@ func main() {
 	}
 
 	store := actions.NewStore(audit)
-	store.OnRevert = func(action *events.EnforcementAction) {
-		drv := resolveDriver(action.ActionType)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := drv.Revert(ctx, action); err != nil {
-			slog.Error("driver revert on TTL failed", "action_id", action.ID, "error", err)
-		}
-	}
-	go store.RunTTLRevert(ctx)
 
-	addr := envOr("LISTEN_ADDR", ":8084")
+	go runSafeTTLRevert(ctx, store, resolve)
+
+	apiKey := os.Getenv("KILLSWITCH_API_KEY")
+	if apiKey == "" {
+		slog.Warn("no KILLSWITCH_API_KEY set — API authentication disabled")
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.HandleFunc("GET /policy", handleGetPolicy(pol))
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolveDriver))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve))
 	mux.HandleFunc("GET /allowlist", handleGetAllowlist(pol))
 	mux.HandleFunc("GET /actions/pending", handleListByState(store, events.StatePending))
 	mux.HandleFunc("GET /actions/active", handleListByState(store, events.StateActive))
 	mux.HandleFunc("GET /actions/{id}", handleGetAction(store))
-	mux.HandleFunc("POST /actions/{id}/approve", handleApprove(store, resolveDriver))
+	mux.HandleFunc("POST /actions/{id}/approve", handleApprove(store, resolve))
 	mux.HandleFunc("POST /actions/{id}/reject", handleReject(store))
-	mux.HandleFunc("POST /actions/{id}/revert", handleRevert(store, resolveDriver))
+	mux.HandleFunc("POST /actions/{id}/revert", handleRevert(store, resolve))
 
+	var handler http.Handler = mux
+	if apiKey != "" {
+		handler = authMiddleware(apiKey, mux)
+	}
+
+	addr := envOr("LISTEN_ADDR", ":8084")
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      mux,
+		Handler:      handler,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 
 	go func() {
-		slog.Info("starting killswitch-controller", "addr", addr)
+		slog.Info("starting killswitch-controller", "addr", addr, "auth", apiKey != "")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("server failed", "error", err)
 			os.Exit(1)
@@ -130,6 +121,44 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
+	}
+}
+
+func authMiddleware(apiKey string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") || auth[7:] != apiKey {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func runSafeTTLRevert(ctx context.Context, store *actions.Store, resolve func(string) drivers.Driver) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, a := range store.ListExpired() {
+				drv := resolve(a.ActionType)
+				rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				if err := drv.Revert(rctx, &a); err != nil {
+					slog.Error("TTL revert driver failed, will retry", "action_id", a.ID, "error", err)
+					cancel()
+					continue
+				}
+				cancel()
+				store.Revert(a.ID, "TTL expired")
+			}
+		}
 	}
 }
 
@@ -227,10 +256,12 @@ func handleApprove(store *actions.Store, resolve func(string) drivers.Driver) ht
 			return
 		}
 		action := store.Get(id)
-		if err := resolve(action.ActionType).Apply(r.Context(), action); err != nil {
-			slog.Error("driver apply failed on approve", "action_id", id, "error", err)
-		} else {
-			store.Activate(id)
+		if action != nil && action.State == events.StateApproved {
+			if err := resolve(action.ActionType).Apply(r.Context(), action); err != nil {
+				slog.Error("driver apply failed on approve", "action_id", id, "error", err)
+			} else {
+				store.Activate(id)
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(store.Get(id))
@@ -266,7 +297,7 @@ func handleRevert(store *actions.Store, resolve func(string) drivers.Driver) htt
 		}
 		id := r.PathValue("id")
 		action := store.Get(id)
-		if action != nil {
+		if action != nil && action.State == events.StateActive {
 			if err := resolve(action.ActionType).Revert(r.Context(), action); err != nil {
 				slog.Error("driver revert failed", "action_id", id, "error", err)
 			}

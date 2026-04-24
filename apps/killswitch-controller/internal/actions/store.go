@@ -13,17 +13,13 @@ import (
 
 var actionCounter atomic.Int64
 
-// RevertHook is called when an action is reverted (TTL or manual) so
-// the enforcement driver can unapply the block.
-type RevertHook func(action *events.EnforcementAction)
-
 // Store manages enforcement actions through their lifecycle.
 // Thread-safe for concurrent API and TTL-revert access.
+// The store is a pure state machine — driver calls happen outside.
 type Store struct {
-	mu       sync.RWMutex
-	actions  map[string]*events.EnforcementAction
-	audit    AuditWriter
-	OnRevert RevertHook
+	mu      sync.RWMutex
+	actions map[string]*events.EnforcementAction
+	audit   AuditWriter
 }
 
 // AuditWriter records every state transition for accountability.
@@ -97,22 +93,26 @@ func (s *Store) Create(detectionID, targetMAC, targetIP, actionType, policyRule 
 	return action
 }
 
-// Approve transitions a pending action to approved.
+// Approve transitions a pending action to approved. Idempotent: returns
+// nil if the action is already approved or active.
 func (s *Store) Approve(id, approvedBy string) error {
-	return s.transition(id, events.StatePending, events.StateApproved, approvedBy, "approved by "+approvedBy)
+	return s.transition(id, events.StateApproved, approvedBy, "approved by "+approvedBy,
+		events.StatePending)
 }
 
-// Reject transitions a pending action to rejected.
+// Reject transitions a pending action to rejected. Idempotent.
 func (s *Store) Reject(id, reason string) error {
-	return s.transition(id, events.StatePending, events.StateRejected, "operator", reason)
+	return s.transition(id, events.StateRejected, "operator", reason,
+		events.StatePending)
 }
 
-// Activate transitions an approved action to active.
+// Activate transitions an approved action to active. Idempotent.
 func (s *Store) Activate(id string) error {
-	return s.transition(id, events.StateApproved, events.StateActive, "system", "enforcement applied")
+	return s.transition(id, events.StateActive, "system", "enforcement applied",
+		events.StateApproved)
 }
 
-// Revert transitions an active action to reverted.
+// Revert transitions an active action to reverted. Idempotent.
 func (s *Store) Revert(id, reason string) error {
 	s.mu.Lock()
 	a, ok := s.actions[id]
@@ -120,9 +120,13 @@ func (s *Store) Revert(id, reason string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("action %s not found", id)
 	}
+	if a.State == events.StateReverted {
+		s.mu.Unlock()
+		return nil
+	}
 	if a.State != events.StateActive {
 		s.mu.Unlock()
-		return fmt.Errorf("action %s is %s, not active", id, a.State)
+		return fmt.Errorf("action %s is %s, cannot revert", id, a.State)
 	}
 	from := a.State
 	a.State = events.StateReverted
@@ -132,24 +136,33 @@ func (s *Store) Revert(id, reason string) error {
 
 	s.writeAudit(from, events.StateReverted, "system", reason, a)
 	slog.Info("action reverted", "id", id, "reason", reason)
-
-	if s.OnRevert != nil {
-		copy := *a
-		go s.OnRevert(&copy)
-	}
 	return nil
 }
 
-func (s *Store) transition(id, expectedFrom, to, actor, reason string) error {
+// transition is the generic idempotent state changer.
+// allowedFrom lists the valid source states; if the action is already
+// in the target state, it returns nil (idempotent).
+func (s *Store) transition(id, to, actor, reason string, allowedFrom ...string) error {
 	s.mu.Lock()
 	a, ok := s.actions[id]
 	if !ok {
 		s.mu.Unlock()
 		return fmt.Errorf("action %s not found", id)
 	}
-	if a.State != expectedFrom {
+	if a.State == to {
 		s.mu.Unlock()
-		return fmt.Errorf("action %s is %s, expected %s", id, a.State, expectedFrom)
+		return nil
+	}
+	allowed := false
+	for _, f := range allowedFrom {
+		if a.State == f {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		s.mu.Unlock()
+		return fmt.Errorf("action %s is %s, cannot transition to %s", id, a.State, to)
 	}
 	from := a.State
 	a.State = to
@@ -187,34 +200,17 @@ func (s *Store) ListByState(state string) []events.EnforcementAction {
 	return out
 }
 
-// RevertExpired checks all active actions and reverts those past their TTL.
-func (s *Store) RevertExpired() {
+// ListExpired returns active actions that have passed their TTL.
+func (s *Store) ListExpired() []events.EnforcementAction {
 	s.mu.RLock()
-	var expired []string
-	for id, a := range s.actions {
+	defer s.mu.RUnlock()
+	var out []events.EnforcementAction
+	for _, a := range s.actions {
 		if a.State == events.StateActive && a.ExpiresAt != nil && time.Now().After(*a.ExpiresAt) {
-			expired = append(expired, id)
+			out = append(out, *a)
 		}
 	}
-	s.mu.RUnlock()
-
-	for _, id := range expired {
-		s.Revert(id, "TTL expired")
-	}
-}
-
-// RunTTLRevert periodically checks for expired active actions.
-func (s *Store) RunTTLRevert(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.RevertExpired()
-		}
-	}
+	return out
 }
 
 func (s *Store) writeAudit(from, to, actor, reason string, a *events.EnforcementAction) {
