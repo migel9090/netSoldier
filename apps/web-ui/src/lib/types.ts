@@ -18,3 +18,21 @@ export interface Alert {
 	severity: string;
 	source: string;
 }
+
+export interface EnforcementAction {
+	id: string;
+	timestamp: string;
+	detection_id: string;
+	action_type: string;
+	state: string;
+	target_mac: string;
+	target_ip: string;
+	blocked_domain: string;
+	policy_rule: string;
+	auto_approved: boolean;
+	ttl_seconds: number;
+	expires_at: string | null;
+	reverted_at: string | null;
+	approved_by: string;
+	reason: string;
+}
