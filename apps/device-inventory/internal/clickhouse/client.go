@@ -64,6 +64,38 @@ func (c *Client) Insert(ctx context.Context, table string, records ...any) error
 	return c.do(req)
 }
 
+// Query runs a SELECT and decodes the JSON result into dest (a pointer to
+// a slice). The query must NOT contain a FORMAT clause.
+func (c *Client) Query(ctx context.Context, query string, dest any) error {
+	fullQuery := query + " FORMAT JSON"
+	u := fmt.Sprintf("%s/?database=%s&query=%s", c.baseURL,
+		url.QueryEscape(c.database), url.QueryEscape(fullQuery))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("clickhouse %d: %s", resp.StatusCode, body)
+	}
+
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return fmt.Errorf("decode: %w", err)
+	}
+	return json.Unmarshal(envelope.Data, dest)
+}
+
 func (c *Client) do(req *http.Request) error {
 	resp, err := c.http.Do(req)
 	if err != nil {

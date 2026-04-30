@@ -4,7 +4,7 @@ import { env } from '$env/dynamic/private';
 export const handle: Handle = async ({ event, resolve }) => {
 	const { pathname } = event.url;
 
-	if (pathname === '/api/devices' || pathname === '/api/alerts') {
+	if (pathname === '/api/devices' || pathname === '/api/alerts' || pathname === '/api/topology') {
 		return proxyAPI(pathname);
 	}
 
@@ -19,10 +19,14 @@ async function proxyAPI(pathname: string): Promise<Response> {
 	const deviceInventoryURL = env.DEVICE_INVENTORY_URL || 'http://device-inventory:8081';
 	const detectionEngineURL = env.DETECTION_ENGINE_URL || 'http://detection-engine:8080';
 
-	const target =
-		pathname === '/api/devices'
-			? `${deviceInventoryURL}/devices`
-			: `${detectionEngineURL}/alerts`;
+	let target: string;
+	if (pathname === '/api/devices') {
+		target = `${deviceInventoryURL}/devices`;
+	} else if (pathname === '/api/topology') {
+		target = `${deviceInventoryURL}/topology`;
+	} else {
+		target = `${detectionEngineURL}/alerts`;
+	}
 
 	try {
 		const res = await fetch(target);

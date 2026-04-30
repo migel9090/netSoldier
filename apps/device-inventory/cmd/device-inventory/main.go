@@ -96,10 +96,12 @@ func main() {
 	go processDiscoveries(ctx, db, chClient, discoveryCh)
 
 	handler := api.NewHandler(db)
+	topoHandler := api.NewTopologyHandler(db, chClient)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /devices", handler.ListDevices)
 	mux.HandleFunc("GET /devices/{mac}", handler.GetDevice)
 	mux.HandleFunc("PUT /devices/{mac}/labels", handler.SetLabels)
+	mux.HandleFunc("GET /topology", topoHandler.ServeHTTP)
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.Handle("GET /metrics", promhttp.Handler())
 

@@ -19,6 +19,31 @@ export interface Alert {
 	source: string;
 }
 
+export interface TopologyNode {
+	id: string;
+	label: string;
+	mac: string;
+	ip: string;
+	device_type: string;
+	vendor: string;
+	is_local: boolean;
+	total_bytes: number;
+	connection_count: number;
+}
+
+export interface TopologyEdge {
+	source: string;
+	target: string;
+	total_bytes: number;
+	total_packets: number;
+	flow_count: number;
+}
+
+export interface TopologyData {
+	nodes: TopologyNode[];
+	edges: TopologyEdge[];
+}
+
 export interface EnforcementAction {
 	id: string;
 	timestamp: string;

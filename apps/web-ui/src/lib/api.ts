@@ -1,4 +1,4 @@
-import type { Device, Alert, EnforcementAction } from './types';
+import type { Device, Alert, EnforcementAction, TopologyData } from './types';
 
 export async function fetchDevices(): Promise<Device[]> {
 	const res = await fetch('/api/devices');
@@ -9,6 +9,12 @@ export async function fetchDevices(): Promise<Device[]> {
 export async function fetchAlerts(): Promise<Alert[]> {
 	const res = await fetch('/api/alerts');
 	if (!res.ok) throw new Error(`Alerts API: ${res.status}`);
+	return res.json();
+}
+
+export async function fetchTopology(hours = 1): Promise<TopologyData> {
+	const res = await fetch(`/api/topology?hours=${hours}`);
+	if (!res.ok) throw new Error(`Topology API: ${res.status}`);
 	return res.json();
 }
 

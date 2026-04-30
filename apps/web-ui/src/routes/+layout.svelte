@@ -9,6 +9,7 @@
 <nav>
 	<a href="/" class="logo">netSoldier</a>
 	<a href="/devices" class:active={page.url.pathname === '/devices'}>Devices</a>
+	<a href="/map" class:active={page.url.pathname === '/map'}>Map</a>
 	<a href="/alerts" class:active={page.url.pathname === '/alerts'}>Alerts</a>
 	<a href="/killswitch" class:active={page.url.pathname === '/killswitch'}>Killswitch</a>
 </nav>
