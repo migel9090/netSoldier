@@ -44,6 +44,37 @@ export interface TopologyData {
 	edges: TopologyEdge[];
 }
 
+export interface DeviceConnection {
+	timestamp: string;
+	dst_ip: string;
+	dst_domain: string;
+	dst_port: number;
+	protocol: number;
+	bytes_in: number;
+	bytes_out: number;
+	duration_ms: number;
+}
+
+export interface DeviceDNS {
+	timestamp: string;
+	domain: string;
+	query_type: string;
+	answer: string;
+	status: string;
+	response_ms: number;
+	blocked: number;
+}
+
+export interface DeviceAlert {
+	timestamp: string;
+	id: string;
+	domain: string;
+	query_type: string;
+	matched_ioc: string;
+	severity: string;
+	source: string;
+}
+
 export interface EnforcementAction {
 	id: string;
 	timestamp: string;

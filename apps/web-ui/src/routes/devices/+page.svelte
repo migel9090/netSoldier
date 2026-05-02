@@ -48,7 +48,7 @@
 		<tbody>
 			{#each devices as d}
 				<tr>
-					<td class="mono">{d.mac}</td>
+					<td class="mono"><a href="/devices/{encodeURIComponent(d.mac)}">{d.mac}</a></td>
 					<td class="mono">{d.ip || '—'}</td>
 					<td>{d.hostname || '—'}</td>
 					<td class="mono truncate" title={d.dhcp_fingerprint}>{d.dhcp_fingerprint || '—'}</td>

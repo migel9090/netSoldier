@@ -1,4 +1,4 @@
-import type { Device, Alert, EnforcementAction, TopologyData } from './types';
+import type { Device, Alert, EnforcementAction, TopologyData, DeviceConnection, DeviceDNS, DeviceAlert } from './types';
 
 export async function fetchDevices(): Promise<Device[]> {
 	const res = await fetch('/api/devices');
@@ -10,6 +10,30 @@ export async function fetchAlerts(): Promise<Alert[]> {
 	const res = await fetch('/api/alerts');
 	if (!res.ok) throw new Error(`Alerts API: ${res.status}`);
 	return res.json();
+}
+
+export async function fetchDevice(mac: string): Promise<Device> {
+	const res = await fetch(`/api/devices/${encodeURIComponent(mac)}`);
+	if (!res.ok) throw new Error(`Device API: ${res.status}`);
+	return res.json();
+}
+
+export async function fetchDeviceConnections(mac: string): Promise<DeviceConnection[]> {
+	const res = await fetch(`/api/devices/${encodeURIComponent(mac)}/connections`);
+	if (!res.ok) throw new Error(`Connections API: ${res.status}`);
+	return (await res.json()) ?? [];
+}
+
+export async function fetchDeviceDNS(mac: string): Promise<DeviceDNS[]> {
+	const res = await fetch(`/api/devices/${encodeURIComponent(mac)}/dns`);
+	if (!res.ok) throw new Error(`DNS API: ${res.status}`);
+	return (await res.json()) ?? [];
+}
+
+export async function fetchDeviceAlerts(mac: string): Promise<DeviceAlert[]> {
+	const res = await fetch(`/api/devices/${encodeURIComponent(mac)}/alerts`);
+	if (!res.ok) throw new Error(`Alerts API: ${res.status}`);
+	return (await res.json()) ?? [];
 }
 
 export async function fetchTopology(hours = 1): Promise<TopologyData> {

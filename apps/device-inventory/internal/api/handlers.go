@@ -5,15 +5,17 @@ import (
 	"log/slog"
 	"net/http"
 
+	ch "github.com/migel9090/netSoldier/apps/device-inventory/internal/clickhouse"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/store"
 )
 
 type Handler struct {
 	store *store.Store
+	ch    *ch.Client
 }
 
-func NewHandler(s *store.Store) *Handler {
-	return &Handler{store: s}
+func NewHandler(s *store.Store, chClient *ch.Client) *Handler {
+	return &Handler{store: s, ch: chClient}
 }
 
 func (h *Handler) ListDevices(w http.ResponseWriter, r *http.Request) {
