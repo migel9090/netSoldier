@@ -17,6 +17,10 @@ export interface Alert {
 	matched_ioc: string;
 	severity: string;
 	source: string;
+	confidence: number;
+	mitre_id: string;
+	mitre_name: string;
+	threat: string;
 }
 
 export interface TopologyNode {
