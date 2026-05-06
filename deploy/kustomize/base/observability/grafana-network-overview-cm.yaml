@@ -1,0 +1,490 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netsoldier-network-overview
+  labels:
+    grafana_dashboard: "1"
+data:
+  netsoldier-network-overview.json: |-
+    {
+      "uid": "netsoldier-network-overview",
+      "title": "netSoldier — Network Overview",
+      "tags": ["netsoldier", "network"],
+      "schemaVersion": 39,
+      "version": 1,
+      "timezone": "browser",
+      "editable": true,
+      "time": { "from": "now-1h", "to": "now" },
+      "refresh": "30s",
+      "templating": {
+        "list": [
+          {
+            "name": "clickhouse",
+            "type": "datasource",
+            "query": "grafana-clickhouse-datasource",
+            "current": { "selected": true, "text": "ClickHouse", "value": "ClickHouse" }
+          }
+        ]
+      },
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 100,
+          "type": "row",
+          "title": "Traffic Overview",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false
+        },
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Total Flows",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT count() AS total_flows FROM netsoldier.network_flows WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [ { "color": "blue", "value": null } ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Total Traffic",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT sum(bytes_in + bytes_out) AS total_bytes FROM netsoldier.network_flows WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [ { "color": "green", "value": null } ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Unique Sources",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT uniq(src_ip) AS unique_sources FROM netsoldier.network_flows WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [ { "color": "purple", "value": null } ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Unique Destinations",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT uniq(dst_ip) AS unique_dests FROM netsoldier.network_flows WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [ { "color": "orange", "value": null } ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 200,
+          "type": "row",
+          "title": "Top Talkers",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+          "collapsed": false
+        },
+        {
+          "id": 5,
+          "type": "bargauge",
+          "title": "Top 10 Source IPs by Traffic",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 9, "w": 12, "x": 0, "y": 6 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT src_ip, sum(bytes_in + bytes_out) AS total_bytes FROM netsoldier.network_flows WHERE $__timeFilter(timestamp) GROUP BY src_ip ORDER BY total_bytes DESC LIMIT 10",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": { "mode": "continuous-blues" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [ { "color": "blue", "value": null } ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "showUnfilled": true,
+            "namePlacement": "auto",
+            "valueMode": "text"
+          }
+        },
+        {
+          "id": 6,
+          "type": "bargauge",
+          "title": "Top 10 Destinations by Traffic",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 9, "w": 12, "x": 12, "y": 6 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT if(dst_domain != '', dst_domain, dst_ip) AS destination, sum(bytes_in + bytes_out) AS total_bytes FROM netsoldier.connections WHERE $__timeFilter(timestamp) GROUP BY destination ORDER BY total_bytes DESC LIMIT 10",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": { "mode": "continuous-greens" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [ { "color": "green", "value": null } ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "showUnfilled": true,
+            "namePlacement": "auto",
+            "valueMode": "text"
+          }
+        },
+        {
+          "id": 300,
+          "type": "row",
+          "title": "Protocol Distribution",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+          "collapsed": false
+        },
+        {
+          "id": 7,
+          "type": "piechart",
+          "title": "Protocols by Bytes",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 9, "w": 8, "x": 0, "y": 16 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT multiIf(protocol = 6, 'TCP', protocol = 17, 'UDP', protocol = 1, 'ICMP', protocol = 47, 'GRE', protocol = 58, 'ICMPv6', toString(protocol)) AS proto, sum(bytes_in + bytes_out) AS total_bytes FROM netsoldier.network_flows WHERE $__timeFilter(timestamp) GROUP BY proto ORDER BY total_bytes DESC",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": { "mode": "palette-classic" }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "pieType": "donut",
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] }
+          }
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "Traffic by Protocol",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 9, "w": 16, "x": 8, "y": 16 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 2,
+              "queryType": "sql",
+              "rawSql": "SELECT $__timeInterval(timestamp) AS time, multiIf(protocol = 6, 'TCP', protocol = 17, 'UDP', protocol = 1, 'ICMP', toString(protocol)) AS proto, sum(bytes_in + bytes_out) AS total_bytes FROM netsoldier.network_flows WHERE $__timeFilter(timestamp) GROUP BY time, proto ORDER BY time",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 15,
+                "showPoints": "never",
+                "stacking": { "mode": "normal" }
+              }
+            }
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 400,
+          "type": "row",
+          "title": "Countries / ASN (External Traffic)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+          "collapsed": false
+        },
+        {
+          "id": 9,
+          "type": "table",
+          "title": "Top External Destinations",
+          "description": "Non-RFC1918 destination IPs ranked by traffic volume. Enable GeoIP enrichment in Vector for country/ASN resolution.",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 9, "w": 14, "x": 0, "y": 26 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT dst_ip, sum(bytes_in + bytes_out) AS total_bytes, sum(packets_in + packets_out) AS total_packets, count() AS flow_count FROM netsoldier.network_flows WHERE $__timeFilter(timestamp) AND NOT (isIPAddressInRange(dst_ip, '10.0.0.0/8') OR isIPAddressInRange(dst_ip, '172.16.0.0/12') OR isIPAddressInRange(dst_ip, '192.168.0.0/16') OR isIPAddressInRange(dst_ip, '127.0.0.0/8')) GROUP BY dst_ip ORDER BY total_bytes DESC LIMIT 20",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "total_bytes" },
+                "properties": [
+                  { "id": "unit", "value": "bytes" },
+                  { "id": "displayName", "value": "Traffic" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "total_packets" },
+                "properties": [
+                  { "id": "displayName", "value": "Packets" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "flow_count" },
+                "properties": [
+                  { "id": "displayName", "value": "Flows" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "dst_ip" },
+                "properties": [
+                  { "id": "displayName", "value": "Destination IP" }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "sortBy": [{ "displayName": "Traffic", "desc": true }],
+            "footer": { "show": false }
+          }
+        },
+        {
+          "id": 10,
+          "type": "bargauge",
+          "title": "Top Destination Ports",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 9, "w": 10, "x": 14, "y": 26 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT concat(toString(dst_port), ' (', multiIf(dst_port = 443, 'HTTPS', dst_port = 80, 'HTTP', dst_port = 53, 'DNS', dst_port = 22, 'SSH', dst_port = 8080, 'HTTP-alt', dst_port = 8443, 'HTTPS-alt', dst_port = 25, 'SMTP', dst_port = 993, 'IMAPS', toString(dst_port)), ')') AS port_service, sum(bytes_in + bytes_out) AS total_bytes FROM netsoldier.network_flows WHERE $__timeFilter(timestamp) AND dst_port > 0 GROUP BY port_service ORDER BY total_bytes DESC LIMIT 10",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": { "mode": "continuous-purples" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [ { "color": "purple", "value": null } ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "showUnfilled": true,
+            "namePlacement": "auto",
+            "valueMode": "text"
+          }
+        },
+        {
+          "id": 500,
+          "type": "row",
+          "title": "Traffic Volume",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+          "collapsed": false
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "Total Traffic Over Time",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 2,
+              "queryType": "sql",
+              "rawSql": "SELECT $__timeInterval(timestamp) AS time, sum(bytes_in) AS bytes_in, sum(bytes_out) AS bytes_out FROM netsoldier.network_flows WHERE $__timeFilter(timestamp) GROUP BY time ORDER BY time",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "bytes_in" },
+                "properties": [
+                  { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } },
+                  { "id": "displayName", "value": "Inbound" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "bytes_out" },
+                "properties": [
+                  { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } },
+                  { "id": "displayName", "value": "Outbound" }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "Flow Count Over Time",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 2,
+              "queryType": "sql",
+              "rawSql": "SELECT $__timeInterval(timestamp) AS time, count() AS flows FROM netsoldier.network_flows WHERE $__timeFilter(timestamp) GROUP BY time ORDER BY time",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "fixed", "fixedColor": "orange" },
+              "custom": {
+                "drawStyle": "bars",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 50,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        }
+      ]
+    }

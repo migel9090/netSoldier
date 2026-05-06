@@ -24,6 +24,8 @@ prometheus:
 
 grafana:
   adminPassword: changeme
+  plugins:
+    - grafana-clickhouse-datasource
   additionalDataSources:
     - name: Loki
       type: loki
@@ -38,6 +40,15 @@ grafana:
       jsonData:
         nodeGraph:
           enabled: true
+    - name: ClickHouse
+      type: grafana-clickhouse-datasource
+      access: proxy
+      isDefault: false
+      jsonData:
+        defaultDatabase: netsoldier
+        port: 9000
+        protocol: native
+        server: clickhouse.netsoldier.svc
   persistence:
     enabled: true
     size: 1Gi
