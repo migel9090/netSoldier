@@ -1,0 +1,780 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netsoldier-dns-threat-intel
+  labels:
+    grafana_dashboard: "1"
+data:
+  netsoldier-dns-threat-intel.json: |-
+    {
+      "uid": "netsoldier-dns-threat-intel",
+      "title": "netSoldier — DNS & Threat-Intel",
+      "tags": ["netsoldier", "dns", "threat-intel"],
+      "schemaVersion": 39,
+      "version": 1,
+      "timezone": "browser",
+      "editable": true,
+      "time": { "from": "now-1h", "to": "now" },
+      "refresh": "30s",
+      "templating": {
+        "list": [
+          {
+            "name": "clickhouse",
+            "type": "datasource",
+            "query": "grafana-clickhouse-datasource",
+            "current": { "selected": true, "text": "ClickHouse", "value": "ClickHouse" }
+          }
+        ]
+      },
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 100,
+          "type": "row",
+          "title": "DNS Overview",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false
+        },
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Total Queries",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT count() AS total_queries FROM netsoldier.dns_queries WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [ { "color": "blue", "value": null } ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Blocked Queries",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT countIf(blocked = 1) AS blocked_queries FROM netsoldier.dns_queries WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 100 },
+                  { "color": "red", "value": 1000 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 3,
+          "type": "gauge",
+          "title": "Block Rate",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT round(countIf(blocked = 1) * 100.0 / count(), 2) AS block_rate FROM netsoldier.dns_queries WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "max": 100,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 20 },
+                  { "color": "red", "value": 50 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true
+          }
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Avg Response Time",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT round(avg(response_ms), 1) AS avg_ms FROM netsoldier.dns_queries WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 100 },
+                  { "color": "red", "value": 500 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 200,
+          "type": "row",
+          "title": "DNS Activity",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+          "collapsed": false
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Query Rate Over Time",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 2,
+              "queryType": "sql",
+              "rawSql": "SELECT $__timeInterval(timestamp) AS time, count() AS queries FROM netsoldier.dns_queries WHERE $__timeFilter(timestamp) GROUP BY time ORDER BY time",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "fixed", "fixedColor": "blue" },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 15,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Blocked vs Allowed",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 2,
+              "queryType": "sql",
+              "rawSql": "SELECT $__timeInterval(timestamp) AS time, countIf(blocked = 0) AS allowed, countIf(blocked = 1) AS blocked FROM netsoldier.dns_queries WHERE $__timeFilter(timestamp) GROUP BY time ORDER BY time",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 20,
+                "showPoints": "never",
+                "stacking": { "mode": "normal" }
+              }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "allowed" },
+                "properties": [
+                  { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } },
+                  { "id": "displayName", "value": "Allowed" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "blocked" },
+                "properties": [
+                  { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } },
+                  { "id": "displayName", "value": "Blocked" }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 300,
+          "type": "row",
+          "title": "DNS Breakdown",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+          "collapsed": false
+        },
+        {
+          "id": 7,
+          "type": "table",
+          "title": "Top Queried Domains",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 9, "w": 10, "x": 0, "y": 15 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT domain, count() AS queries, countIf(blocked = 1) AS blocked, round(avg(response_ms), 1) AS avg_ms FROM netsoldier.dns_queries WHERE $__timeFilter(timestamp) GROUP BY domain ORDER BY queries DESC LIMIT 15",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "domain" },
+                "properties": [
+                  { "id": "displayName", "value": "Domain" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "queries" },
+                "properties": [
+                  { "id": "displayName", "value": "Queries" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "blocked" },
+                "properties": [
+                  { "id": "displayName", "value": "Blocked" },
+                  { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+                  { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "avg_ms" },
+                "properties": [
+                  { "id": "displayName", "value": "Avg ms" },
+                  { "id": "unit", "value": "ms" }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "sortBy": [{ "displayName": "Queries", "desc": true }],
+            "footer": { "show": false }
+          }
+        },
+        {
+          "id": 8,
+          "type": "piechart",
+          "title": "Query Types",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 9, "w": 6, "x": 10, "y": 15 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT query_type, count() AS queries FROM netsoldier.dns_queries WHERE $__timeFilter(timestamp) GROUP BY query_type ORDER BY queries DESC",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "pieType": "donut",
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] }
+          }
+        },
+        {
+          "id": 9,
+          "type": "bargauge",
+          "title": "Top Clients by Queries",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 9, "w": 8, "x": 16, "y": 15 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT client_ip, count() AS queries FROM netsoldier.dns_queries WHERE $__timeFilter(timestamp) GROUP BY client_ip ORDER BY queries DESC LIMIT 10",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "continuous-blues" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [ { "color": "blue", "value": null } ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "showUnfilled": true,
+            "namePlacement": "auto",
+            "valueMode": "text"
+          }
+        },
+        {
+          "id": 400,
+          "type": "row",
+          "title": "Threat Intel — IoC Hits",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+          "collapsed": false
+        },
+        {
+          "id": 10,
+          "type": "stat",
+          "title": "Total IoC Hits",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 8, "x": 0, "y": 25 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT count() AS total_hits FROM netsoldier.alerts WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 10 },
+                  { "color": "red", "value": 50 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "area"
+          }
+        },
+        {
+          "id": 11,
+          "type": "stat",
+          "title": "Critical / High Alerts",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 8, "x": 8, "y": 25 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT countIf(severity IN ('critical', 'high')) AS critical_high FROM netsoldier.alerts WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "red", "value": 1 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 12,
+          "type": "stat",
+          "title": "Unacknowledged",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 8, "x": 16, "y": 25 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT countIf(acknowledged = 0) AS unacked FROM netsoldier.alerts WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "orange", "value": null },
+                  { "color": "red", "value": 5 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 500,
+          "type": "row",
+          "title": "Threat Intel Activity",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 },
+          "collapsed": false
+        },
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "IoC Hits Over Time",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 16, "x": 0, "y": 30 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 2,
+              "queryType": "sql",
+              "rawSql": "SELECT $__timeInterval(timestamp) AS time, severity, count() AS hits FROM netsoldier.alerts WHERE $__timeFilter(timestamp) GROUP BY time, severity ORDER BY time",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 80,
+                "showPoints": "never",
+                "stacking": { "mode": "normal" }
+              }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "critical" },
+                "properties": [
+                  { "id": "color", "value": { "mode": "fixed", "fixedColor": "dark-red" } }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "high" },
+                "properties": [
+                  { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "medium" },
+                "properties": [
+                  { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "low" },
+                "properties": [
+                  { "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 14,
+          "type": "piechart",
+          "title": "IoC Hits by Source",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 30 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT source, count() AS hits FROM netsoldier.alerts WHERE $__timeFilter(timestamp) GROUP BY source ORDER BY hits DESC",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "pieType": "donut",
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] }
+          }
+        },
+        {
+          "id": 600,
+          "type": "row",
+          "title": "Threat Intel Details",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 },
+          "collapsed": false
+        },
+        {
+          "id": 15,
+          "type": "table",
+          "title": "Recent Alerts",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 9, "w": 14, "x": 0, "y": 39 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT timestamp, client_ip, domain, matched_ioc, severity, source, if(acknowledged = 1, 'Yes', 'No') AS acked FROM netsoldier.alerts WHERE $__timeFilter(timestamp) ORDER BY timestamp DESC LIMIT 50",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "timestamp" },
+                "properties": [
+                  { "id": "displayName", "value": "Time" },
+                  { "id": "unit", "value": "dateTimeAsLocal" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "client_ip" },
+                "properties": [
+                  { "id": "displayName", "value": "Client" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "domain" },
+                "properties": [
+                  { "id": "displayName", "value": "Domain" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "matched_ioc" },
+                "properties": [
+                  { "id": "displayName", "value": "Matched IoC" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "severity" },
+                "properties": [
+                  { "id": "displayName", "value": "Severity" },
+                  { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+                  { "id": "mappings", "value": [
+                    { "type": "value", "options": { "critical": { "color": "dark-red", "text": "CRITICAL" }, "high": { "color": "red", "text": "HIGH" }, "medium": { "color": "orange", "text": "MEDIUM" }, "low": { "color": "yellow", "text": "LOW" } } }
+                  ]}
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "source" },
+                "properties": [
+                  { "id": "displayName", "value": "Source" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "acked" },
+                "properties": [
+                  { "id": "displayName", "value": "Acked" }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "sortBy": [{ "displayName": "Time", "desc": true }],
+            "footer": { "show": false }
+          }
+        },
+        {
+          "id": 16,
+          "type": "bargauge",
+          "title": "Top Targeted Clients",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 9, "w": 10, "x": 14, "y": 39 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT client_ip, count() AS hits FROM netsoldier.alerts WHERE $__timeFilter(timestamp) GROUP BY client_ip ORDER BY hits DESC LIMIT 10",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "continuous-reds" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [ { "color": "red", "value": null } ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "showUnfilled": true,
+            "namePlacement": "auto",
+            "valueMode": "text"
+          }
+        },
+        {
+          "id": 700,
+          "type": "row",
+          "title": "Sinkhole Activity",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 48 },
+          "collapsed": false
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "Sinkholed Domains Over Time",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 49 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 2,
+              "queryType": "sql",
+              "rawSql": "SELECT $__timeInterval(timestamp) AS time, count() AS blocked_queries FROM netsoldier.dns_queries WHERE $__timeFilter(timestamp) AND blocked = 1 GROUP BY time ORDER BY time",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "fixed", "fixedColor": "red" },
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 60,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 18,
+          "type": "table",
+          "title": "Top Blocked Domains",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 49 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT domain, count() AS block_count, uniq(client_ip) AS unique_clients FROM netsoldier.dns_queries WHERE $__timeFilter(timestamp) AND blocked = 1 GROUP BY domain ORDER BY block_count DESC LIMIT 15",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "domain" },
+                "properties": [
+                  { "id": "displayName", "value": "Blocked Domain" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "block_count" },
+                "properties": [
+                  { "id": "displayName", "value": "Blocks" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "unique_clients" },
+                "properties": [
+                  { "id": "displayName", "value": "Clients" }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "sortBy": [{ "displayName": "Blocks", "desc": true }],
+            "footer": { "show": false }
+          }
+        }
+      ]
+    }
