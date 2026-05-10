@@ -4,5 +4,6 @@ kind: Kustomization
 resources:
   - grafana-dashboard-cm.yaml
   - grafana-dns-threat-intel-cm.yaml
+  - grafana-killswitch-audit-cm.yaml
   - grafana-network-overview-cm.yaml
   - prometheus-rules.yaml

@@ -1,0 +1,658 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netsoldier-killswitch-audit
+  labels:
+    grafana_dashboard: "1"
+data:
+  netsoldier-killswitch-audit.json: |-
+    {
+      "uid": "netsoldier-killswitch-audit",
+      "title": "netSoldier — Killswitch & Audit",
+      "tags": ["netsoldier", "killswitch", "audit"],
+      "schemaVersion": 39,
+      "version": 1,
+      "timezone": "browser",
+      "editable": true,
+      "time": { "from": "now-24h", "to": "now" },
+      "refresh": "30s",
+      "templating": {
+        "list": [
+          {
+            "name": "clickhouse",
+            "type": "datasource",
+            "query": "grafana-clickhouse-datasource",
+            "current": { "selected": true, "text": "ClickHouse", "value": "ClickHouse" }
+          }
+        ]
+      },
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 100,
+          "type": "row",
+          "title": "Killswitch Overview",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false
+        },
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Total Actions",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT uniq(action_id) AS total_actions FROM netsoldier.audit_log WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [ { "color": "blue", "value": null } ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Active Now",
+          "description": "Actions currently in active enforcement state (all-time, not limited by time range).",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT count() AS active_now FROM (SELECT action_id, argMax(to_state, timestamp) AS latest FROM netsoldier.audit_log GROUP BY action_id) WHERE latest = 'active'",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "red", "value": 1 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Pending Approval",
+          "description": "Actions awaiting operator approval (all-time).",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT count() AS pending FROM (SELECT action_id, argMax(to_state, timestamp) AS latest FROM netsoldier.audit_log GROUP BY action_id) WHERE latest = 'pending'",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 1 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Reverted / Rejected",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT uniqIf(action_id, to_state IN ('reverted', 'rejected')) AS reverted_rejected FROM netsoldier.audit_log WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 1 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 200,
+          "type": "row",
+          "title": "Action Activity",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+          "collapsed": false
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "New Actions Over Time",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 9, "w": 12, "x": 0, "y": 6 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 2,
+              "queryType": "sql",
+              "rawSql": "SELECT $__timeInterval(timestamp) AS time, action_type, count() AS actions FROM netsoldier.audit_log WHERE $__timeFilter(timestamp) AND from_state = '' GROUP BY time, action_type ORDER BY time",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 80,
+                "showPoints": "never",
+                "stacking": { "mode": "normal" }
+              }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "dns-sinkhole" },
+                "properties": [
+                  { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "arp-isolation" },
+                "properties": [
+                  { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "managed-switch" },
+                "properties": [
+                  { "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 6,
+          "type": "piechart",
+          "title": "Current State Distribution",
+          "description": "Latest state of each action (all-time).",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 9, "w": 6, "x": 12, "y": 6 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT state, count() AS actions FROM (SELECT action_id, argMax(to_state, timestamp) AS state FROM netsoldier.audit_log GROUP BY action_id) GROUP BY state ORDER BY actions DESC",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "active" },
+                "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "pending" },
+                "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } } ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "reverted" },
+                "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } } ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "rejected" },
+                "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } } ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "approved" },
+                "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } } ]
+              }
+            ]
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "pieType": "donut",
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] }
+          }
+        },
+        {
+          "id": 7,
+          "type": "piechart",
+          "title": "Actions by Type",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 9, "w": 6, "x": 18, "y": 6 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT action_type, uniq(action_id) AS actions FROM netsoldier.audit_log WHERE $__timeFilter(timestamp) GROUP BY action_type ORDER BY actions DESC",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "pieType": "donut",
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] }
+          }
+        },
+        {
+          "id": 300,
+          "type": "row",
+          "title": "Reaction Time & False Positives",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+          "collapsed": false
+        },
+        {
+          "id": 8,
+          "type": "gauge",
+          "title": "Avg Reaction Time",
+          "description": "Average seconds from action creation to active enforcement.",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 6, "w": 8, "x": 0, "y": 16 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT round(avg(reaction_s), 1) AS avg_reaction_s FROM (SELECT action_id, dateDiff('second', min(timestamp), maxIf(timestamp, to_state = 'active')) AS reaction_s FROM netsoldier.audit_log WHERE $__timeFilter(timestamp) GROUP BY action_id HAVING maxIf(timestamp, to_state = 'active') > toDateTime('1970-01-01'))",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "min": 0,
+              "max": 300,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 60 },
+                  { "color": "red", "value": 180 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true
+          }
+        },
+        {
+          "id": 9,
+          "type": "gauge",
+          "title": "False Positive Rate",
+          "description": "Percentage of actions that were reverted or rejected.",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 6, "w": 8, "x": 8, "y": 16 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT round(uniqIf(action_id, to_state IN ('reverted', 'rejected')) * 100.0 / nullIf(uniq(action_id), 0), 1) AS fp_rate FROM netsoldier.audit_log WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "max": 100,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 10 },
+                  { "color": "red", "value": 30 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true
+          }
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Reaction Time per Action",
+          "description": "Individual reaction times (creation → active) plotted over time.",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 6, "w": 8, "x": 16, "y": 16 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 2,
+              "queryType": "sql",
+              "rawSql": "SELECT minIf(timestamp, from_state = '') AS time, dateDiff('second', min(timestamp), maxIf(timestamp, to_state = 'active')) AS reaction_s FROM netsoldier.audit_log WHERE $__timeFilter(timestamp) GROUP BY action_id HAVING maxIf(timestamp, to_state = 'active') > toDateTime('1970-01-01') ORDER BY time",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "color": { "mode": "fixed", "fixedColor": "blue" },
+              "custom": {
+                "drawStyle": "points",
+                "pointSize": 8,
+                "showPoints": "always"
+              }
+            }
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 400,
+          "type": "row",
+          "title": "Audit Trail",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+          "collapsed": false
+        },
+        {
+          "id": 11,
+          "type": "table",
+          "title": "Recent Audit Entries",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 10, "w": 14, "x": 0, "y": 23 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT timestamp, action_id, action_type, from_state, to_state, actor, target_ip, target_mac, reason FROM netsoldier.audit_log WHERE $__timeFilter(timestamp) ORDER BY timestamp DESC LIMIT 100",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "timestamp" },
+                "properties": [
+                  { "id": "displayName", "value": "Time" },
+                  { "id": "unit", "value": "dateTimeAsLocal" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "action_id" },
+                "properties": [
+                  { "id": "displayName", "value": "Action" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "action_type" },
+                "properties": [
+                  { "id": "displayName", "value": "Type" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "from_state" },
+                "properties": [
+                  { "id": "displayName", "value": "From" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "to_state" },
+                "properties": [
+                  { "id": "displayName", "value": "To" },
+                  { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+                  { "id": "mappings", "value": [
+                    { "type": "value", "options": { "active": { "color": "red", "text": "active" }, "pending": { "color": "orange", "text": "pending" }, "approved": { "color": "blue", "text": "approved" }, "reverted": { "color": "green", "text": "reverted" }, "rejected": { "color": "yellow", "text": "rejected" } } }
+                  ]}
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "actor" },
+                "properties": [
+                  { "id": "displayName", "value": "Actor" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "target_ip" },
+                "properties": [
+                  { "id": "displayName", "value": "Target IP" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "target_mac" },
+                "properties": [
+                  { "id": "displayName", "value": "Target MAC" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "reason" },
+                "properties": [
+                  { "id": "displayName", "value": "Reason" }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "sortBy": [{ "displayName": "Time", "desc": true }],
+            "footer": { "show": false }
+          }
+        },
+        {
+          "id": 12,
+          "type": "bargauge",
+          "title": "Top Targeted Devices",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 10, "w": 10, "x": 14, "y": 23 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT if(target_mac != '', concat(target_ip, ' (', target_mac, ')'), target_ip) AS device, uniq(action_id) AS actions FROM netsoldier.audit_log WHERE $__timeFilter(timestamp) AND from_state = '' GROUP BY device ORDER BY actions DESC LIMIT 10",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "continuous-reds" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [ { "color": "red", "value": null } ]
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "showUnfilled": true,
+            "namePlacement": "auto",
+            "valueMode": "text"
+          }
+        },
+        {
+          "id": 500,
+          "type": "row",
+          "title": "State Transitions",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 },
+          "collapsed": false
+        },
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "State Transitions Over Time",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 2,
+              "queryType": "sql",
+              "rawSql": "SELECT $__timeInterval(timestamp) AS time, to_state, count() AS transitions FROM netsoldier.audit_log WHERE $__timeFilter(timestamp) GROUP BY time, to_state ORDER BY time",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 70,
+                "showPoints": "never",
+                "stacking": { "mode": "normal" }
+              }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "active" },
+                "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "pending" },
+                "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } } ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "approved" },
+                "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } } ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "reverted" },
+                "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } } ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "rejected" },
+                "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } } ]
+              }
+            ]
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 14,
+          "type": "timeseries",
+          "title": "Auto-Approved vs Manual",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 2,
+              "queryType": "sql",
+              "rawSql": "SELECT $__timeInterval(timestamp) AS time, countIf(actor = 'auto-policy') AS auto_approved, countIf(actor != 'auto-policy' AND actor != 'system') AS manual FROM netsoldier.audit_log WHERE $__timeFilter(timestamp) AND to_state = 'approved' GROUP BY time ORDER BY time",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 70,
+                "showPoints": "never",
+                "stacking": { "mode": "normal" }
+              }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "auto_approved" },
+                "properties": [
+                  { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } },
+                  { "id": "displayName", "value": "Auto-approved" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "manual" },
+                "properties": [
+                  { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } },
+                  { "id": "displayName", "value": "Manual" }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        }
+      ]
+    }
