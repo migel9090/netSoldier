@@ -25,14 +25,26 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-var dhcpPacketsTotal = prometheus.NewCounter(prometheus.CounterOpts{
-	Namespace: "device_inventory",
-	Name:      "dhcp_packets_total",
-	Help:      "Total DHCP client packets processed.",
-})
+var (
+	dhcpPacketsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "device_inventory",
+		Name:      "dhcp_packets_total",
+		Help:      "Total DHCP client packets processed.",
+	})
+	knownDevices = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "device_inventory",
+		Name:      "known_devices",
+		Help:      "Total number of known devices in the inventory.",
+	})
+	lastDeviceEventTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "device_inventory",
+		Name:      "last_device_event_timestamp_seconds",
+		Help:      "Unix timestamp of the most recent device event.",
+	})
+)
 
 func init() {
-	prometheus.MustRegister(dhcpPacketsTotal)
+	prometheus.MustRegister(dhcpPacketsTotal, knownDevices, lastDeviceEventTimestamp)
 }
 
 func main() {
@@ -48,6 +60,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+	refreshDeviceMetrics(db)
 
 	var chClient *ch.Client
 	if chURL := os.Getenv("CLICKHOUSE_URL"); chURL != "" {
@@ -83,6 +96,7 @@ func main() {
 					slog.Error("device upsert failed", "mac", info.MAC, "error", err)
 				} else {
 					slog.Info("device seen", "mac", info.MAC, "ip", info.IP, "hostname", info.Hostname, "os", osName, "type", devType)
+					refreshDeviceMetrics(db)
 					writeClickHouse(chClient, info.MAC, info.IP, info.Hostname, vendor, "dhcp")
 				}
 			case <-ctx.Done():
@@ -192,6 +206,7 @@ func processDiscoveries(ctx context.Context, db *store.Store, chClient *ch.Clien
 					slog.Error("discovery upsert failed", "protocol", info.Protocol, "error", err)
 				} else {
 					slog.Info("device discovered", "protocol", info.Protocol, "mac", info.MAC, "hostname", info.Hostname)
+					refreshDeviceMetrics(db)
 					writeClickHouse(chClient, info.MAC, info.IP, info.Hostname, vendor, info.Protocol)
 				}
 			} else if info.IP != "" && info.Hostname != "" {
@@ -228,6 +243,13 @@ func writeClickHouse(client *ch.Client, mac, ip, hostname, vendor, protocol stri
 			slog.Debug("clickhouse event write failed", "error", err)
 		}
 	}()
+}
+
+func refreshDeviceMetrics(db *store.Store) {
+	if n, err := db.Count(); err == nil {
+		knownDevices.Set(float64(n))
+	}
+	lastDeviceEventTimestamp.SetToCurrentTime()
 }
 
 func envOr(key, fallback string) string {

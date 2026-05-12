@@ -244,3 +244,9 @@ func (s *Store) List() ([]Device, error) {
 	}
 	return devices, rows.Err()
 }
+
+func (s *Store) Count() (int, error) {
+	var n int
+	err := s.db.QueryRow("SELECT count(*) FROM devices").Scan(&n)
+	return n, err
+}

@@ -17,7 +17,26 @@ import (
 	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/drivers"
 	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/policy"
 	"github.com/migel9090/netSoldier/libs/events"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+var (
+	pendingActions = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "killswitch",
+		Name:      "actions_pending",
+		Help:      "Number of actions awaiting approval.",
+	})
+	activeActions = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "killswitch",
+		Name:      "actions_active",
+		Help:      "Number of currently active enforcement actions.",
+	})
+)
+
+func init() {
+	prometheus.MustRegister(pendingActions, activeActions)
+}
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
@@ -80,8 +99,11 @@ func main() {
 		slog.Warn("no KILLSWITCH_API_KEY set — API authentication disabled")
 	}
 
+	go refreshKillswitchMetrics(ctx, store)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("GET /policy", handleGetPolicy(pol))
 	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve))
 	mux.HandleFunc("GET /allowlist", handleGetAllowlist(pol))
@@ -158,6 +180,20 @@ func runSafeTTLRevert(ctx context.Context, store *actions.Store, resolve func(st
 				cancel()
 				store.Revert(a.ID, "TTL expired")
 			}
+		}
+	}
+}
+
+func refreshKillswitchMetrics(ctx context.Context, store *actions.Store) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pendingActions.Set(float64(len(store.ListByState(events.StatePending))))
+			activeActions.Set(float64(len(store.ListByState(events.StateActive))))
 		}
 	}
 }

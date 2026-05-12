@@ -24,11 +24,11 @@ var (
 		Name:      "queries_checked_total",
 		Help:      "Total DNS queries checked against threat list.",
 	})
-	alertsGenerated = prometheus.NewCounter(prometheus.CounterOpts{
+	alertsGenerated = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "detection_engine",
 		Name:      "alerts_generated_total",
 		Help:      "Total detection alerts generated.",
-	})
+	}, []string{"severity"})
 	threatlistDomains = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "detection_engine",
 		Name:      "threatlist_domains_total",
@@ -167,7 +167,7 @@ func (e *Engine) emitAlert(entry adguard.QueryLogEntry, domain string, ioc iocma
 	}
 
 	e.addAlert(alert)
-	alertsGenerated.Inc()
+	alertsGenerated.WithLabelValues(alert.Severity).Inc()
 	slog.Warn("threat detected",
 		"id", id, "domain", domain, "client", entry.Client,
 		"matched_ioc", ioc.Value, "severity", alert.Severity,

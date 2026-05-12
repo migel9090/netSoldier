@@ -50,3 +50,38 @@ spec:
               detection-engine webhook queue is full and dropping alerts
               ({{ $value | printf "%.2f" }}/s over 5 m). The downstream
               receiver may be unreachable or too slow.
+
+        - alert: CriticalIoCDetected
+          expr: increase(detection_engine_alerts_generated_total{severity=~"critical|high"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Critical/high-severity IoC detected"
+            description: >-
+              detection-engine matched {{ $value }} critical/high IoC(s)
+              in the last 5 minutes. Investigate immediately.
+
+        - alert: DeviceEventsStopped
+          expr: time() - device_inventory_last_device_event_timestamp_seconds > 900
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "No device events for 15+ minutes"
+            description: >-
+              device-inventory has not received any device discovery
+              events for over 15 minutes. Network devices may be
+              offline or the discovery pipeline is broken.
+
+        - alert: KillswitchPendingApprovals
+          expr: killswitch_actions_pending > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Killswitch actions awaiting approval"
+            description: >-
+              {{ $value }} enforcement action(s) are pending operator
+              approval for over 2 minutes. Review and approve/reject
+              in the netSoldier UI.
