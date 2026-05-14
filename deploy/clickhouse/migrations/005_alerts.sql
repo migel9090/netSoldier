@@ -9,4 +9,5 @@ CREATE TABLE IF NOT EXISTS netsoldier.alerts (
     source       LowCardinality(String),
     acknowledged UInt8 DEFAULT 0
 ) ENGINE = ReplacingMergeTree()
-ORDER BY (timestamp, id);
+ORDER BY (timestamp, id)
+TTL timestamp + INTERVAL 90 DAY;

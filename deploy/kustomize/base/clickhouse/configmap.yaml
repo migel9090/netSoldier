@@ -98,7 +98,8 @@ data:
         source       LowCardinality(String),
         acknowledged UInt8 DEFAULT 0
     ) ENGINE = ReplacingMergeTree()
-    ORDER BY (timestamp, id);
+    ORDER BY (timestamp, id)
+    TTL timestamp + INTERVAL 90 DAY;
   006_events.sql: |
     CREATE TABLE IF NOT EXISTS netsoldier.events (
         timestamp    DateTime,
@@ -146,4 +147,8 @@ data:
         target_ip    String,
         action_type  LowCardinality(String)
     ) ENGINE = MergeTree()
-    ORDER BY (timestamp, action_id);
+    ORDER BY (timestamp, action_id)
+    TTL timestamp + INTERVAL 180 DAY;
+  009_retention.sql: |
+    ALTER TABLE netsoldier.alerts MODIFY TTL timestamp + INTERVAL 90 DAY;
+    ALTER TABLE netsoldier.audit_log MODIFY TTL timestamp + INTERVAL 180 DAY;

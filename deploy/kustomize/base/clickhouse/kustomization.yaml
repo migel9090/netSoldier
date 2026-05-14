@@ -12,3 +12,5 @@ resources:
   - configmap.yaml
   - statefulset.yaml
   - service.yaml
+  - cold-export-cm.yaml
+  - cold-export-cronjob.yaml

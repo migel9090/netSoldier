@@ -10,4 +10,5 @@ CREATE TABLE IF NOT EXISTS netsoldier.audit_log (
     target_ip    String,
     action_type  LowCardinality(String)
 ) ENGINE = MergeTree()
-ORDER BY (timestamp, action_id);
+ORDER BY (timestamp, action_id)
+TTL timestamp + INTERVAL 180 DAY;
