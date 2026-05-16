@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      containers:
+        - name: fluent-bit
+          resources:
+            limits:
+              cpu: 50m
+              memory: 48Mi
+            requests:
+              cpu: 10m
+              memory: 24Mi

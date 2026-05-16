@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fluent-bit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fluent-bit
+    spec:
+      serviceAccountName: fluent-bit
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: fluent-bit
+          image: fluent/fluent-bit:3.0
+          ports:
+            - name: metrics
+              containerPort: 2020
+              protocol: TCP
+          env:
+            - name: VECTOR_HOST
+              value: "vector.observability.svc"
+            - name: VECTOR_PORT
+              value: "24224"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            requests:
+              cpu: 25m
+              memory: 32Mi
+          volumeMounts:
+            - name: config
+              mountPath: /fluent-bit/etc
+              readOnly: true
+            - name: cache
+              mountPath: /fluent-bit/cache
+            - name: journal
+              mountPath: /run/log/journal
+              readOnly: true
+            - name: machine-id
+              mountPath: /etc/machine-id
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: fluent-bit-config
+        - name: cache
+          emptyDir:
+            sizeLimit: 100Mi
+        - name: journal
+          hostPath:
+            path: /run/log/journal
+        - name: machine-id
+          hostPath:
+            path: /etc/machine-id
+      tolerations:
+        - operator: Exists

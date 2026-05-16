@@ -1,0 +1,67 @@
+global:
+  namespace: netsoldier
+  profile: pi-edge
+  image:
+    registry: ghcr.io
+    owner: migel9090
+
+detection-engine:
+  enabled: true
+  captureMode: dns-only
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+device-inventory:
+  enabled: true
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+adguard:
+  enabled: true
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+fluent-bit:
+  enabled: true
+  vectorHost: "192.168.1.100"
+  vectorPort: 24224
+  resources:
+    limits:
+      cpu: 50m
+      memory: 48Mi
+    requests:
+      cpu: 10m
+      memory: 24Mi
+
+web-ui:
+  enabled: false
+
+killswitch-controller:
+  enabled: false
+
+clickhouse:
+  enabled: false
+
+misp:
+  enabled: false
+
+observability:
+  enabled: false
+
+threat-intel-sync:
+  enabled: false
