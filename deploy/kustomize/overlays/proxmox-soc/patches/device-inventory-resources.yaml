@@ -7,6 +7,11 @@ spec:
     spec:
       containers:
         - name: device-inventory
+          env:
+            - name: CLICKHOUSE_URL
+              value: "http://clickhouse.netsoldier.svc:8123"
+            - name: CLICKHOUSE_DATABASE
+              value: "netsoldier"
           securityContext:
             runAsNonRoot: true
             readOnlyRootFilesystem: true
@@ -14,6 +19,7 @@ spec:
             capabilities:
               add:
                 - NET_BIND_SERVICE
+                - NET_RAW
               drop:
                 - ALL
           resources:

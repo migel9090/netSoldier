@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: killswitch-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: killswitch-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: killswitch-controller
+    spec:
+      serviceAccountName: killswitch-controller
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: killswitch-controller
+          image: ghcr.io/migel9090/killswitch-controller:main
+          ports:
+            - name: http
+              containerPort: 8084
+              protocol: TCP
+          env:
+            - name: LISTEN_ADDR
+              value: ":8084"
+            - name: CLICKHOUSE_URL
+              value: "http://clickhouse.netsoldier.svc:8123"
+            - name: CLICKHOUSE_DATABASE
+              value: "netsoldier"
+            - name: ADGUARD_URL
+              value: "http://adguard-web.dns.svc:3000"
+            - name: ADGUARD_USER
+              value: "admin"
+            - name: ADGUARD_PASSWORD
+              value: "changeme"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

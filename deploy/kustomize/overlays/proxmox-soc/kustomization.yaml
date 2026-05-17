@@ -3,8 +3,10 @@ kind: Kustomization
 
 resources:
   - ../../base
-  - ../../base/misp
   - ../../base/clickhouse
+  - ../../base/misp
+  - ../../base/killswitch-controller
+  - ../../base/threat-intel-sync
 
 commonLabels:
   app.kubernetes.io/instance: proxmox-soc
@@ -13,3 +15,5 @@ patches:
   - path: patches/detection-engine-resources.yaml
   - path: patches/device-inventory-resources.yaml
   - path: patches/web-ui-resources.yaml
+  - path: patches/killswitch-controller-resources.yaml
+  - path: patches/threat-intel-sync-resources.yaml
