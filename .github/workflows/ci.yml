@@ -58,15 +58,36 @@ jobs:
           go-version-file: apps/detection-engine/go.mod
           cache-dependency-path: apps/*/go.sum
 
-      - name: Go test
+      - name: Go test with coverage
         run: |
           for dir in apps/*/; do
-            if find "$dir" -name '*.go' -print -quit | grep -q .; then
+            if find "$dir" -name '*_test.go' -print -quit | grep -q .; then
+              echo "::group::test $dir"
+              (cd "$dir" && go test -race -count=1 -coverprofile=coverage.out ./...)
+              echo "::endgroup::"
+            elif find "$dir" -name '*.go' -print -quit | grep -q .; then
               echo "::group::test $dir"
               (cd "$dir" && go test -race -count=1 ./...)
               echo "::endgroup::"
             fi
           done
+
+      - name: Go coverage gate (≥70% critical packages)
+        run: |
+          fail=0
+          for pkg in \
+            apps/detection-engine/internal/iocmatch \
+            apps/killswitch-controller/internal/policy \
+            apps/killswitch-controller/internal/actions \
+            apps/threat-intel-sync/internal/ioc; do
+            cover=$(cd "$(echo "$pkg" | cut -d/ -f1-2)" && go test -cover "./$(echo "$pkg" | cut -d/ -f3-)/" 2>&1 | grep -oP '\d+\.\d+(?=%)' || echo "0")
+            echo "$pkg: ${cover}%"
+            if [ "$(echo "$cover < 70" | bc)" -eq 1 ]; then
+              echo "::error::Coverage for $pkg is ${cover}% (minimum 70%)"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || exit 1
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
@@ -76,7 +97,7 @@ jobs:
         working-directory: apps/ml-anomaly
         run: |
           pip install --quiet -e '.[dev]'
-          pytest --tb=short -q || [ $? -eq 5 ]
+          pytest --tb=short -q
 
   build:
     runs-on: ubuntu-latest
