@@ -50,6 +50,12 @@ tasks:
     cmds:
       - go test -v -tags=e2e -count=1 -timeout=120s .
 
+  test:integration:
+    desc: Run integration tests with ephemeral ClickHouse (requires Docker)
+    dir: tests/e2e
+    cmds:
+      - go test -v -tags=integration -count=1 -timeout=300s .
+
   test:python:
     desc: Run Python tests
     dir: apps/ml-anomaly
