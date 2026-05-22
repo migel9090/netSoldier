@@ -1,0 +1,54 @@
+version: "1.0"
+description: >
+  PCAP corpus for netSoldier detection regression testing.
+  Synthetic entries are generated at test time by the Go test harness.
+  External entries can be downloaded via download.sh using url/sha256.
+
+corpus:
+  - name: dns-c2-callback
+    description: "DNS queries to known C2 domains mixed with benign traffic"
+    source: synthetic
+    iocs:
+      - value: evil.example.com
+        type: domain
+        confidence: 90
+      - value: c2.malware.net
+        type: domain
+        confidence: 85
+    expected:
+      packets: 3
+      queries: 3
+      alerts:
+        - domain: evil.example.com
+          client_ip: "192.168.1.42"
+          severity: critical
+        - domain: c2.malware.net
+          client_ip: "192.168.1.100"
+          severity: high
+
+  - name: dns-subdomain-match
+    description: "Subdomain query matching parent IoC domain"
+    source: synthetic
+    iocs:
+      - value: evil.com
+        type: domain
+        confidence: 80
+    expected:
+      packets: 1
+      queries: 1
+      alerts:
+        - domain: sub.evil.com
+          matched_ioc: evil.com
+          severity: high
+
+  - name: benign-only
+    description: "Benign DNS traffic — should produce zero alerts"
+    source: synthetic
+    iocs:
+      - value: evil.example.com
+        type: domain
+        confidence: 90
+    expected:
+      packets: 2
+      queries: 2
+      alerts: []
