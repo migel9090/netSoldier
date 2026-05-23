@@ -56,6 +56,12 @@ tasks:
     cmds:
       - go test -v -tags=integration -count=1 -timeout=300s .
 
+  test:security:
+    desc: Run killswitch security tests (allowlist, auth, auto-revert)
+    dir: apps/killswitch-controller
+    cmds:
+      - go test -v -race -count=1 -run TestSec ./cmd/killswitch-controller/
+
   test:pcap:
     desc: Run PCAP replay detection regression tests
     dir: apps/detection-engine
