@@ -17,6 +17,8 @@ spec:
             runAsNonRoot: true
             runAsUser: 101
             fsGroup: 101
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: export
               image: clickhouse/clickhouse-client:24.3-alpine

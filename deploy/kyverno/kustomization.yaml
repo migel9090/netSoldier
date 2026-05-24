@@ -7,3 +7,6 @@ resources:
   - policies/require-non-root.yaml
   - policies/require-read-only-root-fs.yaml
   - policies/require-resource-limits.yaml
+  - policies/disallow-privilege-escalation.yaml
+  - policies/require-drop-all-capabilities.yaml
+  - policies/require-seccomp-runtime-default.yaml

@@ -17,6 +17,11 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: device-inventory
           image: ghcr.io/migel9090/device-inventory:main

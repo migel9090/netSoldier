@@ -17,11 +17,18 @@ spec:
       labels:
         app.kubernetes.io/name: adguard-home
     spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: init-config
           image: busybox:1.37
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -42,6 +49,12 @@ spec:
           image: adguard/adguardhome:v0.107.55
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE
           ports:
             - name: dns-tcp
               containerPort: 53
@@ -78,10 +91,14 @@ spec:
               mountPath: /opt/adguardhome/conf
             - name: work
               mountPath: /opt/adguardhome/work
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: config-source
           configMap:
             name: adguard-config
+        - name: tmp
+          emptyDir: {}
   volumeClaimTemplates:
     - metadata:
         name: conf

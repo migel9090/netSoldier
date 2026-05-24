@@ -16,6 +16,8 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: fluent-bit
           image: fluent/fluent-bit:3.0

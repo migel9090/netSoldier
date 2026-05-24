@@ -18,6 +18,8 @@ spec:
         runAsNonRoot: true
         runAsUser: 101
         fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: clickhouse
           image: clickhouse/clickhouse-server:24.3-alpine

@@ -16,7 +16,7 @@ spec:
     spec:
       serviceAccountName: {{ include "detection-engine.serviceAccountName" . }}
       securityContext:
-        runAsNonRoot: true
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: detection-engine
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

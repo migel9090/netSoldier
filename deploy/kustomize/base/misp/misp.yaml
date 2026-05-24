@@ -18,6 +18,8 @@ spec:
         runAsNonRoot: true
         runAsUser: 33
         fsGroup: 33
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: misp
           image: ghcr.io/misp/misp-docker/misp-core:v2.4.190
