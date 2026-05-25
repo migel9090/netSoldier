@@ -1,0 +1,57 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-killswitch-controller
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: killswitch-controller
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: detection-engine
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: web-ui
+      ports:
+        - port: 8084
+          protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - port: 8084
+          protocol: TCP
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: clickhouse
+              app.kubernetes.io/component: server
+      ports:
+        - port: 8123
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: dns
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: adguard-home
+      ports:
+        - port: 3000
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

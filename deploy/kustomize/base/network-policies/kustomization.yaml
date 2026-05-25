@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - default-deny.yaml
+  - detection-engine.yaml
+  - killswitch-controller.yaml
+  - threat-intel-sync.yaml
+  - web-ui.yaml
+  - clickhouse.yaml
+  - clickhouse-cold-export.yaml
+  - misp-core.yaml
+  - misp-mariadb.yaml
+  - misp-redis.yaml
+  - fluent-bit.yaml

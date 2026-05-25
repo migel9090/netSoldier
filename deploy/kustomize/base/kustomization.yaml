@@ -9,3 +9,4 @@ resources:
   - device-inventory/
   - web-ui/
   - observability/
+  - network-policies/
