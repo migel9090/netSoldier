@@ -40,17 +40,21 @@ spec:
               value: "admin"
             - name: ADGUARD_PASSWORD
               value: "changeme"
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 15
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 5
             periodSeconds: 15
           readinessProbe:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 3
             periodSeconds: 10
           securityContext:
             runAsNonRoot: true

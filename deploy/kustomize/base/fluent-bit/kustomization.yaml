@@ -9,3 +9,4 @@ resources:
   - serviceaccount.yaml
   - configmap.yaml
   - daemonset.yaml
+  - pdb.yaml

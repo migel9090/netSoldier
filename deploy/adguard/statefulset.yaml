@@ -67,17 +67,21 @@ spec:
             - name: http
               containerPort: 3000
               protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 5
+            failureThreshold: 12
           livenessProbe:
             httpGet:
               path: /
               port: http
-            initialDelaySeconds: 10
             periodSeconds: 30
           readinessProbe:
             httpGet:
               path: /
               port: http
-            initialDelaySeconds: 5
             periodSeconds: 10
           resources:
             limits:

@@ -27,15 +27,18 @@ spec:
             - name: redis
               containerPort: 6379
               protocol: TCP
+          startupProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 2
+            failureThreshold: 15
           livenessProbe:
             exec:
               command: ["redis-cli", "ping"]
-            initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             exec:
               command: ["redis-cli", "ping"]
-            initialDelaySeconds: 3
             periodSeconds: 5
           securityContext:
             readOnlyRootFilesystem: true

@@ -7,3 +7,4 @@ resources:
   - statefulset.yaml
   - service-dns.yaml
   - service-web.yaml
+  - pdb.yaml

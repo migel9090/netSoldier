@@ -25,6 +25,22 @@ spec:
             - name: metrics
               containerPort: 2020
               protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /api/v1/health
+              port: metrics
+            periodSeconds: 2
+            failureThreshold: 15
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: metrics
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: metrics
+            periodSeconds: 10
           env:
             - name: VECTOR_HOST
               value: "vector.observability.svc"
@@ -39,10 +55,10 @@ spec:
           resources:
             limits:
               cpu: 100m
-              memory: 64Mi
+              memory: 128Mi
             requests:
               cpu: 25m
-              memory: 32Mi
+              memory: 64Mi
           volumeMounts:
             - name: config
               mountPath: /fluent-bit/etc

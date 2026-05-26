@@ -30,17 +30,21 @@ spec:
             - name: native
               containerPort: 9000
               protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
           livenessProbe:
             httpGet:
               path: /ping
               port: http
-            initialDelaySeconds: 30
             periodSeconds: 15
           readinessProbe:
             httpGet:
               path: /ping
               port: http
-            initialDelaySeconds: 10
             periodSeconds: 10
           securityContext:
             readOnlyRootFilesystem: true

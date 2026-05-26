@@ -50,20 +50,25 @@ spec:
                   key: MYSQL_PASSWORD
             - name: MARIADB_AUTO_UPGRADE
               value: "1"
+          startupProbe:
+            exec:
+              command:
+                - healthcheck.sh
+                - --connect
+            periodSeconds: 5
+            failureThreshold: 24
           livenessProbe:
             exec:
               command:
                 - healthcheck.sh
                 - --connect
                 - --innodb_initialized
-            initialDelaySeconds: 30
             periodSeconds: 15
           readinessProbe:
             exec:
               command:
                 - healthcheck.sh
                 - --connect
-            initialDelaySeconds: 10
             periodSeconds: 10
           securityContext:
             readOnlyRootFilesystem: true

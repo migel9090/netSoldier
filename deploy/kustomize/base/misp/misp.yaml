@@ -46,18 +46,22 @@ spec:
                 secretKeyRef:
                   name: misp-secrets
                   key: MISP_ADMIN_PASSPHRASE
+          startupProbe:
+            httpGet:
+              path: /users/login
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /users/login
               port: http
-            initialDelaySeconds: 120
             periodSeconds: 30
             timeoutSeconds: 10
           readinessProbe:
             httpGet:
               path: /users/login
               port: http
-            initialDelaySeconds: 60
             periodSeconds: 15
             timeoutSeconds: 5
           securityContext:

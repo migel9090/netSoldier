@@ -1,0 +1,29 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: misp-core
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: core
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: misp-mariadb
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: mariadb
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: misp-redis
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: redis

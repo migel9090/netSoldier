@@ -34,17 +34,21 @@ spec:
               value: "http://device-inventory:8081"
             - name: DETECTION_ENGINE_URL
               value: "http://detection-engine:8080"
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 2
+            failureThreshold: 15
           livenessProbe:
             httpGet:
               path: /
               port: http
-            initialDelaySeconds: 5
             periodSeconds: 15
           readinessProbe:
             httpGet:
               path: /
               port: http
-            initialDelaySeconds: 3
             periodSeconds: 10
           securityContext:
             runAsNonRoot: true

@@ -13,6 +13,7 @@ resources:
   - mariadb.yaml
   - redis.yaml
   - misp.yaml
+  - pdb.yaml
 
 generators:
   - secret-generator.yaml
