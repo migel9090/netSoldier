@@ -105,6 +105,12 @@ tasks:
       - ruff check --fix apps/ml-anomaly/
       - ruff format apps/ml-anomaly/
 
+  validate:configs:
+    desc: Validate deploy configs (YAML syntax + Helm values schemas)
+    cmds:
+      - python3 -m pip install --quiet pyyaml jsonschema
+      - python3 scripts/validate-configs.py
+
   scan:
     desc: Run security scanners locally
     cmds:

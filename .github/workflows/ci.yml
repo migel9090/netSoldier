@@ -13,6 +13,22 @@ env:
   GOWORK: "off"
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Validate deploy configs
+        run: pip install --quiet pyyaml jsonschema && python scripts/validate-configs.py
+
   lint:
     runs-on: ubuntu-latest
     steps:

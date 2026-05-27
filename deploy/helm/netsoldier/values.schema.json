@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "netSoldier Helm Values",
+  "type": "object",
+  "required": ["global"],
+  "properties": {
+    "global": {
+      "type": "object",
+      "required": ["namespace", "image"],
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "type": "string",
+          "enum": ["proxmox-soc", "pi-edge"]
+        },
+        "image": {
+          "type": "object",
+          "required": ["registry", "owner"],
+          "properties": {
+            "registry": { "type": "string", "minLength": 1 },
+            "owner": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "detection-engine": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "captureMode": { "type": "string", "enum": ["full", "dns-only"] },
+        "spanInterface": { "type": "string" },
+        "resources": { "$ref": "#/$defs/resources" }
+      }
+    },
+    "device-inventory": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "resources": { "$ref": "#/$defs/resources" }
+      }
+    },
+    "killswitch-controller": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "resources": { "$ref": "#/$defs/resources" }
+      }
+    },
+    "threat-intel-sync": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "syncInterval": { "type": "string", "pattern": "^[0-9]+(s|m|h)$" },
+        "resources": { "$ref": "#/$defs/resources" }
+      }
+    },
+    "web-ui": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "resources": { "$ref": "#/$defs/resources" }
+      }
+    },
+    "adguard": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "resources": { "$ref": "#/$defs/resources" }
+      }
+    },
+    "clickhouse": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "storage": { "type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$" },
+        "resources": { "$ref": "#/$defs/resources" }
+      }
+    },
+    "misp": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "resources": {
+          "type": "object",
+          "properties": {
+            "misp": { "$ref": "#/$defs/resources" },
+            "mariadb": { "$ref": "#/$defs/resources" },
+            "redis": { "$ref": "#/$defs/resources" }
+          }
+        }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "fluent-bit": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "vectorHost": { "type": "string" },
+        "vectorPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "resources": { "$ref": "#/$defs/resources" }
+      }
+    }
+  },
+  "$defs": {
+    "resources": {
+      "type": "object",
+      "properties": {
+        "limits": {
+          "type": "object",
+          "properties": {
+            "cpu": { "type": "string" },
+            "memory": { "type": "string" }
+          }
+        },
+        "requests": {
+          "type": "object",
+          "properties": {
+            "cpu": { "type": "string" },
+            "memory": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}
