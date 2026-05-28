@@ -9,4 +9,5 @@ resources:
   - device-inventory/
   - web-ui/
   - observability/
+  - backup/
   - network-policies/

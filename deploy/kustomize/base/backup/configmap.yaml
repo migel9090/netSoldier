@@ -1,0 +1,124 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backup-scripts
+data:
+  backup-clickhouse.sh: |
+    #!/bin/sh
+    set -eu
+
+    : "${CH_HOST:=clickhouse.netsoldier.svc}"
+    : "${CH_PORT:=9000}"
+    : "${CH_DATABASE:=netsoldier}"
+
+    if [ -z "${S3_ENDPOINT:-}" ] || [ -z "${S3_BUCKET:-}" ]; then
+      echo "S3_ENDPOINT or S3_BUCKET not set — skipping ClickHouse backup"
+      exit 0
+    fi
+
+    : "${S3_ACCESS_KEY:=}"
+    : "${S3_SECRET_KEY:=}"
+
+    TODAY=$(date +%Y-%m-%d)
+    DEST="${S3_ENDPOINT}/${S3_BUCKET}/clickhouse/${TODAY}"
+
+    echo "==> Exporting schema"
+    clickhouse-client --host "${CH_HOST}" --port "${CH_PORT}" \
+      --query "INSERT INTO FUNCTION s3(
+        '${DEST}/schema.csv',
+        '${S3_ACCESS_KEY}', '${S3_SECRET_KEY}', 'CSVWithNames'
+      ) SELECT name, engine, create_table_query
+        FROM system.tables
+        WHERE database = '${CH_DATABASE}'" \
+      && echo "  OK: schema" \
+      || { echo "  FAIL: schema export"; exit 1; }
+
+    TABLES=$(clickhouse-client --host "${CH_HOST}" --port "${CH_PORT}" \
+      --query "SELECT name FROM system.tables
+               WHERE database = '${CH_DATABASE}'
+               FORMAT TabSeparatedRaw")
+
+    FAIL=0
+    for TABLE in $TABLES; do
+      ROW_COUNT=$(clickhouse-client --host "${CH_HOST}" --port "${CH_PORT}" \
+        --query "SELECT count() FROM ${CH_DATABASE}.${TABLE}")
+
+      if [ "$ROW_COUNT" = "0" ]; then
+        echo "  SKIP: ${TABLE} (empty)"
+        continue
+      fi
+
+      echo "==> ${TABLE} (${ROW_COUNT} rows)"
+      clickhouse-client --host "${CH_HOST}" --port "${CH_PORT}" \
+        --query "INSERT INTO FUNCTION s3(
+          '${DEST}/${TABLE}.native.zst',
+          '${S3_ACCESS_KEY}', '${S3_SECRET_KEY}', 'Native'
+        ) SELECT * FROM ${CH_DATABASE}.${TABLE}" \
+        && echo "  OK: ${TABLE}" \
+        || { echo "  FAIL: ${TABLE}"; FAIL=1; }
+    done
+
+    [ "$FAIL" -eq 0 ] || exit 1
+    echo "ClickHouse backup complete: ${DEST}"
+
+  backup-state.sh: |
+    #!/bin/sh
+    set -eu
+
+    TODAY=$(date +%Y-%m-%d)
+    BACKUP_DIR="/backup/state/${TODAY}"
+    mkdir -p "${BACKUP_DIR}"
+
+    API_SERVER="https://kubernetes.default.svc"
+    CA_CERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+    NAMESPACE="${NAMESPACE:-netsoldier}"
+
+    kube_get() {
+      curl -sf --cacert "${CA_CERT}" \
+        -H "Authorization: Bearer ${SA_TOKEN}" \
+        "${API_SERVER}/api/v1/namespaces/${NAMESPACE}/$1"
+    }
+
+    # --- SQLite (device-inventory) ---
+    echo "==> Backing up device-inventory state"
+    DEVICE_URL="${DEVICE_INVENTORY_URL:-http://device-inventory.netsoldier.svc:8081}"
+    if curl -sf "${DEVICE_URL}/devices" -o "${BACKUP_DIR}/devices.json"; then
+      BYTES=$(wc -c < "${BACKUP_DIR}/devices.json")
+      echo "  OK: devices.json (${BYTES} bytes)"
+    else
+      echo "  WARN: device-inventory unreachable — skipping"
+    fi
+
+    # --- ConfigMaps ---
+    echo "==> Backing up ConfigMaps"
+    if kube_get "configmaps" > "${BACKUP_DIR}/configmaps.json"; then
+      COUNT=$(grep -c '"kind": "ConfigMap"' "${BACKUP_DIR}/configmaps.json" || echo 0)
+      echo "  OK: ${COUNT} configmaps"
+    else
+      echo "  WARN: failed to export configmaps"
+    fi
+
+    # --- Secrets (age-encrypted) ---
+    echo "==> Backing up Secrets (age-encrypted)"
+    if [ -z "${AGE_PUBLIC_KEY:-}" ]; then
+      echo "  SKIP: AGE_PUBLIC_KEY not set"
+    elif ! command -v age >/dev/null 2>&1; then
+      echo "  SKIP: age binary not available"
+    else
+      if kube_get "secrets" | age -r "${AGE_PUBLIC_KEY}" -o "${BACKUP_DIR}/secrets.age"; then
+        BYTES=$(wc -c < "${BACKUP_DIR}/secrets.age")
+        echo "  OK: secrets.age (${BYTES} bytes)"
+      else
+        echo "  WARN: failed to export/encrypt secrets"
+      fi
+    fi
+
+    # --- Retention: keep last 7 days ---
+    echo "==> Pruning old backups"
+    find /backup/state -maxdepth 1 -mindepth 1 -type d -mtime +7 \
+      -exec rm -rf {} + 2>/dev/null || true
+    KEPT=$(find /backup/state -maxdepth 1 -mindepth 1 -type d | wc -l)
+    echo "  ${KEPT} backup(s) retained"
+
+    echo "State backup complete: ${BACKUP_DIR}"

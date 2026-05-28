@@ -29,6 +29,14 @@ spec:
         - port: 9000
           protocol: TCP
     - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: backup
+              app.kubernetes.io/component: clickhouse-backup
+      ports:
+        - port: 9000
+          protocol: TCP
+    - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: observability

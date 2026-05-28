@@ -105,6 +105,11 @@ tasks:
       - ruff check --fix apps/ml-anomaly/
       - ruff format apps/ml-anomaly/
 
+  backup:test-restore:
+    desc: Run backup restore verification test
+    cmds:
+      - bash scripts/backup-restore-test.sh
+
   validate:configs:
     desc: Validate deploy configs (YAML syntax + Helm values schemas)
     cmds:

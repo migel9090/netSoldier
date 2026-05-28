@@ -1,0 +1,98 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-state
+spec:
+  schedule: "30 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/component: state-backup
+        spec:
+          serviceAccountName: backup
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            fsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: install-age
+              image: alpine:3.20
+              command: ["/bin/sh", "-c", "apk add --no-cache age && cp /usr/bin/age /tools/age"]
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              resources:
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+                requests:
+                  cpu: 50m
+                  memory: 32Mi
+              volumeMounts:
+                - name: tools
+                  mountPath: /tools
+                - name: apk-cache
+                  mountPath: /etc/apk/cache
+          containers:
+            - name: backup
+              image: alpine:3.20
+              command: ["/bin/sh", "/scripts/backup-state.sh"]
+              env:
+                - name: PATH
+                  value: "/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+              envFrom:
+                - secretRef:
+                    name: backup-age
+                    optional: true
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              resources:
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: backup-data
+                  mountPath: /backup
+                - name: tools
+                  mountPath: /tools
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: scripts
+              configMap:
+                name: backup-scripts
+                defaultMode: 0555
+            - name: backup-data
+              persistentVolumeClaim:
+                claimName: backup-state
+            - name: tools
+              emptyDir: {}
+            - name: apk-cache
+              emptyDir: {}
+            - name: tmp
+              emptyDir: {}
+          restartPolicy: OnFailure

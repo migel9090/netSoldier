@@ -13,3 +13,4 @@ resources:
   - misp-mariadb.yaml
   - misp-redis.yaml
   - fluent-bit.yaml
+  - backup.yaml
