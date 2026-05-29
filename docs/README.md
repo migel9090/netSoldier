@@ -8,7 +8,7 @@
 | `getting-started.md` | running the vertical slice (architecture, config, verify) | step 49 |
 | `audits/` | written results of every roadmap audit gate (steps 25, 50, 75, 100, 125, 150, 172) | from step 25 |
 | `runbooks/` | operational + incident-response runbooks | steps 97, 144 |
-| `user-guide.md` | household-facing guide (devices, alerts, approvals) | step 96 |
+| [`user-guide.md`](user-guide.md) | household-facing guide (devices, alerts, approvals) | step 96 |
 | `prod-readiness.md` | production readiness checklist for both profiles | step 149 |
 
 Core architecture decisions: [`adr/0001-architektura.md`](adr/0001-architektura.md).
