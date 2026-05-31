@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net"
@@ -131,10 +132,45 @@ func assertEq(t *testing.T, field, want, got string) {
 	}
 }
 
-type mockAdGuard struct{ url string }
+func httpPostJSON(t *testing.T, url string, body any, dst any) {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	resp, err := http.Post(url, "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("POST %s: %d %s", url, resp.StatusCode, respBody)
+	}
+	if dst != nil {
+		if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+			t.Fatalf("POST %s: decode: %v", url, err)
+		}
+	}
+}
+
+type mockAdGuard struct {
+	url   string
+	mu    sync.Mutex
+	rules []string
+}
+
+func (m *mockAdGuard) Rules() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.rules))
+	copy(out, m.rules)
+	return out
+}
 
 func startMockAdGuard(t *testing.T, entryTime time.Time) *mockAdGuard {
 	t.Helper()
+	m := &mockAdGuard{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /control/querylog", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -148,11 +184,33 @@ func startMockAdGuard(t *testing.T, entryTime time.Time) *mockAdGuard {
 			"oldest": "",
 		})
 	})
+	mux.HandleFunc("GET /control/filtering/status", func(w http.ResponseWriter, _ *http.Request) {
+		m.mu.Lock()
+		rules := make([]string, len(m.rules))
+		copy(rules, m.rules)
+		m.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"enabled":    true,
+			"user_rules": rules,
+		})
+	})
+	mux.HandleFunc("POST /control/filtering/set_rules", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Rules []string `json:"rules"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		m.mu.Lock()
+		m.rules = req.Rules
+		m.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
 	ln := listenTCP(t)
+	m.url = "http://" + ln.Addr().String()
 	srv := &http.Server{Handler: mux}
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
-	return &mockAdGuard{url: "http://" + ln.Addr().String()}
+	return m
 }
 
 type webhookRx struct {
