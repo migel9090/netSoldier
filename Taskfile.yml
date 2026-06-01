@@ -105,6 +105,11 @@ tasks:
       - ruff check --fix apps/ml-anomaly/
       - ruff format apps/ml-anomaly/
 
+  perf:baseline:
+    desc: Run performance baseline benchmark against running services
+    cmds:
+      - bash scripts/perf-baseline.sh
+
   backup:test-restore:
     desc: Run backup restore verification test
     cmds:
