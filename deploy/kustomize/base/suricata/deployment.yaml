@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: suricata
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: suricata
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: suricata
+    spec:
+      serviceAccountName: suricata
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      securityContext:
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: init-rules
+          image: oisf/suricata:7.0.8
+          command: ["suricata-update"]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: rules
+              mountPath: /var/lib/suricata
+            - name: run
+              mountPath: /var/run/suricata
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+      containers:
+        - name: suricata
+          image: oisf/suricata:7.0.8
+          command:
+            - suricata
+            - "-c"
+            - /etc/suricata/suricata.yaml
+            - "--af-packet"
+            - "-v"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+                - NET_RAW
+                - NET_ADMIN
+                - SYS_NICE
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 250m
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/suricata/suricata.yaml
+              subPath: suricata.yaml
+              readOnly: true
+            - name: rules
+              mountPath: /var/lib/suricata
+              readOnly: true
+            - name: log
+              mountPath: /var/log/suricata
+            - name: run
+              mountPath: /var/run/suricata
+            - name: tmp
+              mountPath: /tmp
+        - name: vector
+          image: timberio/vector:0.43.1-distroless
+          args:
+            - "--config-yaml"
+            - /etc/vector/vector.yaml
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          volumeMounts:
+            - name: vector-config
+              mountPath: /etc/vector/vector.yaml
+              subPath: vector.yaml
+              readOnly: true
+            - name: log
+              mountPath: /var/log/suricata
+              readOnly: true
+            - name: vector-data
+              mountPath: /var/lib/vector
+      volumes:
+        - name: config
+          configMap:
+            name: suricata-config
+        - name: vector-config
+          configMap:
+            name: suricata-vector-config
+        - name: rules
+          emptyDir: {}
+        - name: log
+          emptyDir:
+            sizeLimit: 500Mi
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: vector-data
+          emptyDir:
+            sizeLimit: 100Mi

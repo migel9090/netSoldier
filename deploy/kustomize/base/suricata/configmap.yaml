@@ -1,0 +1,230 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suricata-config
+data:
+  suricata.yaml: |
+    %YAML 1.1
+    ---
+
+    vars:
+      address-groups:
+        HOME_NET: "[192.168.0.0/16,10.0.0.0/8,172.16.0.0/12]"
+        EXTERNAL_NET: "!$HOME_NET"
+        HTTP_SERVERS: "$HOME_NET"
+        DNS_SERVERS: "$HOME_NET"
+      port-groups:
+        HTTP_PORTS: "80"
+        SHELLCODE_PORTS: "!80"
+        SSH_PORTS: "22"
+        DNS_PORTS: "53"
+
+    default-log-dir: /var/log/suricata/
+
+    stats:
+      enabled: yes
+      interval: 30
+
+    outputs:
+      - eve-log:
+          enabled: yes
+          filetype: regular
+          filename: eve.json
+          threaded: yes
+          types:
+            - alert:
+                tagged-packets: yes
+                metadata: yes
+            - dns:
+                query: yes
+                answer: yes
+            - tls:
+                extended: yes
+            - http:
+                extended: yes
+            - flow
+            - stats:
+                totals: yes
+                threads: no
+
+    af-packet:
+      - interface: eth1
+        threads: auto
+        cluster-id: 99
+        cluster-type: cluster_flow
+        defrag: yes
+        use-mmap: yes
+        ring-size: 2048
+        buffer-size: 64768
+
+    app-layer:
+      protocols:
+        tls:
+          enabled: yes
+          detection-ports:
+            dp: 443
+          ja3-fingerprints: yes
+        http:
+          enabled: yes
+        dns:
+          enabled: yes
+          tcp:
+            enabled: yes
+          udp:
+            enabled: yes
+        ssh:
+          enabled: yes
+
+    host-mode: sniffer-only
+
+    default-rule-path: /var/lib/suricata/rules
+    rule-files:
+      - suricata.rules
+
+    detect:
+      profile: medium
+      sgh-mpm-context: auto
+
+    threading:
+      set-cpu-affinity: no
+      detect-thread-ratio: 1.0
+
+    coredump:
+      max-dump: unlimited
+
+    unix-command:
+      enabled: yes
+      filename: /var/run/suricata/suricata-command.socket
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suricata-vector-config
+data:
+  vector.yaml: |
+    sources:
+      eve_log:
+        type: file
+        include:
+          - /var/log/suricata/eve.json
+        read_from: beginning
+        fingerprint:
+          strategy: device_and_inode
+
+    transforms:
+      parse_eve:
+        type: remap
+        inputs:
+          - eve_log
+        source: |
+          . = parse_json!(.message)
+
+      filter_alerts:
+        type: filter
+        inputs:
+          - parse_eve
+        condition: .event_type == "alert"
+
+      shape_alerts:
+        type: remap
+        inputs:
+          - filter_alerts
+        source: |
+          .insert_timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S")
+          .flow_id = to_int(.flow_id) ?? 0
+          .src_port = to_int(.src_port) ?? 0
+          .dest_port = to_int(.dest_port) ?? 0
+          .alert_gid = to_int(.alert.gid) ?? 1
+          .alert_signature_id = to_int(.alert.signature_id) ?? 0
+          .alert_rev = to_int(.alert.rev) ?? 0
+          .alert_signature = to_string(.alert.signature) ?? ""
+          .alert_category = to_string(.alert.category) ?? ""
+          .alert_severity = to_int(.alert.severity) ?? 3
+          .alert_action = to_string(.alert.action) ?? "allowed"
+          .app_proto = to_string(.app_proto) ?? ""
+          .proto = to_string(.proto) ?? ""
+          .flow_pkts_toserver = to_int(.flow.pkts_toserver) ?? 0
+          .flow_pkts_toclient = to_int(.flow.pkts_toclient) ?? 0
+          .flow_bytes_toserver = to_int(.flow.bytes_toserver) ?? 0
+          .flow_bytes_toclient = to_int(.flow.bytes_toclient) ?? 0
+
+      filter_dns:
+        type: filter
+        inputs:
+          - parse_eve
+        condition: .event_type == "dns"
+
+      shape_dns:
+        type: remap
+        inputs:
+          - filter_dns
+        source: |
+          .insert_timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S")
+          .flow_id = to_int(.flow_id) ?? 0
+          .src_port = to_int(.src_port) ?? 0
+          .dest_port = to_int(.dest_port) ?? 0
+          .dns_type = to_string(.dns.type) ?? ""
+          .dns_rrtype = to_string(.dns.rrtype) ?? ""
+          .dns_rrname = to_string(.dns.rrname) ?? ""
+          .dns_rdata = to_string(.dns.rdata) ?? ""
+          .dns_rcode = to_string(.dns.rcode) ?? ""
+          .dns_id = to_int(.dns.id) ?? 0
+          .proto = to_string(.proto) ?? ""
+
+      filter_tls:
+        type: filter
+        inputs:
+          - parse_eve
+        condition: .event_type == "tls"
+
+      shape_tls:
+        type: remap
+        inputs:
+          - filter_tls
+        source: |
+          .insert_timestamp = format_timestamp!(now(), "%Y-%m-%d %H:%M:%S")
+          .flow_id = to_int(.flow_id) ?? 0
+          .src_port = to_int(.src_port) ?? 0
+          .dest_port = to_int(.dest_port) ?? 0
+          .tls_version = to_string(.tls.version) ?? ""
+          .tls_sni = to_string(.tls.sni) ?? ""
+          .tls_subject = to_string(.tls.subject) ?? ""
+          .tls_issuerdn = to_string(.tls.issuerdn) ?? ""
+          .tls_serial = to_string(.tls.serial) ?? ""
+          .tls_ja3_hash = to_string(.tls.ja3.hash) ?? ""
+          .tls_ja3s_hash = to_string(.tls.ja3s.hash) ?? ""
+          .proto = to_string(.proto) ?? ""
+
+    sinks:
+      clickhouse_alerts:
+        type: clickhouse
+        inputs:
+          - shape_alerts
+        endpoint: http://clickhouse.netsoldier.svc:8123
+        database: netsoldier
+        table: suricata_alerts
+        skip_unknown_fields: true
+        encoding:
+          timestamp_format: unix
+
+      clickhouse_dns:
+        type: clickhouse
+        inputs:
+          - shape_dns
+        endpoint: http://clickhouse.netsoldier.svc:8123
+        database: netsoldier
+        table: suricata_dns
+        skip_unknown_fields: true
+        encoding:
+          timestamp_format: unix
+
+      clickhouse_tls:
+        type: clickhouse
+        inputs:
+          - shape_tls
+        endpoint: http://clickhouse.netsoldier.svc:8123
+        database: netsoldier
+        table: suricata_tls
+        skip_unknown_fields: true
+        encoding:
+          timestamp_format: unix

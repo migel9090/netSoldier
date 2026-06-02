@@ -13,4 +13,5 @@ resources:
   - misp-mariadb.yaml
   - misp-redis.yaml
   - fluent-bit.yaml
+  - suricata.yaml
   - backup.yaml
