@@ -12,6 +12,9 @@
 | `alerts` | 90 days | ReplacingMergeTree | Auto-pruned |
 | `events` | 90 days | MergeTree | Auto-pruned |
 | `audit_log` | 180 days | MergeTree | Auto-pruned; do not truncate |
+| `suricata_alerts` | 90 days | MergeTree | Suricata IDS alerts (EVE) |
+| `suricata_dns` | 30 days | MergeTree | Suricata DNS events |
+| `suricata_tls` | 30 days | MergeTree | Suricata TLS handshakes (JA3) |
 
 ClickHouse enforces TTL automatically during merges. No manual cleanup is
 needed under normal operation.
