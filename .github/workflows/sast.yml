@@ -30,7 +30,11 @@ jobs:
       - name: Semgrep scan
         run: |
           pip install --quiet semgrep
-          semgrep scan --config=auto --sarif --output=semgrep.sarif --metrics=off .
+          semgrep scan \
+            --config=p/default \
+            --config=p/security-audit \
+            --config=p/owasp-top-ten \
+            --sarif --output=semgrep.sarif --metrics=off .
 
       - name: Upload Semgrep SARIF
         uses: github/codeql-action/upload-sarif@87557b9c84dde89fdd9b10e88954ac2f4248e463 # v4.36.1
