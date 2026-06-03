@@ -165,7 +165,8 @@ Pre-commit catches issues at commit time. CI (steps 14–24) adds:
 - CodeQL (deeper SAST, multi-language: Go/Python/JS-TS → SARIF)
 - OSV-Scanner (SCA — dependency vulnerabilities via OSV.dev → SARIF, informational)
 - Grype (SCA — dependency vulnerabilities, blocks on critical/high → SARIF)
-- KICS (additional IaC scanning)
+- Checkov (IaC scan — Dockerfiles, GitHub Actions, Terraform, K8s → SARIF, informational)
+- KICS (IaC scan — blocks on HIGH severity → SARIF)
 - TruffleHog nightly (historical secret scanning with verification)
 - Multi-arch image builds + SBOM + cosign signing + SLSA provenance
 - PCAP corpus replay (detection regression testing)
