@@ -163,7 +163,8 @@ Pre-commit catches issues at commit time. CI (steps 14–24) adds:
 
 - Semgrep (full repo SAST scan → SARIF → GitHub Security tab)
 - CodeQL (deeper SAST, multi-language: Go/Python/JS-TS → SARIF)
-- OSV-Scanner + Grype (SCA — dependency vulnerabilities)
+- OSV-Scanner (SCA — dependency vulnerabilities via OSV.dev → SARIF, informational)
+- Grype (SCA — dependency vulnerabilities, blocks on critical/high → SARIF)
 - KICS (additional IaC scanning)
 - TruffleHog nightly (historical secret scanning with verification)
 - Multi-arch image builds + SBOM + cosign signing + SLSA provenance
