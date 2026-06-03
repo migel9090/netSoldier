@@ -1,1 +1,1 @@
-"""Behavioral anomaly detection for Argus."""
+"""Behavioral anomaly detection for netSoldier."""

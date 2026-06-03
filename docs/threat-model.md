@@ -1,14 +1,14 @@
-# Threat model — STRIDE analysis for Argus
+# Threat model — STRIDE analysis for netSoldier
 
 - **Date:** 2026-06-03
 - **Status:** Living document (update with each phase)
-- **Scope:** full Argus system — monitoring, detection, killswitch, DevSecOps pipeline
+- **Scope:** full netSoldier system — monitoring, detection, killswitch, DevSecOps pipeline
 - **Method:** STRIDE per component/data-flow, with risk ratings and planned mitigations
-- **Reference:** [ADR-0001](adr/0001-architektura.md), [`context/03-architecture.md`](../context/03-architecture.md)
+- **Reference:** [ADR-0001](adr/0001-architektura.md)
 
 ## 1. System description
 
-Argus is a passive home-network IDS with an out-of-band killswitch. It is
+netSoldier is a passive home-network IDS with an out-of-band killswitch. It is
 **never inline** — a sensor failure cannot take the network down (fail-open by
 design). The system runs on two profiles: a full `proxmox-soc` stack (~8 GB
 server) and a minimal `pi-edge` profile (Pi 3B+, 1 GB).
@@ -21,7 +21,7 @@ and reversible (TTL auto-revert).
 
 ```
   TB-1                       TB-2                         TB-3
-Internet ──── ISP Router ──── Managed Switch ──── SPAN (one-way) ──── Argus sensor
+Internet ──── ISP Router ──── Managed Switch ──── SPAN (one-way) ──── netSoldier sensor
                 │                   │                                      │
                 │ WiFi clients      │ Wired devices              TB-4     │
                 │                   │                  ┌──────────────────┤
@@ -48,10 +48,10 @@ Internet ──── ISP Router ──── Managed Switch ──── SPAN (
 |---|---|---|
 | TB-1 | Internet ↔ ISP router | Untrusted ↔ boundary device (uncontrolled) |
 | TB-2 | ISP router ↔ home LAN | Boundary ↔ semi-trusted LAN |
-| TB-3 | LAN (SPAN mirror) → Argus sensor | Semi-trusted → trusted (one-way, passive) |
-| TB-4 | Argus host ↔ containerized services | Trusted host ↔ least-privilege containers |
-| TB-5 | Argus → network enforcement points | Trusted → semi-trusted (switch, ARP, AdGuard) |
-| TB-6 | External feeds → Argus | Untrusted → trusted (ingest with validation) |
+| TB-3 | LAN (SPAN mirror) → netSoldier sensor | Semi-trusted → trusted (one-way, passive) |
+| TB-4 | netSoldier host ↔ containerized services | Trusted host ↔ least-privilege containers |
+| TB-5 | netSoldier → network enforcement points | Trusted → semi-trusted (switch, ARP, AdGuard) |
+| TB-6 | External feeds → netSoldier | Untrusted → trusted (ingest with validation) |
 | TB-7 | Admin/operator → Web UI / Grafana | Trusted (authenticated) → trusted |
 | TB-8 | Developer → CI/CD → deployment | Trusted dev → pipeline with gates → cluster |
 
@@ -136,7 +136,7 @@ Risk rating: **Impact** (Critical / High / Medium / Low) x **Likelihood** (High 
 | E-02 | Web UI or API vulnerability → unauthorized killswitch control | DF-11, Web UI, killswitch API | Critical — attacker can block or unblock arbitrary devices | Low — authenticated API; standard web security practices | **Medium** | API authentication and authorization (step 73). Input validation. CSRF/XSS protections in SvelteKit. Rate limiting. Security review and pen-test (step 141). |
 | E-03 | ArgoCD compromise → deploy arbitrary workloads | DF-14, ArgoCD | Critical — full cluster takeover | Very Low — ArgoCD password changed from default (step 33); SOPS secrets; Kyverno verifyImages blocks unsigned images | **Low** | ArgoCD credentials via SOPS (step 33). Kyverno blocks unsigned images (step 35). RBAC for ArgoCD (least privilege). Git branch protection. |
 | E-04 | Compromised MISP instance → inject false threat intel → automated false blocking | DF-15, MISP, killswitch | High — attacker controls what gets blocked via poisoned intel | Low — MISP is internal, not internet-facing; feeds are from reputable sources | **Medium** | MISP not exposed externally. Feed sources validated (TLS, known endpoints). Composite confidence — single-source IoC alone triggers approval queue, not auto-block. Monitor IoC freshness and volume anomalies (step 134). MISP hardening and key rotation (step 134). |
-| E-05 | Compromised LAN device pivots to Argus services | TB-3 → TB-4 | High — access to detection and enforcement APIs from inside the network | Medium — IoT devices on home LANs are frequently compromised | **High** | NetworkPolicies restrict service-to-service communication (step 92). Services not exposed on LAN (ClusterIP only; admin access via port-forward or ingress with auth). VLAN segmentation between Argus host and general LAN (if switch supports). Host firewall (nftables, step 30). Service authentication for all APIs. |
+| E-05 | Compromised LAN device pivots to netSoldier services | TB-3 → TB-4 | High — access to detection and enforcement APIs from inside the network | Medium — IoT devices on home LANs are frequently compromised | **High** | NetworkPolicies restrict service-to-service communication (step 92). Services not exposed on LAN (ClusterIP only; admin access via port-forward or ingress with auth). VLAN segmentation between netSoldier host and general LAN (if switch supports). Host firewall (nftables, step 30). Service authentication for all APIs. |
 
 ## 5. Critical threat summary (sorted by risk)
 
@@ -181,7 +181,7 @@ Risk rating: **Impact** (Critical / High / Medium / Low) x **Likelihood** (High 
 
 ## 8. Assumptions
 
-1. The home network is **not the target** — threats are compromised IoT devices, malware on endpoints, or network-borne attacks traversing the LAN. Argus defends; it does not attack.
+1. The home network is **not the target** — threats are compromised IoT devices, malware on endpoints, or network-borne attacks traversing the LAN. netSoldier defends; it does not attack.
 2. **Household consent** is in place for all monitoring.
 3. The **ISP router cannot be replaced or configured** beyond DHCP settings.
 4. **Physical security** of the switch, Pi, and server is adequate (indoor, private residence).

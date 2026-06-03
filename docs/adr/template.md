@@ -27,4 +27,4 @@ The choice, stated actively: "We will …". Include scope — what this does *no
 
 ## Links
 
-Related ADRs, `context/` docs, roadmap steps, external references.
+Related ADRs, roadmap steps, external references.

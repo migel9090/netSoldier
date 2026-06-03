@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ml-anomaly"
 version = "0.1.0"
-description = "Behavioral anomaly detection for Argus — RITA beaconing glue + Isolation Forest"
+description = "Behavioral anomaly detection for netSoldier — RITA beaconing glue + Isolation Forest"
 requires-python = ">=3.12"
 license = "GPL-3.0-or-later"
 dependencies = [

@@ -10,4 +10,4 @@
 | `user-guide.md` | household-facing guide (devices, alerts, approvals) | step 96 |
 | `prod-readiness.md` | production readiness checklist for both profiles | step 149 |
 
-Project context, decisions and the full roadmap: [`../context/`](../context/) (Polish).
+Core architecture decisions: [`adr/0001-architektura.md`](adr/0001-architektura.md).

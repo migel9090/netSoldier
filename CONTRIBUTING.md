@@ -2,7 +2,7 @@
 
 These conventions are team-grade discipline applied from commit one, even while the
 project is solo-maintained (portfolio rule: the pipeline, not trust, enforces quality).
-Established as roadmap **step 1** (`context/04-roadmap.md`).
+Established as roadmap **step 1**.
 
 ## TL;DR
 
@@ -99,5 +99,5 @@ BREAKING CHANGE: detections consuming /export/v1 must migrate to /export/v2.
 ## Language
 
 - Code, comments, commits, PRs, runbooks: **English**.
-- `context/` starter pack stays **Polish** (original project record); new `docs/` content
-  may be either, preferring English for anything portfolio-facing.
+- New `docs/` content may be either Polish or English, preferring English for
+  anything portfolio-facing.

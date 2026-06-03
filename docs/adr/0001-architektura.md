@@ -1,4 +1,4 @@
-# ADR-0001: Core architecture of Argus (interview decisions)
+# ADR-0001: Core architecture of netSoldier (interview decisions)
 
 - **Date:** 2026-06-03
 - **Status:** Accepted
@@ -6,7 +6,7 @@
 
 ## Context and problem
 
-Argus is a greenfield home-network security monitor: device inventory, *who→where→what*
+netSoldier is a greenfield home-network security monitor: device inventory, *who→where→what*
 traffic visibility, threat detection, and a quarantine killswitch — with a
 production-grade DevSecOps pipeline as the explicit showcase. Hard constraints:
 
@@ -17,9 +17,8 @@ production-grade DevSecOps pipeline as the explicit showcase. Hard constraints:
 - **Privacy:** own network, household consent; no payload inspection.
 
 Decisions below were made in a 7-round interview, informed by a 10-domain bleeding-edge
-research sweep (2024–2026). Authoritative Polish record: [`context/02-decisions.md`](../../context/02-decisions.md)
-(28 decisions); research basis and deliberate divergences from raw research
-recommendations: [`context/05-research-findings.md`](../../context/05-research-findings.md).
+research sweep (2024–2026), covering 28 architecture decisions with research basis
+and deliberate divergences from raw research recommendations.
 
 ## Decision
 
@@ -68,7 +67,7 @@ recommendations: [`context/05-research-findings.md`](../../context/05-research-f
 | MITM TLS inspection | privacy violation in a household; metadata (JA4+DNS) suffices for the threat model |
 | Pi-hole v6 for DNS | needs an Unbound sidecar for DoH/DoT/DoQ; AdGuard Home is a single binary with per-client filtering |
 
-Full divergence table (9 entries): `context/05-research-findings.md` → „Rozbieżności".
+Full divergence table (9 entries) documented in project research notes.
 
 ## Consequences
 
@@ -78,7 +77,5 @@ Full divergence table (9 entries): `context/05-research-findings.md` → „Rozb
 
 ## Links
 
-- [`context/02-decisions.md`](../../context/02-decisions.md) — authoritative decision record (PL)
-- [`context/05-research-findings.md`](../../context/05-research-findings.md) + [`context/research-raw.json`](../../context/research-raw.json) — research basis
-- [`context/04-roadmap.md`](../../context/04-roadmap.md) — 173-step execution plan
-- [`context/01-environment-and-constraints.md`](../../context/01-environment-and-constraints.md) — hardware/network constraints
+- [`docs/threat-model.md`](../threat-model.md) — STRIDE analysis
+- 173-step roadmap — execution plan (steps 0–172, audit gates at 25/50/75/100/125/150/172)

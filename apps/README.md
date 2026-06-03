@@ -1,4 +1,4 @@
-# apps/ — Argus services
+# apps/ — netSoldier services
 
 Each service is self-contained: own multi-stage Dockerfile (distroless, non-root),
 multi-arch build (amd64+arm64), `/healthz` + `/metrics` (Prometheus) endpoints,

@@ -117,26 +117,26 @@ The Dockerfiles use `--platform=$BUILDPLATFORM` with Go cross-compilation
 One-time builder setup:
 
 ```bash
-docker buildx create --name argus-builder --driver docker-container --bootstrap
+docker buildx create --name netsoldier-builder --driver docker-container --bootstrap
 ```
 
 Build for both architectures:
 
 ```bash
 # Local test (both platforms, result stays in build cache)
-docker buildx build --builder argus-builder \
+docker buildx build --builder netsoldier-builder \
   --platform linux/amd64,linux/arm64 \
-  -t argus/detection-engine:dev apps/detection-engine/
+  -t netsoldier/detection-engine:dev apps/detection-engine/
 
 # Push to GHCR
-docker buildx build --builder argus-builder \
+docker buildx build --builder netsoldier-builder \
   --platform linux/amd64,linux/arm64 \
   -t ghcr.io/migel9090/detection-engine:dev --push apps/detection-engine/
 
 # Load single-platform into local Docker (for testing)
-docker buildx build --builder argus-builder \
+docker buildx build --builder netsoldier-builder \
   --platform linux/amd64 --load \
-  -t argus/detection-engine:dev apps/detection-engine/
+  -t netsoldier/detection-engine:dev apps/detection-engine/
 ```
 
 ## Container registry (GHCR)

@@ -4,7 +4,7 @@ Same images everywhere; the two profiles differ only by overlay/values.
 
 | Path | Purpose | Lands at |
 |---|---|---|
-| `helm/argus/` | umbrella chart (subchart per service + dependencies) | step 36 |
+| `helm/netsoldier/` | umbrella chart (subchart per service + dependencies) | step 36 |
 | `kustomize/base/` + `kustomize/overlays/{pi-edge,proxmox-soc}/` | profile overlays: edge-minimal vs full SOC | steps 36, 84–85 |
 | `argocd/` | app-of-apps + ApplicationSet generating both profiles | step 37 |
 | `kyverno/` | admission policies: cosign `verifyImages` (signed images only), non-root, read-only rootfs, required limits | step 35 |

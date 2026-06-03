@@ -63,6 +63,9 @@ kubeconfig
 *.pcap
 *.pcapng
 
+# ── Local-only working context (used by AI tooling, never committed) ──
+context/
+
 # ── OS / editors ──
 .DS_Store
 Thumbs.db

@@ -1,4 +1,4 @@
-# Argus
+# netSoldier
 
 > Home-network security monitor: device inventory, traffic visibility (*who → where → what*),
 > threat detection, and a human-in-the-loop killswitch — built end-to-end as a
@@ -19,16 +19,14 @@ Monorepo with a bleeding-edge supply-chain-hardened pipeline: GitHub Actions (SH
 
 Hybrid: mature open-source engines (Suricata, Zeek, ntopng, AdGuard Home, RITA, MISP, ClickHouse) + a custom Go/Python correlation-and-control plane (`detection-engine`, `device-inventory`, `threat-intel-sync`, `killswitch-controller`, `ml-anomaly`, SvelteKit `web-ui`). Two deployment profiles: `proxmox-soc` (full stack, ~8 GB server) and `pi-edge` (minimal, Raspberry Pi).
 
-Full context, decisions, architecture and the 173-step roadmap: [`context/`](context/).
-
 ## Status
 
-Phase 0 (DevSecOps foundation) in progress — see the [173-step roadmap](context/04-roadmap.md).
+Phase 0 (DevSecOps foundation) in progress — see the 173-step roadmap.
 Conventions for commits, branching and reviews: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Ethics & privacy
 
-Argus monitors the **author's own home network with household consent** (defensive/educational). Passive IDS, out-of-band response only, human-in-the-loop quarantine with allowlist and audit trail, metadata-only visibility (no payload inspection, no MITM), 30-day default retention.
+netSoldier monitors the **author's own home network with household consent** (defensive/educational). Passive IDS, out-of-band response only, human-in-the-loop quarantine with allowlist and audit trail, metadata-only visibility (no payload inspection, no MITM), 30-day default retention.
 
 ## License
 
