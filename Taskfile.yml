@@ -1,0 +1,151 @@
+version: '3'
+
+vars:
+  REGISTRY: ghcr.io/migel9090
+  IMAGE: detection-engine
+  TAG: dev
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build detection-engine image (current arch, loaded locally)
+    cmds:
+      - docker buildx build --load
+          -t {{.REGISTRY}}/{{.IMAGE}}:{{.TAG}}
+          apps/detection-engine/
+
+  build:push:
+    desc: Build and push multi-arch image to GHCR
+    cmds:
+      - docker buildx build
+          --platform linux/amd64,linux/arm64
+          -t {{.REGISTRY}}/{{.IMAGE}}:{{.TAG}}
+          --push
+          apps/detection-engine/
+
+  test:
+    desc: Run all tests
+    cmds:
+      - task: test:go
+      - task: test:python
+
+  test:go:
+    desc: Run Go tests with race detector
+    cmds:
+      - |
+        for dir in apps/*/; do
+          if find "$dir" -name '*.go' -print -quit | grep -q .; then
+            echo "==> test $dir"
+            (cd "$dir" && go test -race -count=1 ./...)
+          fi
+        done
+
+  test:python:
+    desc: Run Python tests
+    dir: apps/ml-anomaly
+    cmds:
+      - pip install -q -e '.[dev]'
+      - pytest --tb=short -q || [ $? -eq 5 ]
+
+  lint:
+    desc: Run all linters
+    cmds:
+      - task: lint:go
+      - task: lint:python
+
+  lint:go:
+    desc: Run Go vet on all modules
+    cmds:
+      - |
+        for dir in apps/*/; do
+          if find "$dir" -name '*.go' -print -quit | grep -q .; then
+            echo "==> vet $dir"
+            (cd "$dir" && go vet ./...)
+          fi
+        done
+
+  lint:python:
+    desc: Run ruff linter on ml-anomaly
+    cmds:
+      - ruff check apps/ml-anomaly/
+
+  fmt:
+    desc: Format all code
+    cmds:
+      - gofmt -w apps/
+      - goimports -w apps/
+      - ruff check --fix apps/ml-anomaly/
+      - ruff format apps/ml-anomaly/
+
+  scan:
+    desc: Run security scanners locally
+    cmds:
+      - task: scan:secrets
+      - task: scan:sast
+      - task: scan:iac
+
+  scan:secrets:
+    desc: Scan for leaked secrets
+    cmds:
+      - gitleaks detect --source . --verbose --no-banner
+
+  scan:sast:
+    desc: Run Semgrep SAST scan
+    cmds:
+      - semgrep scan
+          --config=p/default
+          --config=p/security-audit
+          --config=p/owasp-top-ten
+          --metrics=off .
+
+  scan:iac:
+    desc: Run Checkov IaC scan
+    cmds:
+      - checkov --directory . --quiet --compact --soft-fail
+
+  sbom:
+    desc: Generate CycloneDX SBOM from GHCR image
+    cmds:
+      - syft {{.REGISTRY}}/{{.IMAGE}}:{{.TAG}} -o cyclonedx-json=detection-engine.cdx.json
+      - echo "SBOM written to detection-engine.cdx.json"
+
+  sign:
+    desc: Sign image with cosign keyless (opens browser for OIDC)
+    cmds:
+      - cosign sign --yes {{.REGISTRY}}/{{.IMAGE}}:{{.TAG}}
+
+  up:
+    desc: Run detection-engine locally (native Go)
+    dir: apps/detection-engine
+    cmds:
+      - go run ./cmd/detection-engine
+
+  up:docker:
+    desc: Run detection-engine in Docker
+    deps: [build]
+    cmds:
+      - docker run --rm -p 8080:8080 {{.REGISTRY}}/{{.IMAGE}}:{{.TAG}}
+
+  deploy:
+    desc: Deploy to cluster (available after ArgoCD setup, step 33+)
+    cmds:
+      - echo "Deployment targets are configured after ArgoCD setup (steps 33-37)."
+      - echo "Manual deploy:"
+      - echo "  kubectl apply -k deploy/kustomize/overlays/proxmox-soc/"
+      - echo "  argocd app sync netsoldier"
+
+  pre-commit:
+    desc: Run all pre-commit hooks
+    cmds:
+      - pre-commit run --all-files
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -f detection-engine.cdx.json
+      - rm -f *.sarif
+      - docker rmi {{.REGISTRY}}/{{.IMAGE}}:{{.TAG}} 2>/dev/null || true

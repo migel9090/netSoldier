@@ -11,6 +11,7 @@
 | pnpm | ≥ 9 | JS package manager |
 | Docker | ≥ 24 | container builds, hadolint hook, local testing |
 | pre-commit | ≥ 3.8 | git hook framework |
+| Task | ≥ 3.38 | task runner (`go install github.com/go-task/task/v3/cmd/task@latest`) |
 | Terraform | ≥ 1.7 | infrastructure (optional — only for `infra/terraform/`) |
 | Ansible | ≥ 2.16 | provisioning (optional — only for `infra/ansible/`) |
 
@@ -28,6 +29,26 @@ git clone <repo-url> && cd netSoldier
 pre-commit install            # hooks run on every commit
 pre-commit run --all-files    # one-time check of existing files
 ```
+
+## Task runner
+
+The `Taskfile.yml` at the repo root provides common dev targets:
+
+```bash
+task --list          # show all targets
+task build           # build image (local arch)
+task test            # run Go + Python tests
+task lint            # run all linters
+task scan            # run security scanners (gitleaks, semgrep, checkov)
+task fmt             # format all code
+task up              # run detection-engine natively
+task up:docker       # run in Docker
+task sbom            # generate SBOM from GHCR image
+task sign            # sign image with cosign (keyless)
+task pre-commit      # run all pre-commit hooks
+```
+
+Variables can be overridden: `task build TAG=v0.1.0`
 
 ## Pre-commit hooks
 
