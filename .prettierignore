@@ -1,0 +1,9 @@
+node_modules/
+dist/
+build/
+.svelte-kit/
+coverage/
+pnpm-lock.yaml
+go.sum
+*.min.js
+*.min.css
