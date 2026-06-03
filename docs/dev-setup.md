@@ -80,6 +80,34 @@ Most editors detect `.editorconfig` automatically. Recommended extensions:
 - **JetBrains:** EditorConfig (built-in), Go/Python/JS support built-in, Ruff plugin
 - **Neovim/Helix:** editorconfig support built-in; LSPs for gopls, ruff, svelte-language-server
 
+## npm/pnpm supply-chain hardening
+
+The repo-level `.npmrc` enforces supply-chain defenses for all JS/TS work:
+
+| Setting | Defense |
+|---|---|
+| `ignore-scripts=true` | Blocks postinstall/preinstall lifecycle scripts (primary npm attack vector) |
+| `save-exact=true` | Pins exact versions — no `^`/`~` floating ranges |
+| `engine-strict=true` | Fails on Node.js version mismatch instead of silently continuing |
+| `strict-peer-dependencies=true` | Fails on peer dep conflicts |
+| `registry=https://registry.npmjs.org/` | Explicit registry — prevents confusion attacks |
+| `audit=true` | Runs `pnpm audit` on every install |
+
+The `apps/web-ui/package.json` additionally locks:
+
+- **`packageManager`** — Corepack enforces exact pnpm version across all machines
+- **`pnpm.onlyBuiltDependencies: []`** — empty allowlist; no package can run native builds unless explicitly listed
+
+In CI, always use `pnpm install --frozen-lockfile` to fail if the lockfile would change.
+
+If a dependency legitimately needs a build script (e.g. `esbuild` native binary),
+add it to `onlyBuiltDependencies` by name after reviewing its postinstall:
+
+```bash
+# Audit what a package runs before allowlisting
+pnpm why <package> && pnpm exec -- cat node_modules/<package>/package.json | jq '.scripts'
+```
+
 ## Multi-arch container builds
 
 Images are built for **linux/amd64** (Proxmox server) and **linux/arm64** (Pi 3B+).
@@ -133,7 +161,8 @@ push images. This follows least-privilege.
 
 Pre-commit catches issues at commit time. CI (steps 14–24) adds:
 
-- CodeQL (deeper SAST, multi-language)
+- Semgrep (full repo SAST scan → SARIF → GitHub Security tab)
+- CodeQL (deeper SAST, multi-language: Go/Python/JS-TS → SARIF)
 - OSV-Scanner + Grype (SCA — dependency vulnerabilities)
 - KICS (additional IaC scanning)
 - TruffleHog nightly (historical secret scanning with verification)
