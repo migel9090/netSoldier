@@ -60,7 +60,7 @@
 ## Struktura repo (monorepo)
 
 ```
-projektMigel/
+netSoldier/
 ├── apps/
 │   ├── detection-engine/        # Go: EVE/Zeek/ntopng → korelacja → ClickHouse
 │   ├── device-inventory/        # Go: DHCP opt55/60 + mDNS + ARP + OUI → SQLite/ClickHouse

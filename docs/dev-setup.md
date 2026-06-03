@@ -24,7 +24,7 @@ pip install pre-commit
 ## Repository setup
 
 ```bash
-git clone <repo-url> && cd projektMigel
+git clone <repo-url> && cd netSoldier
 pre-commit install            # hooks run on every commit
 pre-commit run --all-files    # one-time check of existing files
 ```

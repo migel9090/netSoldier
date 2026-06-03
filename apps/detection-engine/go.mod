@@ -1,4 +1,4 @@
-module github.com/migel9090/projektMigel/apps/detection-engine
+module github.com/migel9090/netSoldier/apps/detection-engine
 
 go 1.23.0
 

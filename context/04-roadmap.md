@@ -10,7 +10,7 @@ Mapa faz:
 
 ## FAZA 0 — Fundament DevSecOps + cienki pionowy plaster
 
-0. Utwórz monorepo `projektMigel`, zainicjalizuj git, dodaj `.gitignore`, `LICENSE`, `README.md` ze szkicem celu projektu.
+0. Utwórz monorepo `netSoldier`, zainicjalizuj git, dodaj `.gitignore`, `LICENSE`, `README.md` ze szkicem celu projektu.
 1. Ustal konwencje: Conventional Commits, SemVer, model trunk-based z krótkimi feature-branchami i obowiązkowym PR review.
 2. Stwórz strukturę katalogów wg planu (`apps/`, `deploy/`, `infra/`, `detections/`, `observability/`, `security/`, `docs/`, `.github/`).
 3. Dodaj `docs/adr/0001-architektura.md` z decyzjami z wywiadu; załóż katalog na kolejne ADR.

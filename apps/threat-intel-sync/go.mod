@@ -1,3 +1,3 @@
-module github.com/migel9090/projektMigel/apps/threat-intel-sync
+module github.com/migel9090/netSoldier/apps/threat-intel-sync
 
 go 1.23
