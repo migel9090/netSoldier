@@ -80,6 +80,37 @@ Most editors detect `.editorconfig` automatically. Recommended extensions:
 - **JetBrains:** EditorConfig (built-in), Go/Python/JS support built-in, Ruff plugin
 - **Neovim/Helix:** editorconfig support built-in; LSPs for gopls, ruff, svelte-language-server
 
+## Multi-arch container builds
+
+Images are built for **linux/amd64** (Proxmox server) and **linux/arm64** (Pi 3B+).
+The Dockerfiles use `--platform=$BUILDPLATFORM` with Go cross-compilation
+(`GOOS`/`GOARCH`), so no QEMU emulation is needed for the build stage.
+
+One-time builder setup:
+
+```bash
+docker buildx create --name argus-builder --driver docker-container --bootstrap
+```
+
+Build for both architectures:
+
+```bash
+# Local test (both platforms, result stays in build cache)
+docker buildx build --builder argus-builder \
+  --platform linux/amd64,linux/arm64 \
+  -t argus/detection-engine:dev apps/detection-engine/
+
+# Push to registry (when GHCR is configured)
+docker buildx build --builder argus-builder \
+  --platform linux/amd64,linux/arm64 \
+  -t ghcr.io/<org>/detection-engine:dev --push apps/detection-engine/
+
+# Load single-platform into local Docker (for testing)
+docker buildx build --builder argus-builder \
+  --platform linux/amd64 --load \
+  -t argus/detection-engine:dev apps/detection-engine/
+```
+
 ## What the CI adds beyond pre-commit
 
 Pre-commit catches issues at commit time. CI (steps 14–24) adds:
