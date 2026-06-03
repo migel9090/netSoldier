@@ -171,5 +171,5 @@ Pre-commit catches issues at commit time. CI (steps 14–24) adds:
 - TruffleHog nightly (full history scan with `--only-verified` — alerts on active leaked credentials)
 - SBOM generation (Syft → CycloneDX JSON, uploaded as build artifact)
 - Cosign keyless signing (Sigstore/OIDC — image signatures verified via Fulcio + Rekor)
-- Multi-arch image builds + SLSA provenance
+- SLSA L2 provenance (slsa-github-generator, attached to image in GHCR)
 - PCAP corpus replay (detection regression testing)
