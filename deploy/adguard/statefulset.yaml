@@ -20,6 +20,8 @@ spec:
       initContainers:
         - name: init-config
           image: busybox:1.37
+          securityContext:
+            allowPrivilegeEscalation: false
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -38,6 +40,8 @@ spec:
       containers:
         - name: adguard-home
           image: adguard/adguardhome:v0.107.55
+          securityContext:
+            allowPrivilegeEscalation: false
           ports:
             - name: dns-tcp
               containerPort: 53

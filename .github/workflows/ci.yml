@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GOWORK: "off"
+
 jobs:
   lint:
     runs-on: ubuntu-latest
