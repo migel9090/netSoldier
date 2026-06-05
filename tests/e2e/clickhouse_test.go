@@ -28,6 +28,7 @@ func startClickHouse(t *testing.T) string {
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "clickhouse/clickhouse-server:24.8",
 			ExposedPorts: []string{"8123/tcp"},
+			Env:          map[string]string{"CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT": "1"},
 			WaitingFor:   wait.ForHTTP("/ping").WithPort("8123/tcp"),
 		},
 		Started: true,
