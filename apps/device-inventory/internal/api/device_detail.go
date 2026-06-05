@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -77,16 +76,16 @@ func (h *Handler) DeviceConnections(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	query := fmt.Sprintf(`SELECT
+	query := `SELECT
 		timestamp, dst_ip, dst_domain, dst_port, protocol,
 		bytes_in, bytes_out, duration_ms
 	FROM connections
-	WHERE src_ip = '%s'
+	WHERE src_ip = {ip:String}
 	ORDER BY timestamp DESC
-	LIMIT 100`, escapeCH(device.IP))
+	LIMIT 100`
 
 	var rows []connectionRow
-	if err := h.ch.Query(ctx, query, &rows); err != nil {
+	if err := h.ch.Query(ctx, query, &rows, map[string]string{"ip": device.IP}); err != nil {
 		slog.Debug("device connections query failed", "mac", mac, "error", err)
 		rows = []connectionRow{}
 	}
@@ -123,15 +122,15 @@ func (h *Handler) DeviceDNS(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	query := fmt.Sprintf(`SELECT
+	query := `SELECT
 		timestamp, domain, query_type, answer, status, response_ms, blocked
 	FROM dns_queries
-	WHERE client_ip = '%s'
+	WHERE client_ip = {ip:String}
 	ORDER BY timestamp DESC
-	LIMIT 100`, escapeCH(device.IP))
+	LIMIT 100`
 
 	var rows []dnsRow
-	if err := h.ch.Query(ctx, query, &rows); err != nil {
+	if err := h.ch.Query(ctx, query, &rows, map[string]string{"ip": device.IP}); err != nil {
 		slog.Debug("device dns query failed", "mac", mac, "error", err)
 		rows = []dnsRow{}
 	}
@@ -168,15 +167,15 @@ func (h *Handler) DeviceAlerts(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	query := fmt.Sprintf(`SELECT
+	query := `SELECT
 		timestamp, id, domain, query_type, matched_ioc, severity, source
 	FROM alerts
-	WHERE client_ip = '%s'
+	WHERE client_ip = {ip:String}
 	ORDER BY timestamp DESC
-	LIMIT 50`, escapeCH(device.IP))
+	LIMIT 50`
 
 	var rows []alertRow
-	if err := h.ch.Query(ctx, query, &rows); err != nil {
+	if err := h.ch.Query(ctx, query, &rows, map[string]string{"ip": device.IP}); err != nil {
 		slog.Debug("device alerts query failed", "mac", mac, "error", err)
 		rows = []alertRow{}
 	}
@@ -185,17 +184,3 @@ func (h *Handler) DeviceAlerts(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(rows)
 }
 
-func escapeCH(s string) string {
-	var out []byte
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '\'':
-			out = append(out, '\\', '\'')
-		case '\\':
-			out = append(out, '\\', '\\')
-		default:
-			out = append(out, s[i])
-		}
-	}
-	return string(out)
-}

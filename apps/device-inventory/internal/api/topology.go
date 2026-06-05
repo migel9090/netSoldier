@@ -133,13 +133,13 @@ func (h *TopologyHandler) queryFlows(ctx context.Context, hours int) []topoEdge 
 		sum(packets_in + packets_out) AS total_packets,
 		count() AS flow_count
 	FROM network_flows
-	WHERE timestamp >= now() - INTERVAL ` + strconv.Itoa(hours) + ` HOUR
+	WHERE timestamp >= now() - INTERVAL {hours:UInt32} HOUR
 	GROUP BY src_ip, dst_ip
 	ORDER BY total_bytes DESC
 	LIMIT 500`
 
 	var rows []flowRow
-	if err := h.ch.Query(qctx, query, &rows); err != nil {
+	if err := h.ch.Query(qctx, query, &rows, map[string]string{"hours": strconv.Itoa(hours)}); err != nil {
 		slog.Debug("topology: clickhouse query failed", "error", err)
 		return nil
 	}

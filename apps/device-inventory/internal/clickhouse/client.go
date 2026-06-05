@@ -65,11 +65,17 @@ func (c *Client) Insert(ctx context.Context, table string, records ...any) error
 }
 
 // Query runs a SELECT and decodes the JSON result into dest (a pointer to
-// a slice). The query must NOT contain a FORMAT clause.
-func (c *Client) Query(ctx context.Context, query string, dest any) error {
+// a slice). The query must NOT contain a FORMAT clause. Use {name:Type}
+// placeholders with params for safe parameterized queries.
+func (c *Client) Query(ctx context.Context, query string, dest any, params ...map[string]string) error {
 	fullQuery := query + " FORMAT JSON"
 	u := fmt.Sprintf("%s/?database=%s&query=%s", c.baseURL,
 		url.QueryEscape(c.database), url.QueryEscape(fullQuery))
+	if len(params) > 0 {
+		for k, v := range params[0] {
+			u += "&param_" + url.QueryEscape(k) + "=" + url.QueryEscape(v)
+		}
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
