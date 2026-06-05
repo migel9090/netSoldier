@@ -7,15 +7,23 @@ spec:
     spec:
       containers:
         - name: detection-engine
+          securityContext:
+            allowPrivilegeEscalation: false
           env:
             - name: LISTEN_ADDR
               value: ":8080"
             - name: ADGUARD_URL
               value: "http://adguard-web.dns.svc:3000"
             - name: ADGUARD_USER
-              value: "admin"
+              valueFrom:
+                secretKeyRef:
+                  name: adguard-credentials
+                  key: username
             - name: ADGUARD_PASSWORD
-              value: "changeme"
+              valueFrom:
+                secretKeyRef:
+                  name: adguard-credentials
+                  key: password
             - name: THREATLIST_PATH
               value: "/etc/detection-engine/domains.txt"
             - name: POLL_INTERVAL

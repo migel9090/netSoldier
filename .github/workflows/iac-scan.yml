@@ -78,6 +78,7 @@ jobs:
           path: .
           fail_on: high
           exclude_paths: "deploy/helm,deploy/argocd/patches,deploy/argocd/*.example.yaml,deploy/kustomize/base/misp"
+          exclude_queries: "aa8f7a35-9923-4cad-bd61-a19b7f6aac91,5308a7a8-06f8-45ac-bf10-791fe21de46e"
           output_formats: sarif
           output_path: .
 

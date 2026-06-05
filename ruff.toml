@@ -28,6 +28,7 @@ select = [
 
 [lint.per-file-ignores]
 "tests/**/*.py" = ["S101"]
+"**/tests/**/*.py" = ["S101"]
 
 [format]
 quote-style = "double"

@@ -7,6 +7,8 @@ spec:
     spec:
       containers:
         - name: killswitch-controller
+          securityContext:
+            allowPrivilegeEscalation: false
           resources:
             limits:
               cpu: 300m

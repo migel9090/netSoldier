@@ -9,6 +9,8 @@ spec:
         kubernetes.io/arch: arm64
       containers:
         - name: fluent-bit
+          securityContext:
+            allowPrivilegeEscalation: false
           resources:
             limits:
               cpu: 50m

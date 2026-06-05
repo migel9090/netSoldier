@@ -7,6 +7,8 @@ spec:
     spec:
       containers:
         - name: threat-intel-sync
+          securityContext:
+            allowPrivilegeEscalation: false
           resources:
             limits:
               cpu: 300m
