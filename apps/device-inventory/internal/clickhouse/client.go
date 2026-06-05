@@ -112,7 +112,12 @@ func (c *Client) do(req *http.Request) error {
 
 // InitSchema creates the devices and device_events tables if they don't exist.
 func (c *Client) InitSchema(ctx context.Context) error {
-	if err := c.Exec(ctx, "CREATE DATABASE IF NOT EXISTS "+c.database); err != nil {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/",
+		bytes.NewBufferString("CREATE DATABASE IF NOT EXISTS "+c.database))
+	if err != nil {
+		return fmt.Errorf("create database: %w", err)
+	}
+	if err := c.do(req); err != nil {
 		return fmt.Errorf("create database: %w", err)
 	}
 

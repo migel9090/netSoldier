@@ -332,8 +332,8 @@ func TestClickHouseSchema(t *testing.T) {
 			SrcIP     string `json:"src_ip"`
 			DstIP     string `json:"dst_ip"`
 			DstDomain string `json:"dst_domain"`
-			DstPort   int    `json:"dst_port"`
-			BytesIn   int    `json:"bytes_in"`
+			DstPort   int    `json:"dst_port,string"`
+			BytesIn   int    `json:"bytes_in,string"`
 		}
 		var rows []row
 		if err := chQueryRows(chURL, "netsoldier",
