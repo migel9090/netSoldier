@@ -328,12 +328,12 @@ func TestClickHouseSchema(t *testing.T) {
 		}
 
 		type row struct {
-			SrcMAC    string `json:"src_mac"`
-			SrcIP     string `json:"src_ip"`
-			DstIP     string `json:"dst_ip"`
-			DstDomain string `json:"dst_domain"`
-			DstPort   int    `json:"dst_port,string"`
-			BytesIn   int    `json:"bytes_in,string"`
+			SrcMAC    string      `json:"src_mac"`
+			SrcIP     string      `json:"src_ip"`
+			DstIP     string      `json:"dst_ip"`
+			DstDomain string      `json:"dst_domain"`
+			DstPort   json.Number `json:"dst_port"`
+			BytesIn   json.Number `json:"bytes_in"`
 		}
 		var rows []row
 		if err := chQueryRows(chURL, "netsoldier",
@@ -347,12 +347,8 @@ func TestClickHouseSchema(t *testing.T) {
 		}
 		assertEq(t, "src_mac", "aa:bb:cc:dd:ee:ff", rows[0].SrcMAC)
 		assertEq(t, "dst_domain", "one.one.one.one", rows[0].DstDomain)
-		if rows[0].DstPort != 443 {
-			t.Errorf("dst_port: want 443, got %d", rows[0].DstPort)
-		}
-		if rows[0].BytesIn != 1024 {
-			t.Errorf("bytes_in: want 1024, got %d", rows[0].BytesIn)
-		}
+		assertEq(t, "dst_port", "443", rows[0].DstPort.String())
+		assertEq(t, "bytes_in", "1024", rows[0].BytesIn.String())
 	})
 
 	t.Run("AuditLogRoundtrip", func(t *testing.T) {
