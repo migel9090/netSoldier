@@ -153,7 +153,10 @@ func TestDeviceConnectionsNoClickHouse(t *testing.T) {
 	srv, db := newTestAPI(t)
 	db.Upsert("aa:bb:cc:dd:ee:ff", "192.168.1.100", "sensor-1", "", "", "Espressif")
 
-	resp, _ := http.Get(srv.URL + "/devices/aa:bb:cc:dd:ee:ff/connections")
+	resp, err := http.Get(srv.URL + "/devices/aa:bb:cc:dd:ee:ff/connections")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -169,7 +172,10 @@ func TestDeviceDNSNoClickHouse(t *testing.T) {
 	srv, db := newTestAPI(t)
 	db.Upsert("aa:bb:cc:dd:ee:ff", "192.168.1.100", "sensor-1", "", "", "Espressif")
 
-	resp, _ := http.Get(srv.URL + "/devices/aa:bb:cc:dd:ee:ff/dns")
+	resp, err := http.Get(srv.URL + "/devices/aa:bb:cc:dd:ee:ff/dns")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -185,7 +191,10 @@ func TestDeviceAlertsNoClickHouse(t *testing.T) {
 	srv, db := newTestAPI(t)
 	db.Upsert("aa:bb:cc:dd:ee:ff", "192.168.1.100", "sensor-1", "", "", "Espressif")
 
-	resp, _ := http.Get(srv.URL + "/devices/aa:bb:cc:dd:ee:ff/alerts")
+	resp, err := http.Get(srv.URL + "/devices/aa:bb:cc:dd:ee:ff/alerts")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -199,7 +208,10 @@ func TestDeviceAlertsNoClickHouse(t *testing.T) {
 
 func TestDeviceAlertsBadMAC(t *testing.T) {
 	srv, _ := newTestAPI(t)
-	resp, _ := http.Get(srv.URL + "/devices/not-a-mac/alerts")
+	resp, err := http.Get(srv.URL + "/devices/not-a-mac/alerts")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400 for invalid MAC, got %d", resp.StatusCode)
