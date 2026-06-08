@@ -22,9 +22,16 @@ spec:
       initContainers:
         - name: init-rules
           image: oisf/suricata:7.0.8
-          command: ["suricata-update"]
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              mkdir -p /var/lib/suricata/data
+              touch /var/lib/suricata/data/ioc-domains.lst /var/lib/suricata/data/ioc-ips.lst
+              suricata-update --no-test
           securityContext:
-            runAsUser: 0
+            runAsNonRoot: true
+            runAsUser: 65534
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
@@ -77,11 +84,47 @@ spec:
               mountPath: /etc/suricata/suricata.yaml
               subPath: suricata.yaml
               readOnly: true
+            - name: local-rules
+              mountPath: /etc/suricata/rules
+              readOnly: true
             - name: rules
               mountPath: /var/lib/suricata
               readOnly: true
             - name: log
               mountPath: /var/log/suricata
+            - name: run
+              mountPath: /var/run/suricata
+            - name: tmp
+              mountPath: /tmp
+        - name: rules-updater
+          image: oisf/suricata:7.0.8
+          command: ["python3", "/etc/suricata/updater/update-rules.py"]
+          env:
+            - name: THREAT_INTEL_URL
+              value: "http://threat-intel-sync.netsoldier.svc:8083"
+            - name: UPDATE_INTERVAL_SECONDS
+              value: "21600"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          volumeMounts:
+            - name: updater-script
+              mountPath: /etc/suricata/updater
+              readOnly: true
+            - name: rules
+              mountPath: /var/lib/suricata
             - name: run
               mountPath: /var/run/suricata
             - name: tmp
@@ -120,6 +163,12 @@ spec:
         - name: config
           configMap:
             name: suricata-config
+        - name: local-rules
+          configMap:
+            name: suricata-local-rules
+        - name: updater-script
+          configMap:
+            name: suricata-updater-script
         - name: vector-config
           configMap:
             name: suricata-vector-config

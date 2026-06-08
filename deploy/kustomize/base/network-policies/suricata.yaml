@@ -20,6 +20,24 @@ spec:
         - port: 8123
           protocol: TCP
     - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: threat-intel-sync
+      ports:
+        - port: 8083
+          protocol: TCP
+    # suricata-update fetches the ET Open ruleset over HTTPS
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
+    - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: kube-system

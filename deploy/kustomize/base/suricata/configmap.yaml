@@ -80,6 +80,14 @@ data:
     default-rule-path: /var/lib/suricata/rules
     rule-files:
       - suricata.rules
+      - /etc/suricata/rules/netsoldier.rules
+
+    default-data-dir: /var/lib/suricata/data
+
+    datasets:
+      defaults:
+        memcap: 32mb
+        hashsize: 65536
 
     detect:
       profile: medium

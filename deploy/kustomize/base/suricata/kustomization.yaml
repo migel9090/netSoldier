@@ -10,5 +10,7 @@ commonLabels:
 resources:
   - serviceaccount.yaml
   - configmap.yaml
+  - local-rules-cm.yaml
+  - updater-cm.yaml
   - deployment.yaml
   - pdb.yaml

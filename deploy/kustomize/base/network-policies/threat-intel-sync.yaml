@@ -17,6 +17,13 @@ spec:
       ports:
         - port: 8083
           protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: suricata
+      ports:
+        - port: 8083
+          protocol: TCP
   egress:
     - to:
         - podSelector:

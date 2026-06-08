@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suricata-updater-script
+data:
+  update-rules.py: |
+    #!/usr/bin/env python3
+    """Periodic Suricata rule updater.
+
+    Each cycle: fetch IoC datasets from threat-intel-sync, refresh the
+    ET Open ruleset via suricata-update, then reload rules over the
+    Suricata unix socket. A failed reload keeps the previous ruleset
+    active, so partial failures degrade safely.
+    """
+    import os
+    import subprocess
+    import sys
+    import time
+    import urllib.request
+
+    DATA_DIR = "/var/lib/suricata/data"
+    SOCKET_PATH = "/var/run/suricata/suricata-command.socket"
+
+    TI_BASE = os.environ.get(
+        "THREAT_INTEL_URL", "http://threat-intel-sync.netsoldier.svc:8083")
+    INTERVAL = int(os.environ.get("UPDATE_INTERVAL_SECONDS", "21600"))
+
+    DATASETS = {
+        "ioc-domains.lst": "/export/suricata/domains",
+        "ioc-ips.lst": "/export/suricata/ips",
+    }
+
+    def log(msg):
+        print(msg, flush=True)
+
+    def fetch_datasets():
+        changed = False
+        for filename, path in DATASETS.items():
+            dest = os.path.join(DATA_DIR, filename)
+            try:
+                with urllib.request.urlopen(TI_BASE + path, timeout=60) as resp:
+                    data = resp.read()
+            except OSError as err:
+                log(f"dataset fetch failed ({path}): {err}")
+                continue
+            old = b""
+            if os.path.exists(dest):
+                with open(dest, "rb") as f:
+                    old = f.read()
+            if data == old:
+                continue
+            tmp = dest + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, dest)
+            changed = True
+            log(f"dataset updated: {filename} ({len(data)} bytes)")
+        return changed
+
+    def run_suricata_update():
+        res = subprocess.run(
+            ["suricata-update", "--no-test"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if res.returncode != 0:
+            log(f"suricata-update failed (rc={res.returncode}):\n"
+                f"{res.stdout[-2000:]}")
+            return False
+        return True
+
+    def reload_rules():
+        for _ in range(12):
+            if os.path.exists(SOCKET_PATH):
+                res = subprocess.run(
+                    ["suricatasc", "-c", "reload-rules", SOCKET_PATH],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True)
+                if res.returncode == 0:
+                    log("rules reloaded")
+                    return True
+                log(f"reload-rules failed: {res.stdout.strip()}")
+            time.sleep(10)
+        log("reload skipped; retrying next cycle")
+        return False
+
+    def main():
+        log(f"rules-updater started (interval={INTERVAL}s, source={TI_BASE})")
+        while True:
+            datasets_changed = fetch_datasets()
+            rules_updated = run_suricata_update()
+            if datasets_changed or rules_updated:
+                reload_rules()
+            time.sleep(INTERVAL)
+
+    if __name__ == "__main__":
+        sys.exit(main())

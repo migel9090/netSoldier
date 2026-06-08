@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suricata-local-rules
+data:
+  netsoldier.rules: |
+    alert dns $HOME_NET any -> any any (msg:"NETSOLDIER ThreatIntel DNS query to IoC domain"; dns.query; dataset:isset,ioc-domains,type string,load ioc-domains.lst; classtype:trojan-activity; threshold:type limit,track by_src,count 1,seconds 60; metadata:source threat-intel-sync; sid:9100001; rev:1;)
+    alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"NETSOLDIER ThreatIntel TLS SNI matches IoC domain"; tls.sni; dataset:isset,ioc-domains,type string,load ioc-domains.lst; classtype:trojan-activity; threshold:type limit,track by_src,count 1,seconds 60; metadata:source threat-intel-sync; sid:9100002; rev:1;)
+    alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"NETSOLDIER ThreatIntel HTTP Host matches IoC domain"; http.host; dataset:isset,ioc-domains,type string,load ioc-domains.lst; classtype:trojan-activity; threshold:type limit,track by_src,count 1,seconds 60; metadata:source threat-intel-sync; sid:9100003; rev:1;)
+    alert ip $HOME_NET any -> $EXTERNAL_NET any (msg:"NETSOLDIER ThreatIntel traffic to IoC IP"; ip.dst; dataset:isset,ioc-ips,type ip,load ioc-ips.lst; classtype:trojan-activity; threshold:type limit,track by_src,count 1,seconds 60; metadata:source threat-intel-sync; sid:9100004; rev:1;)
