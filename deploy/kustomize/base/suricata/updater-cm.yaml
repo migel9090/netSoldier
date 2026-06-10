@@ -26,8 +26,8 @@ data:
     INTERVAL = int(os.environ.get("UPDATE_INTERVAL_SECONDS", "21600"))
 
     DATASETS = {
-        "ioc-domains.lst": "/export/suricata/domains",
-        "ioc-ips.lst": "/export/suricata/ips",
+        "ioc-domains.json": "/export/suricata/domains.json",
+        "ioc-ips.json": "/export/suricata/ips.json",
     }
 
     def log(msg):

@@ -172,10 +172,13 @@ data:
         flow_pkts_toserver  UInt32 DEFAULT 0,
         flow_pkts_toclient  UInt32 DEFAULT 0,
         flow_bytes_toserver UInt64 DEFAULT 0,
-        flow_bytes_toclient UInt64 DEFAULT 0
+        flow_bytes_toclient UInt64 DEFAULT 0,
+        threat_intel String DEFAULT ''
     ) ENGINE = MergeTree()
     ORDER BY (timestamp, alert_signature_id, src_ip)
     TTL timestamp + INTERVAL 90 DAY;
+    ALTER TABLE netsoldier.suricata_alerts
+        ADD COLUMN IF NOT EXISTS threat_intel String DEFAULT '';
     CREATE TABLE IF NOT EXISTS netsoldier.suricata_dns (
         timestamp    DateTime,
         flow_id      UInt64,

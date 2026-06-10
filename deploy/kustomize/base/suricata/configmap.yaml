@@ -35,7 +35,10 @@ data:
             - alert:
                 tagged-packets: yes
                 metadata: yes
+            # v2 pinned: the Vector pipeline and ClickHouse schema expect
+            # per-answer records, not the v3 transaction format
             - dns:
+                version: 2
                 query: yes
                 answer: yes
             - tls:
@@ -86,7 +89,7 @@ data:
 
     datasets:
       defaults:
-        memcap: 32mb
+        memcap: 64mb
         hashsize: 65536
 
     detect:
@@ -155,6 +158,7 @@ data:
           .flow_pkts_toclient = to_int(.flow.pkts_toclient) ?? 0
           .flow_bytes_toserver = to_int(.flow.bytes_toserver) ?? 0
           .flow_bytes_toclient = to_int(.flow.bytes_toclient) ?? 0
+          .threat_intel = if exists(.alert.context.threat_intel) { encode_json(.alert.context.threat_intel) } else { "" }
 
       filter_dns:
         type: filter

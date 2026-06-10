@@ -21,13 +21,16 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: init-rules
-          image: oisf/suricata:7.0.8
+          image: jasonish/suricata:8.0.5
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -e
               mkdir -p /var/lib/suricata/data
-              touch /var/lib/suricata/data/ioc-domains.lst /var/lib/suricata/data/ioc-ips.lst
+              # ndjson datasets must never be empty or rules fail to load;
+              # sentinel values cannot occur in real traffic
+              [ -s /var/lib/suricata/data/ioc-domains.json ] || printf '{"domain":"sentinel.netsoldier.invalid","source":"netsoldier-seed","severity":"unknown","confidence":0}\n' > /var/lib/suricata/data/ioc-domains.json
+              [ -s /var/lib/suricata/data/ioc-ips.json ] || printf '{"ip":"192.0.2.254","source":"netsoldier-seed","severity":"unknown","confidence":0}\n' > /var/lib/suricata/data/ioc-ips.json
               suricata-update --no-test
           securityContext:
             runAsNonRoot: true
@@ -53,7 +56,7 @@ spec:
               memory: 128Mi
       containers:
         - name: suricata
-          image: oisf/suricata:7.0.8
+          image: jasonish/suricata:8.0.5
           command:
             - suricata
             - "-c"
@@ -97,7 +100,7 @@ spec:
             - name: tmp
               mountPath: /tmp
         - name: rules-updater
-          image: oisf/suricata:7.0.8
+          image: jasonish/suricata:8.0.5
           command: ["python3", "/etc/suricata/updater/update-rules.py"]
           env:
             - name: THREAT_INTEL_URL
