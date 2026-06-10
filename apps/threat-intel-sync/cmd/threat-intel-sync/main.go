@@ -41,6 +41,8 @@ func main() {
 	mux.HandleFunc("GET /export/adguard", export.HandleAdGuard(store))
 	mux.HandleFunc("GET /export/suricata/domains", export.HandleSuricataDataset(store, true, ioc.TypeDomain))
 	mux.HandleFunc("GET /export/suricata/ips", export.HandleSuricataDataset(store, false, ioc.TypeIP))
+	mux.HandleFunc("GET /export/suricata/domains.json", export.HandleSuricataJSONDataset(store, "domain", ioc.TypeDomain))
+	mux.HandleFunc("GET /export/suricata/ips.json", export.HandleSuricataJSONDataset(store, "ip", ioc.TypeIP))
 	mux.HandleFunc("GET /export/suricata/md5", export.HandleSuricataDataset(store, false, ioc.TypeMD5))
 	mux.HandleFunc("GET /export/suricata/sha256", export.HandleSuricataDataset(store, false, ioc.TypeSHA256))
 	mux.HandleFunc("GET /export/zeek/intel.dat", export.HandleZeekIntel(store))
