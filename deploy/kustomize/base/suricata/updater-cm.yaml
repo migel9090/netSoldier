@@ -3,6 +3,25 @@ kind: ConfigMap
 metadata:
   name: suricata-updater-script
 data:
+  disable.conf: |
+    # ET Open categories excluded to fit the 8 GB host budget:
+    # server-side web apps absent from a home LAN
+    group:emerging-web_specific_apps.rules
+    # legacy ActiveX/IE exploits
+    group:emerging-activex.rules
+    # protocols unused on this network
+    group:emerging-chat.rules
+    group:emerging-games.rules
+    group:emerging-imap.rules
+    group:emerging-pop3.rules
+    group:emerging-voip.rules
+    group:emerging-scada.rules
+    # informational noise / research-grade signatures
+    group:emerging-icmp_info.rules
+    group:emerging-info.rules
+    group:emerging-hunting.rules
+    # signatures removed from mainline
+    group:emerging-deleted.rules
   update-rules.py: |
     #!/usr/bin/env python3
     """Periodic Suricata rule updater.
@@ -59,7 +78,8 @@ data:
 
     def run_suricata_update():
         res = subprocess.run(
-            ["suricata-update", "--no-test"],
+            ["suricata-update", "--no-test", "--no-reload",
+             "--disable-conf", "/etc/suricata/updater/disable.conf"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         if res.returncode != 0:
             log(f"suricata-update failed (rc={res.returncode}):\n"

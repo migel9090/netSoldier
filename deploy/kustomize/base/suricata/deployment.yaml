@@ -31,7 +31,7 @@ spec:
               # sentinel values cannot occur in real traffic
               [ -s /var/lib/suricata/data/ioc-domains.json ] || printf '{"domain":"sentinel.netsoldier.invalid","source":"netsoldier-seed","severity":"unknown","confidence":0}\n' > /var/lib/suricata/data/ioc-domains.json
               [ -s /var/lib/suricata/data/ioc-ips.json ] || printf '{"ip":"192.0.2.254","source":"netsoldier-seed","severity":"unknown","confidence":0}\n' > /var/lib/suricata/data/ioc-ips.json
-              suricata-update --no-test
+              suricata-update --no-test --no-reload --disable-conf /etc/suricata/updater/disable.conf
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
@@ -41,6 +41,9 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+            - name: updater-script
+              mountPath: /etc/suricata/updater
+              readOnly: true
             - name: rules
               mountPath: /var/lib/suricata
             - name: run
@@ -77,10 +80,10 @@ spec:
                 - ALL
           resources:
             limits:
-              cpu: "1"
+              cpu: "2"
               memory: 1Gi
             requests:
-              cpu: 250m
+              cpu: 500m
               memory: 512Mi
           volumeMounts:
             - name: config
