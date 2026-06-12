@@ -15,6 +15,11 @@
 | `suricata_alerts` | 90 days | MergeTree | Suricata IDS alerts (EVE) |
 | `suricata_dns` | 30 days | MergeTree | Suricata DNS events |
 | `suricata_tls` | 30 days | MergeTree | Suricata TLS handshakes (JA3) |
+| `zeek_conn` | 30 days | MergeTree | Zeek connection log |
+| `zeek_dns` | 30 days | MergeTree | Zeek DNS log |
+| `zeek_ssl` | 30 days | MergeTree | Zeek TLS/SSL log |
+| `zeek_x509` | 30 days | MergeTree | Zeek certificate log |
+| `zeek_http` | 30 days | MergeTree | Zeek HTTP log |
 
 ClickHouse enforces TTL automatically during merges. No manual cleanup is
 needed under normal operation.

@@ -24,7 +24,7 @@ data:
     MONTH=$(date -d yesterday +%m)
     DAY=$(date -d yesterday +%d)
 
-    TABLES="network_flows dns_queries connections device_events suricata_alerts suricata_dns suricata_tls"
+    TABLES="network_flows dns_queries connections device_events suricata_alerts suricata_dns suricata_tls zeek_conn zeek_dns zeek_ssl zeek_x509 zeek_http"
 
     for TABLE in $TABLES; do
       DEST="${S3_ENDPOINT}/${S3_BUCKET}/cold/${TABLE}/year=${YEAR}/month=${MONTH}/day=${DAY}/${TABLE}.parquet"

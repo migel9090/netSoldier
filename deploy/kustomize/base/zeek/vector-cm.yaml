@@ -1,0 +1,205 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zeek-vector-config
+data:
+  vector.yaml: |
+    sources:
+      conn_log:
+        type: file
+        include:
+          - /var/log/zeek/conn.log
+        read_from: beginning
+        fingerprint:
+          strategy: device_and_inode
+
+      dns_log:
+        type: file
+        include:
+          - /var/log/zeek/dns.log
+        read_from: beginning
+        fingerprint:
+          strategy: device_and_inode
+
+      ssl_log:
+        type: file
+        include:
+          - /var/log/zeek/ssl.log
+        read_from: beginning
+        fingerprint:
+          strategy: device_and_inode
+
+      x509_log:
+        type: file
+        include:
+          - /var/log/zeek/x509.log
+        read_from: beginning
+        fingerprint:
+          strategy: device_and_inode
+
+      http_log:
+        type: file
+        include:
+          - /var/log/zeek/http.log
+        read_from: beginning
+        fingerprint:
+          strategy: device_and_inode
+
+    transforms:
+      shape_conn:
+        type: remap
+        inputs:
+          - conn_log
+        source: |
+          . = parse_json!(.message)
+          .timestamp = to_int(floor(to_float(.ts) ?? 0.0))
+          .uid = to_string(.uid) ?? ""
+          .src_ip = to_string(."id.orig_h") ?? ""
+          .src_port = to_int(."id.orig_p") ?? 0
+          .dst_ip = to_string(."id.resp_h") ?? ""
+          .dst_port = to_int(."id.resp_p") ?? 0
+          .proto = to_string(.proto) ?? ""
+          .service = to_string(.service) ?? ""
+          .duration_ms = to_int(floor((to_float(.duration) ?? 0.0) * 1000.0))
+          .orig_bytes = to_int(.orig_bytes) ?? 0
+          .resp_bytes = to_int(.resp_bytes) ?? 0
+          .conn_state = to_string(.conn_state) ?? ""
+          .local_orig = if (to_bool(.local_orig) ?? false) { 1 } else { 0 }
+          .local_resp = if (to_bool(.local_resp) ?? false) { 1 } else { 0 }
+          .history = to_string(.history) ?? ""
+          .orig_pkts = to_int(.orig_pkts) ?? 0
+          .resp_pkts = to_int(.resp_pkts) ?? 0
+
+      shape_dns:
+        type: remap
+        inputs:
+          - dns_log
+        source: |
+          . = parse_json!(.message)
+          .timestamp = to_int(floor(to_float(.ts) ?? 0.0))
+          .uid = to_string(.uid) ?? ""
+          .src_ip = to_string(."id.orig_h") ?? ""
+          .src_port = to_int(."id.orig_p") ?? 0
+          .dst_ip = to_string(."id.resp_h") ?? ""
+          .dst_port = to_int(."id.resp_p") ?? 0
+          .proto = to_string(.proto) ?? ""
+          .query = to_string(.query) ?? ""
+          .qtype_name = to_string(.qtype_name) ?? ""
+          .rcode_name = to_string(.rcode_name) ?? ""
+          .answers = array(.answers) ?? []
+          .rejected = if (to_bool(.rejected) ?? false) { 1 } else { 0 }
+
+      shape_ssl:
+        type: remap
+        inputs:
+          - ssl_log
+        source: |
+          . = parse_json!(.message)
+          .timestamp = to_int(floor(to_float(.ts) ?? 0.0))
+          .uid = to_string(.uid) ?? ""
+          .src_ip = to_string(."id.orig_h") ?? ""
+          .src_port = to_int(."id.orig_p") ?? 0
+          .dst_ip = to_string(."id.resp_h") ?? ""
+          .dst_port = to_int(."id.resp_p") ?? 0
+          .version = to_string(.version) ?? ""
+          .cipher = to_string(.cipher) ?? ""
+          .curve = to_string(.curve) ?? ""
+          .server_name = to_string(.server_name) ?? ""
+          .resumed = if (to_bool(.resumed) ?? false) { 1 } else { 0 }
+          .established = if (to_bool(.established) ?? false) { 1 } else { 0 }
+          .subject = to_string(.subject) ?? ""
+          .issuer = to_string(.issuer) ?? ""
+
+      shape_x509:
+        type: remap
+        inputs:
+          - x509_log
+        source: |
+          . = parse_json!(.message)
+          .timestamp = to_int(floor(to_float(.ts) ?? 0.0))
+          .fingerprint = to_string(.fingerprint) ?? ""
+          .serial = to_string(."certificate.serial") ?? ""
+          .subject = to_string(."certificate.subject") ?? ""
+          .issuer = to_string(."certificate.issuer") ?? ""
+          .not_valid_before = to_int(floor(to_float(."certificate.not_valid_before") ?? 0.0))
+          .not_valid_after = to_int(floor(to_float(."certificate.not_valid_after") ?? 0.0))
+          .key_alg = to_string(."certificate.key_alg") ?? ""
+          .key_length = to_int(."certificate.key_length") ?? 0
+          .san_dns = array(."san.dns") ?? []
+
+      shape_http:
+        type: remap
+        inputs:
+          - http_log
+        source: |
+          . = parse_json!(.message)
+          .timestamp = to_int(floor(to_float(.ts) ?? 0.0))
+          .uid = to_string(.uid) ?? ""
+          .src_ip = to_string(."id.orig_h") ?? ""
+          .src_port = to_int(."id.orig_p") ?? 0
+          .dst_ip = to_string(."id.resp_h") ?? ""
+          .dst_port = to_int(."id.resp_p") ?? 0
+          .method = to_string(.method) ?? ""
+          .host = to_string(.host) ?? ""
+          .uri = to_string(.uri) ?? ""
+          .referrer = to_string(.referrer) ?? ""
+          .user_agent = to_string(.user_agent) ?? ""
+          .status_code = to_int(.status_code) ?? 0
+          .request_body_len = to_int(.request_body_len) ?? 0
+          .response_body_len = to_int(.response_body_len) ?? 0
+
+    sinks:
+      clickhouse_conn:
+        type: clickhouse
+        inputs:
+          - shape_conn
+        endpoint: http://clickhouse.netsoldier.svc:8123
+        database: netsoldier
+        table: zeek_conn
+        skip_unknown_fields: true
+        encoding:
+          timestamp_format: unix
+
+      clickhouse_dns:
+        type: clickhouse
+        inputs:
+          - shape_dns
+        endpoint: http://clickhouse.netsoldier.svc:8123
+        database: netsoldier
+        table: zeek_dns
+        skip_unknown_fields: true
+        encoding:
+          timestamp_format: unix
+
+      clickhouse_ssl:
+        type: clickhouse
+        inputs:
+          - shape_ssl
+        endpoint: http://clickhouse.netsoldier.svc:8123
+        database: netsoldier
+        table: zeek_ssl
+        skip_unknown_fields: true
+        encoding:
+          timestamp_format: unix
+
+      clickhouse_x509:
+        type: clickhouse
+        inputs:
+          - shape_x509
+        endpoint: http://clickhouse.netsoldier.svc:8123
+        database: netsoldier
+        table: zeek_x509
+        skip_unknown_fields: true
+        encoding:
+          timestamp_format: unix
+
+      clickhouse_http:
+        type: clickhouse
+        inputs:
+          - shape_http
+        endpoint: http://clickhouse.netsoldier.svc:8123
+        database: netsoldier
+        table: zeek_http
+        skip_unknown_fields: true
+        encoding:
+          timestamp_format: unix
