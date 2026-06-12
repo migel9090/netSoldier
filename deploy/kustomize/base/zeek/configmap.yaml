@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zeek-config
+data:
+  netsoldier.zeek: |
+    # netSoldier site policy: JSON logs for the Vector -> ClickHouse
+    # pipeline, bounded disk via rotation + delete.
+    redef LogAscii::use_json = T;
+
+    # mirrored SPAN traffic carries bad checksums from TX offloading
+    redef ignore_checksums = T;
+
+    redef Site::local_nets = { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 };
+
+    redef Log::default_rotation_interval = 30 min;
+    redef Log::default_rotation_postprocessor_cmd = "/etc/zeek-site/delete-rotated.sh";
+  delete-rotated.sh: |
+    #!/bin/sh
+    # Rotation postprocessor: Vector has already shipped the contents,
+    # rotated files only need removal.
+    rm -f -- "$1"

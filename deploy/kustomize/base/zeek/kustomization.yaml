@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: netsoldier
+
+commonLabels:
+  app.kubernetes.io/name: zeek
+  app.kubernetes.io/part-of: netsoldier
+
+resources:
+  - serviceaccount.yaml
+  - configmap.yaml
+  - vector-cm.yaml
+  - deployment.yaml
+  - pdb.yaml

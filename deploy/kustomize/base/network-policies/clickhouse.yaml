@@ -28,6 +28,13 @@ spec:
     - from:
         - podSelector:
             matchLabels:
+              app.kubernetes.io/name: zeek
+      ports:
+        - port: 8123
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
               app.kubernetes.io/name: clickhouse
               app.kubernetes.io/component: cold-export
       ports:

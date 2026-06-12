@@ -51,14 +51,18 @@ Total available: 8 GB. Full stack including ClickHouse and MISP.
 | MISP | — | — | ~512 Mi | ~1024 Mi |
 | AdGuard Home | — | — | ~80 Mi | ~150 Mi |
 | Suricata (incl. Vector + updater) | 600m | 2400m | 768 Mi | 1536 Mi |
-| **Total** | **~1575m** | **~5400m** | **~2.25 Gi** | **~6.6 Gi** |
+| Zeek (incl. Vector) | 300m | 1200m | 512 Mi | 1280 Mi |
+| **Total** | **~1875m** | **~6600m** | **~2.75 Gi** | **~7.9 Gi** |
 
-Headroom: ~1.4 GB for OS, Kubernetes control plane, and ClickHouse data
-caches. Suricata is capped by explicit memcaps (flow 64mb, stream
+Requests (~2.75 Gi) leave comfortable scheduling headroom; the limit
+sum (~7.9 Gi) overcommits against 8 GB, which is acceptable because
+the DPI peaks (Suricata, Zeek, ClickHouse merges) do not coincide in
+practice. Suricata is capped by explicit memcaps (flow 64mb, stream
 64mb + reassembly 128mb with 1mb depth, defrag/host 16mb, datasets
 64mb, http 64mb) and a trimmed ET Open ruleset (see
 `suricata-updater-script` disable.conf), so its 1 Gi limit holds in
-practice well below the configured ceiling.
+practice well below the configured ceiling. Revisit at the cost/perf
+tuning step if residency climbs.
 
 ---
 

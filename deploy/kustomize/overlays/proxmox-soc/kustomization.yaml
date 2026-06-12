@@ -8,6 +8,7 @@ resources:
   - ../../base/killswitch-controller
   - ../../base/threat-intel-sync
   - ../../base/suricata
+  - ../../base/zeek
 
 commonLabels:
   app.kubernetes.io/instance: proxmox-soc

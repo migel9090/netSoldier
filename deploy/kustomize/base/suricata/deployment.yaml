@@ -136,7 +136,7 @@ spec:
             - name: tmp
               mountPath: /tmp
         - name: vector
-          image: timberio/vector:0.43.1-distroless
+          image: timberio/vector:0.43.1-distroless-libc
           args:
             - "--config-yaml"
             - /etc/vector/vector.yaml
