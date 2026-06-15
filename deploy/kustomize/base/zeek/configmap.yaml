@@ -6,6 +6,12 @@ data:
   netsoldier.zeek: |
     # netSoldier site policy: JSON logs for the Vector -> ClickHouse
     # pipeline, bounded disk via rotation + delete.
+
+    # Passive TLS/HTTP fingerprinting (salesforce/ja3 + FoxIO-LLC/ja4),
+    # baked into the image via zkg. Adds ja3/ja3s/ja4/ja4s to ssl.log
+    # and ja4h to http.log. See /NOTICE for JA4+ (FoxIO License 1.1).
+    @load packages
+
     redef LogAscii::use_json = T;
 
     # mirrored SPAN traffic carries bad checksums from TX offloading

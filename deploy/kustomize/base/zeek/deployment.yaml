@@ -25,7 +25,7 @@ spec:
         # copy the binary and write the security.capability xattr
         # (equivalent of: setcap cap_net_raw,cap_net_admin+ep)
         - name: init-caps
-          image: zeek/zeek:8.0.8
+          image: ghcr.io/migel9090/zeek:main
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -60,7 +60,7 @@ spec:
               memory: 64Mi
       containers:
         - name: zeek
-          image: zeek/zeek:8.0.8
+          image: ghcr.io/migel9090/zeek:main
           command:
             - /opt/zeek-cap/zeek
             - "-i"

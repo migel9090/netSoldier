@@ -23,3 +23,4 @@ anything overriding a previous ADR or a core architecture decision (ADR-0001).
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-architektura.md) | Core architecture of netSoldier (interview decisions) | Accepted |
+| [0002](0002-tls-fingerprinting.md) | Passive TLS/HTTP fingerprinting with JA3 + JA4+ | Accepted |
