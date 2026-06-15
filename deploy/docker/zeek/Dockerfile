@@ -22,7 +22,7 @@ USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/* \
-    && zkg autoconfig \
+    && zkg autoconfig --force \
     && zkg install --force --skiptests \
          https://github.com/salesforce/ja3 \
          --version 502cc6395811c54743b0561419d61900a6df3ff7 \
