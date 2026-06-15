@@ -266,10 +266,18 @@ data:
         resumed     UInt8,
         established UInt8,
         subject     String,
-        issuer      String
+        issuer      String,
+        ja3         String DEFAULT '',
+        ja3s        String DEFAULT '',
+        ja4         String DEFAULT '',
+        ja4s        String DEFAULT ''
     ) ENGINE = MergeTree()
     ORDER BY (timestamp, src_ip, server_name)
     TTL timestamp + INTERVAL 30 DAY;
+    ALTER TABLE netsoldier.zeek_ssl ADD COLUMN IF NOT EXISTS ja3 String DEFAULT '';
+    ALTER TABLE netsoldier.zeek_ssl ADD COLUMN IF NOT EXISTS ja3s String DEFAULT '';
+    ALTER TABLE netsoldier.zeek_ssl ADD COLUMN IF NOT EXISTS ja4 String DEFAULT '';
+    ALTER TABLE netsoldier.zeek_ssl ADD COLUMN IF NOT EXISTS ja4s String DEFAULT '';
     CREATE TABLE IF NOT EXISTS netsoldier.zeek_x509 (
         timestamp        DateTime,
         fingerprint      String,
@@ -298,7 +306,9 @@ data:
         user_agent        String,
         status_code       UInt16,
         request_body_len  UInt64,
-        response_body_len UInt64
+        response_body_len UInt64,
+        ja4h              String DEFAULT ''
     ) ENGINE = MergeTree()
     ORDER BY (timestamp, src_ip, host)
     TTL timestamp + INTERVAL 30 DAY;
+    ALTER TABLE netsoldier.zeek_http ADD COLUMN IF NOT EXISTS ja4h String DEFAULT '';
