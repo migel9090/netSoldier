@@ -15,12 +15,15 @@ salesforce/ja3  — https://github.com/salesforce/ja3
     Produces JA3 / JA3S fingerprints on ssl.log and JA3 Intel entries.
     License: BSD 3-Clause. Copyright (c) Salesforce.com, Inc.
 
-netsoldier-ja4.zeek — first-party (deploy/docker/zeek/scripts/)
-    Produces JA4 TLS client fingerprints on ssl.log. A clean-room
-    implementation written from the published JA4 specification, which
-    FoxIO, LLC releases under BSD 3-Clause; it contains no FoxIO code.
-    "JA4" is a trademark of FoxIO, LLC — the name is used solely to
-    identify the fingerprint format. The FoxIO-licensed, patent-pending
+netsoldier-tlsfp.zeek — first-party (deploy/docker/zeek/scripts/)
+    Produces TLS client fingerprints on ssl.log in the `tls_client_fp`
+    field. A clean-room implementation written from the published JA4
+    TLS-client fingerprint specification, which FoxIO, LLC releases under
+    BSD 3-Clause; it contains no FoxIO code. "JA4" is a trademark of
+    FoxIO, LLC — netSoldier does NOT use that name for its field, type or
+    branding, and references it only nominatively to state that the
+    output is JA4-format compatible (for interoperability with
+    JA4-labeled threat-intel feeds). The FoxIO-licensed, patent-pending
     JA4+ methods (JA4S, JA4H, JA4X, JA4L, JA4SSH, JA4T, ...) are NOT
     implemented, so no FoxIO License 1.1 obligations — including its
     restriction on monetization — apply to netSoldier.

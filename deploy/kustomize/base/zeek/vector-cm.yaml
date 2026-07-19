@@ -117,10 +117,11 @@ data:
           .established = if (to_bool(.established) ?? false) { 1 } else { 0 }
           .subject = to_string(.subject) ?? ""
           .issuer = to_string(.issuer) ?? ""
-          # JA3/JA3S (salesforce/ja3) and the first-party JA4 on ssl.log
+          # JA3/JA3S (salesforce/ja3) and the first-party TLS client
+          # fingerprint (JA4-format) on ssl.log
           .ja3 = to_string(.ja3) ?? ""
           .ja3s = to_string(.ja3s) ?? ""
-          .ja4 = to_string(.ja4) ?? ""
+          .tls_client_fp = to_string(.tls_client_fp) ?? ""
 
       shape_x509:
         type: remap

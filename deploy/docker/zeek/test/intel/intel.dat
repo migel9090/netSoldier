@@ -1,4 +1,4 @@
 #fields	indicator	indicator_type	meta.source	meta.desc	meta.url
 test.local	Intel::DOMAIN	golden	sni-hit	-
-t13d3012h2_1d37bd780c83_882d495ac381	Intel::JA4	golden	ja4-hit	-
+t13d3012h2_1d37bd780c83_882d495ac381	Intel::TLSFP	golden	ja4-hit	-
 127.0.0.1	Intel::ADDR	golden	addr-hit	-

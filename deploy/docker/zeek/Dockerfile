@@ -1,12 +1,14 @@
 # netSoldier Zeek sensor: upstream Zeek 8 + passive TLS fingerprinting.
 #
 # Fingerprinting (pure Zeek script, no compiled plugin):
-#   salesforce/ja3 (zkg)        -> ja3, ja3s on ssl.log; JA3 in the Intel
-#                                  framework (BSD-3-Clause)
-#   scripts/netsoldier-ja4.zeek -> ja4 on ssl.log; first-party clean-room
-#                                  implementation of the BSD-licensed JA4 spec
+#   salesforce/ja3 (zkg)          -> ja3, ja3s on ssl.log; JA3 in the Intel
+#                                    framework (BSD-3-Clause)
+#   scripts/netsoldier-tlsfp.zeek -> tls_client_fp on ssl.log; first-party
+#                                    clean-room impl of the BSD-licensed JA4
+#                                    TLS-client fingerprint format ("JA4" is a
+#                                    FoxIO trademark, referenced nominatively)
 #
-# No FoxIO code is included: the JA4+ methods beyond JA4 itself (JA4S, JA4H,
+# No FoxIO code is included: the FoxIO-licensed JA4+ methods (JA4S, JA4H,
 # JA4X, ...) are FoxIO License 1.1 / patent-pending — not monetizable without
 # an OEM license — and are deliberately not implemented. See /NOTICE and
 # docs/adr/0003-first-party-ja4.md. Golden test: test/run.sh.

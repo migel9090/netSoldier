@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synthesize a pcap with hand-crafted TLS ClientHellos exercising JA4 edge
+"""Synthesize a pcap with hand-crafted TLS ClientHellos exercising TLS client fingerprint (JA4-format) edge
 cases OpenSSL clients never produce: GREASE ciphers/extensions/versions and a
 GREASE (non-alphanumeric) first ALPN value.
 

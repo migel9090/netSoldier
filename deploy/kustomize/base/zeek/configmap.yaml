@@ -8,10 +8,11 @@ data:
     # pipeline, bounded disk via rotation + delete.
 
     # Passive TLS fingerprinting: salesforce/ja3 via zkg (@load packages)
-    # plus the first-party JA4 implementation baked into the image site
-    # dir. Adds ja3/ja3s/ja4 to ssl.log. See /NOTICE and ADR-0003.
+    # plus the first-party TLS client fingerprint (JA4-format) baked into
+    # the image site dir. Adds ja3/ja3s/tls_client_fp to ssl.log.
+    # See /NOTICE and ADR-0003.
     @load packages
-    @load netsoldier-ja4
+    @load netsoldier-tlsfp
 
     # Threat-intel matching (Intel framework, step 107): the intel-sync
     # sidecar refreshes /var/intel/intel.dat from threat-intel-sync's

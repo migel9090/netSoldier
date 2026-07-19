@@ -287,15 +287,15 @@ data:
         established UInt8,
         subject     String,
         issuer      String,
-        ja3         String DEFAULT '',
-        ja3s        String DEFAULT '',
-        ja4         String DEFAULT ''
+        ja3           String DEFAULT '',
+        ja3s          String DEFAULT '',
+        tls_client_fp String DEFAULT ''
     ) ENGINE = MergeTree()
     ORDER BY (timestamp, src_ip, server_name)
     TTL timestamp + INTERVAL 30 DAY;
     ALTER TABLE netsoldier.zeek_ssl ADD COLUMN IF NOT EXISTS ja3 String DEFAULT '';
     ALTER TABLE netsoldier.zeek_ssl ADD COLUMN IF NOT EXISTS ja3s String DEFAULT '';
-    ALTER TABLE netsoldier.zeek_ssl ADD COLUMN IF NOT EXISTS ja4 String DEFAULT '';
+    ALTER TABLE netsoldier.zeek_ssl ADD COLUMN IF NOT EXISTS tls_client_fp String DEFAULT '';
     CREATE TABLE IF NOT EXISTS netsoldier.zeek_x509 (
         timestamp        DateTime,
         fingerprint      String,
@@ -368,3 +368,11 @@ data:
     ) ENGINE = ReplacingMergeTree(timestamp)
     ORDER BY (src_ip, dst_ip)
     TTL timestamp + INTERVAL 30 DAY;
+  015_rename_ja4_column.sql: |
+    -- ADR-0003: our produced TLS client fingerprint is renamed off the FoxIO
+    -- trademark "JA4" to the neutral, descriptive tls_client_fp. The values
+    -- stay JA4-format-compatible. Rename the column for existing databases
+    -- (the fresh CREATE above already uses the new name; guard so re-runs and
+    -- fresh installs are both no-ops).
+    ALTER TABLE netsoldier.zeek_ssl
+        RENAME COLUMN IF EXISTS ja4 TO tls_client_fp;

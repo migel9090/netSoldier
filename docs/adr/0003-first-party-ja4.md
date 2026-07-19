@@ -20,21 +20,35 @@ applications cover the methods, not just the code.
 ## Decision
 
 - Replace the `FoxIO-LLC/ja4` package with a **first-party, clean-room
-  implementation of JA4 (TLS client)** — `deploy/docker/zeek/scripts/
-  netsoldier-ja4.zeek` — written from the published specification, which is
-  BSD-3-Clause. The spec being BSD is also why Wireshark and Suricata ship
-  JA4 (and only JA4) natively. The script contains no FoxIO code.
+  implementation of the JA4 TLS-client fingerprint** —
+  `deploy/docker/zeek/scripts/netsoldier-tlsfp.zeek` — written from the
+  published specification, which is BSD-3-Clause. The spec being BSD is also
+  why Wireshark and Suricata ship JA4 (and only JA4) natively. The script
+  contains no FoxIO code.
+- **Do not use the "JA4" name for our field, type or branding.** "JA4" is a
+  (common-law) trademark of FoxIO, LLC. Nominative use ("computes
+  JA4-compatible fingerprints") is legally defensible and common (Cloudflare
+  does it commercially), but to keep the commercial option unencumbered and
+  unambiguous the produced artifact is named neutrally and descriptively:
+  - Zeek `ssl.log` field and `zeek_ssl` column: **`tls_client_fp`**
+  - normalized IoC type (Go, detection-engine / threat-intel-sync):
+    **`tlsfp`** (constant `ioc.TypeTLSFP`)
+  - Zeek Intel framework type: **`Intel::TLSFP`**
+  The *values* stay byte-identical to the JA4 spec so they interoperate with
+  JA4-labeled threat-intel feeds; a feed IoC labeled `ja4` maps to `tlsfp` at
+  ingestion. Docs reference "JA4" only nominatively, with the trademark noted.
 - **Drop JA4S and JA4H** (and the incidental JA4L/JA4SSH/JA4T/JA4D
   streams). JA3S (BSD, salesforce/ja3) remains the server-side fingerprint;
   `zeek_ssl.ja4s` and `zeek_http.ja4h` are dropped by ClickHouse migration
-  `012_drop_foxio_fingerprints.sql`.
+  `012_drop_foxio_fingerprints.sql`; the `ja4` column is renamed to
+  `tls_client_fp` by migration `015_rename_ja4_column.sql`.
 - Keep `salesforce/ja3` (BSD-3-Clause) unchanged.
 - Guard correctness with a **golden test** (`deploy/docker/zeek/test/`):
   9 ClientHellos — 6 captured live (TLS 1.2/1.3, with/without SNI/ALPN) and
   3 synthesized (GREASE ciphers/extensions/versions, GREASE first-ALPN hex
-  rule) — must produce JA4 values byte-identical to Wireshark's independent
-  implementation (`tshark -e tls.handshake.ja4`). The test runs in CI
-  against the freshly built image before it is signed.
+  rule) — must produce fingerprint values byte-identical to Wireshark's
+  independent JA4 implementation (`tshark -e tls.handshake.ja4`). The test
+  runs in CI against the freshly built image before it is signed.
 
 ## Alternatives considered
 
@@ -68,7 +82,7 @@ applications cover the methods, not just the code.
 ## Links
 
 - ADR-0002 (superseded FoxIO decision), roadmap step 106.
-- `deploy/docker/zeek/scripts/netsoldier-ja4.zeek`,
+- `deploy/docker/zeek/scripts/netsoldier-tlsfp.zeek`,
   `deploy/docker/zeek/test/`, `/NOTICE`,
   ClickHouse migration `012_drop_foxio_fingerprints.sql`.
 - JA4 spec (BSD-3-Clause): https://github.com/FoxIO-LLC/ja4 — independent

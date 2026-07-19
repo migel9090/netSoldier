@@ -1,6 +1,6 @@
 #!/bin/sh
-# Golden test for the first-party JA4 implementation baked into the zeek
-# image. Replays the test pcaps through `zeek -r ... netsoldier-ja4` (the
+# Golden test for the first-party TLS client fingerprint (JA4-format) baked into the zeek
+# image. Replays the test pcaps through `zeek -r ... netsoldier-tlsfp` (the
 # same ZEEKPATH resolution the site policy uses) and diffs the ssl.log JA4
 # values against expected.tsv.
 #
@@ -27,11 +27,11 @@ got=$(docker run --rm $CAPS -v "$DIR:/t:ro" --entrypoint sh "$IMAGE" -c '
     for p in handshakes synthetic; do
         mkdir "$p"
         cd "$p"
-        zeek -C -r "/t/pcaps/$p.pcap" netsoldier-ja4 LogAscii::use_json=T
+        zeek -C -r "/t/pcaps/$p.pcap" netsoldier-tlsfp LogAscii::use_json=T
         cat ssl.log
         cd /tmp
     done' \
-    | sed -n 's/.*"id.orig_p":\([0-9]*\).*"ja4":"\([^"]*\)".*/\1\t\2/p' \
+    | sed -n 's/.*"id.orig_p":\([0-9]*\).*"tls_client_fp":"\([^"]*\)".*/\1\t\2/p' \
     | sort -n)
 
 expected=$(sort -n "$DIR/expected.tsv")
@@ -48,14 +48,14 @@ fi
 echo "JA4 golden test passed ($(echo "$got" | wc -l) fingerprints)"
 
 # Phase 2: Intel framework — the intel/intel.dat fixture must produce hits
-# for the first-party Intel::JA4 type plus the stock DOMAIN/ADDR seen paths.
+# for the first-party Intel::TLSFP type plus the stock DOMAIN/ADDR seen paths.
 intel_out=$(docker run --rm $CAPS -v "$DIR:/t:ro" --entrypoint sh "$IMAGE" -c '
     set -eu
     cd /tmp
     zeek -C -r /t/pcaps/handshakes.pcap /t/intel/site.zeek >/dev/null
     cat intel.log')
 
-for want in Intel::JA4 Intel::DOMAIN Intel::ADDR; do
+for want in Intel::TLSFP Intel::DOMAIN Intel::ADDR; do
     if ! printf '%s' "$intel_out" | grep -q "\"seen.indicator_type\":\"$want\""; then
         echo "Intel golden test FAILED: no $want hit in intel.log" >&2
         printf '%s\n' "$intel_out" >&2
