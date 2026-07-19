@@ -84,6 +84,24 @@ export async function revertAction(id: string, reason: string): Promise<Enforcem
 	return res.json();
 }
 
+export interface FeedbackVerdict {
+	alert_id?: string;
+	matched_ioc: string;
+	client_ip?: string;
+	verdict: 'false_positive' | 'confirmed';
+	reason?: string;
+	analyst?: string;
+}
+
+export async function submitFeedback(v: FeedbackVerdict): Promise<void> {
+	const res = await fetch('/api/feedback', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ analyst: 'web-ui', ...v })
+	});
+	if (!res.ok) throw new Error(`Feedback failed: ${res.status}`);
+}
+
 export function formatTime(iso: string): string {
 	if (!iso) return '—';
 	try {

@@ -49,6 +49,14 @@ type DetectionEvent struct {
 	// Context.
 	QueryType string   `json:"query_type,omitempty"` // DNS query type: "A", "AAAA", etc.
 	Tags      []string `json:"tags,omitempty"`
+
+	// Composite-confidence context (step 116). Additive optional fields:
+	// when a detection is the product of several corroborating signals
+	// (signature + beaconing + volumetric + TLS + IoC), Signals lists the
+	// contributing signal classes and SignalCount their number. Confidence
+	// above already carries the combined (noisy-OR) value.
+	Signals     []string `json:"signals,omitempty"`
+	SignalCount int      `json:"signal_count,omitempty"`
 }
 
 // IsSevereEnoughForAuto returns true if the event meets the threshold

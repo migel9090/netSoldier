@@ -8,8 +8,8 @@ export const handle: Handle = async ({ event, resolve }) => {
 		return proxyDeviceInventory(pathname);
 	}
 
-	if (pathname === '/api/alerts') {
-		return proxyDetectionEngine(pathname);
+	if (pathname === '/api/alerts' || pathname === '/api/feedback') {
+		return proxyDetectionEngine(pathname, event.request);
 	}
 
 	if (pathname.startsWith('/api/killswitch/')) {
@@ -25,15 +25,41 @@ async function proxyDeviceInventory(pathname: string): Promise<Response> {
 	return proxyGET(`${baseURL}${backendPath}`, 'device-inventory');
 }
 
-async function proxyDetectionEngine(pathname: string): Promise<Response> {
+async function proxyDetectionEngine(pathname: string, request?: Request): Promise<Response> {
 	const baseURL = env.DETECTION_ENGINE_URL || 'http://detection-engine:8080';
 	const backendPath = pathname.replace('/api/', '/');
-	return proxyGET(`${baseURL}${backendPath}`, 'detection-engine');
+	const target = `${baseURL}${backendPath}`;
+	// POST /api/feedback (step 118) needs to forward the body; everything
+	// else is a read.
+	if (request && request.method !== 'GET') {
+		return proxyForward(target, request, 'detection-engine');
+	}
+	return proxyGET(target, 'detection-engine');
 }
 
 async function proxyGET(target: string, service: string): Promise<Response> {
 	try {
 		const res = await fetch(target);
+		return new Response(res.body as ReadableStream, {
+			status: res.status,
+			headers: { 'Content-Type': res.headers.get('Content-Type') || 'application/json' }
+		});
+	} catch {
+		return new Response(JSON.stringify({ error: `${service} unavailable` }), {
+			status: 502,
+			headers: { 'Content-Type': 'application/json' }
+		});
+	}
+}
+
+async function proxyForward(target: string, request: Request, service: string): Promise<Response> {
+	try {
+		const body = await request.text();
+		const res = await fetch(target, {
+			method: request.method,
+			headers: { 'Content-Type': 'application/json' },
+			body
+		});
 		return new Response(res.body as ReadableStream, {
 			status: res.status,
 			headers: { 'Content-Type': res.headers.get('Content-Type') || 'application/json' }

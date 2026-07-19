@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { fetchAlerts, formatTime } from '$lib/api';
+	import { fetchAlerts, formatTime, submitFeedback } from '$lib/api';
 	import type { Alert } from '$lib/types';
 
 	const SEVERITIES = ['critical', 'high', 'medium', 'low'] as const;
@@ -66,6 +66,31 @@
 	let hasActiveFilters: boolean = $derived(
 		sevFilter.size < SEVERITIES.length || deviceFilter.trim() !== '' || sourceFilter !== '' || timeFilter !== 'all'
 	);
+
+	// Step 118: FP feedback. Track which (ioc|client) pairs the analyst has
+	// marked so the row reflects it immediately without a reload.
+	let marked: Set<string> = $state(new Set());
+
+	function fpKey(a: Alert): string {
+		return `${a.matched_ioc}|${a.client_ip}`;
+	}
+
+	async function markFalsePositive(a: Alert) {
+		const key = fpKey(a);
+		try {
+			await submitFeedback({
+				alert_id: a.id,
+				matched_ioc: a.matched_ioc,
+				client_ip: a.client_ip,
+				verdict: 'false_positive'
+			});
+			const next = new Set(marked);
+			next.add(key);
+			marked = next;
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Failed to submit feedback';
+		}
+	}
 
 	async function load() {
 		try {
@@ -163,6 +188,7 @@
 				<th>Threat</th>
 				<th>MITRE</th>
 				<th>Source</th>
+				<th></th>
 			</tr>
 		</thead>
 		<tbody>
@@ -185,6 +211,19 @@
 						{/if}
 					</td>
 					<td>{a.source}</td>
+					<td class="nowrap">
+						{#if marked.has(fpKey(a))}
+							<span class="fp-marked" title="Reported as false positive">✓ FP</span>
+						{:else}
+							<button
+								class="fp-btn"
+								title="Mark as false positive — suppresses this indicator for this client"
+								onclick={() => markFalsePositive(a)}
+							>
+								Mark FP
+							</button>
+						{/if}
+					</td>
 				</tr>
 			{/each}
 		</tbody>
@@ -293,6 +332,26 @@
 		font-size: 0.75rem;
 		font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
 		color: var(--text-secondary);
+	}
+
+	.fp-btn {
+		background: transparent;
+		color: var(--text-secondary);
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		font-size: 0.6875rem;
+		padding: 0.2rem 0.5rem;
+		cursor: pointer;
+		white-space: nowrap;
+	}
+	.fp-btn:hover {
+		color: var(--warning);
+		border-color: var(--warning);
+	}
+	.fp-marked {
+		font-size: 0.6875rem;
+		color: var(--success);
+		font-weight: 600;
 	}
 
 	.badge-critical {

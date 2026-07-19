@@ -118,16 +118,18 @@ func (a *Analyzer) alert(ev ingest.SensorEvent, reason, value, severity string, 
 	tlsFindings.WithLabelValues(reason).Inc()
 
 	alert := detection.Alert{
-		Timestamp:  ev.Timestamp,
-		Domain:     firstNonEmpty(ev.SNI, ev.DstIP),
-		ClientIP:   ev.SrcIP,
-		MatchedIoC: value,
-		Severity:   severity,
-		Source:     firstNonEmpty(ioc.Source, "tls-heuristics"),
-		Confidence: confidence,
-		Threat:     firstNonEmpty(ioc.Threat, reason),
-		MitreID:    ioc.MitreID,
-		MitreName:  ioc.MitreName,
+		Timestamp:   ev.Timestamp,
+		Domain:      firstNonEmpty(ev.SNI, ev.DstIP),
+		ClientIP:    ev.SrcIP,
+		MatchedIoC:  value,
+		IoCType:     firstNonEmpty(ioc.Type, "tlsfp"),
+		Severity:    severity,
+		Source:      firstNonEmpty(ioc.Source, "tls-heuristics"),
+		Confidence:  confidence,
+		Threat:      firstNonEmpty(ioc.Threat, reason),
+		MitreID:     ioc.MitreID,
+		MitreName:   ioc.MitreName,
+		SignalClass: detection.SignalTLS,
 	}
 	if alert.MitreID == "" {
 		alert.MitreID, alert.MitreName = "T1071.001", "Application Layer Protocol: Web Protocols"

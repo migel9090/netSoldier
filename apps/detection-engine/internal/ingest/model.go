@@ -113,14 +113,16 @@ func (e *SensorEvent) applyThreatIntel(raw string) {
 // hits from the live IoC matcher when the indicator is still known.
 func ToAlert(ev SensorEvent, m *iocmatch.Matcher) detection.Alert {
 	a := detection.Alert{
-		Timestamp:  ev.Timestamp,
-		Domain:     ev.Indicator,
-		ClientIP:   ev.SrcIP,
-		MatchedIoC: ev.Indicator,
-		Severity:   ev.Severity,
-		Source:     ev.Source,
-		Confidence: ev.Confidence,
-		Threat:     ev.Threat,
+		Timestamp:   ev.Timestamp,
+		Domain:      ev.Indicator,
+		ClientIP:    ev.SrcIP,
+		MatchedIoC:  ev.Indicator,
+		IoCType:     ev.IndicatorType,
+		Severity:    ev.Severity,
+		Source:      ev.Source,
+		Confidence:  ev.Confidence,
+		Threat:      ev.Threat,
+		SignalClass: signalClass(ev.Kind),
 	}
 	if a.MatchedIoC == "" {
 		a.MatchedIoC = ev.Signature
@@ -156,6 +158,25 @@ func ToAlert(ev SensorEvent, m *iocmatch.Matcher) detection.Alert {
 		a.Severity = "medium"
 	}
 	return a
+}
+
+// signalClass maps a SensorEvent kind to the composite-confidence signal
+// vocabulary (step 116).
+func signalClass(kind string) string {
+	switch kind {
+	case "ids-alert":
+		return detection.SignalIDS
+	case "intel-hit":
+		return detection.SignalIoC
+	case "tls-client":
+		return detection.SignalTLS
+	case "ml-beacon":
+		return detection.SignalBeacon
+	case "ml-anomaly":
+		return detection.SignalVolumetric
+	default:
+		return kind
+	}
 }
 
 func lookup(m *iocmatch.Matcher, iocType, value string) (iocmatch.IoC, bool) {

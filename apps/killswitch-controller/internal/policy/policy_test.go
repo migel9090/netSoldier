@@ -115,6 +115,62 @@ func TestDefaultPolicyValues(t *testing.T) {
 	if p.DefaultAction != events.ActionDNSSinkhole {
 		t.Errorf("expected default action dns_sinkhole, got %s", p.DefaultAction)
 	}
+	if p.AutoMinSignals != 1 {
+		t.Errorf("expected AutoMinSignals 1, got %d", p.AutoMinSignals)
+	}
+}
+
+// Step 117: composite-confidence gate for auto-block.
+
+func TestAutoMinSignalsRequiresCorroboration(t *testing.T) {
+	p := newTestPolicy()
+	p.AutoMinSignals = 2
+
+	// a composite carrying only one signal class → downgraded to pending
+	single := p.Evaluate(events.DetectionEvent{
+		Confidence:  95,
+		Severity:    events.SeverityCritical,
+		ClientIP:    "192.168.1.100",
+		SignalCount: 1,
+	})
+	if single.Action != "pending" {
+		t.Fatalf("single-signal composite should be pending under AutoMinSignals=2, got %q", single.Action)
+	}
+
+	// two corroborating classes → auto-block
+	corrob := p.Evaluate(events.DetectionEvent{
+		Confidence:  93,
+		Severity:    events.SeverityCritical,
+		ClientIP:    "192.168.1.100",
+		SignalCount: 2,
+	})
+	if corrob.Action != "auto_block" {
+		t.Fatalf("two-signal composite should auto-block, got %q", corrob.Action)
+	}
+}
+
+func TestKnownBadIoCAutoBlocksEvenWithSignalGate(t *testing.T) {
+	p := newTestPolicy()
+	p.AutoMinSignals = 2
+
+	// a single known-bad IoC feed match carries no composite metadata
+	// (SignalCount 0) — it must still auto-block instantly.
+	d := p.Evaluate(events.DetectionEvent{
+		Confidence: 95,
+		Severity:   events.SeverityCritical,
+		ClientIP:   "192.168.1.100",
+		Source:     "threatfox",
+	})
+	if d.Action != "auto_block" {
+		t.Fatalf("known-bad IoC should auto-block regardless of signal gate, got %q", d.Action)
+	}
+}
+
+func TestLoadFromEnvAutoMinSignals(t *testing.T) {
+	t.Setenv("POLICY_AUTO_MIN_SIGNALS", "2")
+	if p := LoadFromEnv(); p.AutoMinSignals != 2 {
+		t.Errorf("AutoMinSignals = %d, want 2", p.AutoMinSignals)
+	}
 }
 
 func TestAllowlistRemoveMAC(t *testing.T) {

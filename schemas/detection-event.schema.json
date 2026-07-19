@@ -95,6 +95,16 @@
       "type": "array",
       "items": { "type": "string" },
       "description": "Arbitrary tags from the IoC source."
+    },
+    "signals": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Composite-confidence (step 116): contributing signal classes (ioc, ids-signature, beacon, volumetric, tls). Additive, optional."
+    },
+    "signal_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Composite-confidence (step 116): number of distinct corroborating signal classes. Additive, optional."
     }
   },
   "additionalProperties": false

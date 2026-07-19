@@ -13,8 +13,11 @@ import (
 
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/adguard"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/capture"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/composite"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/correlator"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/eventmap"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/feedback"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/ingest"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/iocmatch"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/tlsheur"
@@ -71,17 +74,55 @@ func main() {
 		dnsCache.Set(ip, domain, ttl)
 	}
 
+	// False-positive feedback loop (step 118): suppressions gate what
+	// reaches the killswitch. Built once here so the alert-path closures
+	// capture a stable store; the ClickHouse sink + reload happen below
+	// when CLICKHOUSE_URL is set.
+	chURL := os.Getenv("CLICKHOUSE_URL")
+	chDB := envOr("CLICKHOUSE_DATABASE", "netsoldier")
+	var feedbackSink feedback.Sink
+	if chURL != "" {
+		feedbackSink = feedback.NewCHSink(chURL, chDB)
+	}
+	feedbackStore := feedback.New(feedbackSink)
+
+	// forward delivers a detection to the killswitch (or any generic
+	// webhook receiver) as the shared events.DetectionEvent contract.
+	var forward func(detection.Alert)
 	if webhookURL := os.Getenv("WEBHOOK_URL"); webhookURL != "" {
 		sender := webhook.NewSender(webhookURL, envOr("WEBHOOK_SECRET", ""), 3)
 		go sender.Run(ctx)
-		engine.OnAlert = func(a detection.Alert) {
-			sender.Send(webhookPayload{
-				Event:   "threat_detected",
-				Alert:   a,
-				Service: "detection-engine",
-			})
+		forward = func(a detection.Alert) {
+			sender.Send(eventmap.AlertToEvent(a))
 		}
 		slog.Info("webhook enabled", "url", webhookURL)
+	}
+
+	// Composite-confidence correlator (step 116): combines corroborating
+	// signals per client. When several distinct signal classes line up it
+	// emits one higher-confidence composite; otherwise the single signal
+	// flows through unchanged.
+	compWindow := parseDuration(envOr("COMPOSITE_WINDOW", "15m"), 15*time.Minute)
+	correlate := composite.New(compWindow, func(comp detection.Alert) {
+		if feedbackStore.Suppressed(comp) {
+			feedbackStore.CountSuppressed()
+			return
+		}
+		if forward != nil {
+			forward(comp)
+		}
+	})
+
+	engine.OnAlert = func(a detection.Alert) {
+		if feedbackStore.Suppressed(a) {
+			feedbackStore.CountSuppressed()
+			return
+		}
+		// A formed composite supersedes the single signal for enforcement;
+		// otherwise forward the individual detection as before.
+		if comp := correlate.Observe(a); comp == nil && forward != nil {
+			forward(a)
+		}
 	}
 
 	go engine.Run(ctx)
@@ -89,8 +130,8 @@ func main() {
 	// Unified sensor ingest (step 109): consume Suricata EVE alerts and
 	// Zeek Intel hits landed in ClickHouse and route them through the
 	// same alert path as DNS detections.
-	if chURL := os.Getenv("CLICKHOUSE_URL"); chURL != "" {
-		chc := ingest.NewCHClient(chURL, envOr("CLICKHOUSE_DATABASE", "netsoldier"))
+	if chURL != "" {
+		chc := ingest.NewCHClient(chURL, chDB)
 		sensorInterval := parseDuration(envOr("SENSOR_POLL_INTERVAL", "30s"), 30*time.Second)
 		emit := func(ev ingest.SensorEvent) {
 			engine.Ingest(ingest.ToAlert(ev, matcher))
@@ -98,12 +139,26 @@ func main() {
 		go ingest.NewPoller(chc, ingest.NewSuricataAlerts(), sensorInterval, emit).Run(ctx)
 		go ingest.NewPoller(chc, ingest.NewZeekIntel(), sensorInterval, emit).Run(ctx)
 
+		// ML signals for composite-confidence (step 116): RITA beacons and
+		// Isolation-Forest flow anomalies. Until now nothing consumed these
+		// tables; they are the "beacon" and "volumetric" corroborators.
+		go ingest.NewPoller(chc, ingest.NewMLBeacons(), sensorInterval, emit).Run(ctx)
+		go ingest.NewPoller(chc, ingest.NewMLAnomalies(), sensorInterval, emit).Run(ctx)
+
 		// TLS client heuristics (step 110): TLS-client-fingerprint/JA3 IoC
 		// matches plus fingerprint/SNI/DNS correlation, decryption-free.
 		localNets := strings.Split(envOr("LOCAL_NETWORKS",
 			strings.Join(tlsheur.DefaultLocalCIDRs, ",")), ",")
 		tlsAnalyzer := tlsheur.New(matcher, dnsCache, localNets, engine.Ingest)
 		go ingest.NewPoller(chc, ingest.NewZeekSSL(), sensorInterval, tlsAnalyzer.Handle).Run(ctx)
+
+		// FP feedback persistence (step 118): rebuild suppressions from
+		// ClickHouse on startup (the sink was wired above).
+		if n, err := feedback.LoadInto(ctx, chc, feedbackStore); err != nil {
+			slog.Warn("feedback load failed", "error", err)
+		} else if n > 0 {
+			slog.Info("feedback suppressions loaded", "count", n)
+		}
 
 		slog.Info("unified sensor ingest enabled", "interval", sensorInterval)
 	}
@@ -123,8 +178,8 @@ func main() {
 		go devCache.RefreshLoop(ctx, 30*time.Second)
 
 		var chWriter *correlator.CHWriter
-		if chURL := os.Getenv("CLICKHOUSE_URL"); chURL != "" {
-			chWriter = correlator.NewCHWriter(chURL, envOr("CLICKHOUSE_DATABASE", "netsoldier"))
+		if chURL != "" {
+			chWriter = correlator.NewCHWriter(chURL, chDB)
 		}
 
 		cor := correlator.New(dnsCache, devCache, chWriter, flowCh)
@@ -136,6 +191,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.HandleFunc("GET /alerts", engine.HandleAlerts)
+	mux.HandleFunc("POST /feedback", feedbackStore.HandleFeedback)
+	mux.HandleFunc("GET /feedback", feedbackStore.HandleList)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
 	addr := envOr("LISTEN_ADDR", ":8080")
@@ -184,10 +241,4 @@ func parseDuration(s string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
-}
-
-type webhookPayload struct {
-	Event   string          `json:"event"`
-	Alert   detection.Alert `json:"alert"`
-	Service string          `json:"service"`
 }
