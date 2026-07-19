@@ -15,78 +15,26 @@ spec:
       serviceAccountName: ntopng
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      # ntopng starts as root to open the capture socket and immediately drops
+      # to `nobody` (-u=nobody in the config) for the rest of its lifetime.
+      # It cannot capture when started non-root even with file capabilities
+      # (its internal libcap privilege management resets the effective set),
+      # unlike the zeek sensor which runs fully non-root. The root start is
+      # covered by a scoped require-non-root Kyverno exception; every other
+      # hardening control (read-only rootfs, drop-all+add-two caps, no
+      # privilege escalation, seccomp) still applies.
       securityContext:
         fsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
-      initContainers:
-        # ntopng ships no file capabilities and the image has no python3;
-        # stage the binary here, then write the security.capability xattr
-        # from the zeek image (same pattern as the zeek sensor).
-        - name: copy-binary
-          image: ntop/ntopng@sha256:c029d8351490ffdfb51904e4cb06de89b3b992966ee31879bff87dfab7e9baf4
-          command: ["/bin/sh", "-c"]
-          args:
-            - cp /usr/bin/ntopng /opt/ntopng-cap/ntopng && chmod 755 /opt/ntopng-cap/ntopng
-          securityContext:
-            runAsNonRoot: true
-            runAsUser: 65534
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop:
-                - ALL
-          volumeMounts:
-            - name: ntopng-cap
-              mountPath: /opt/ntopng-cap
-          resources:
-            limits:
-              cpu: 100m
-              memory: 128Mi
-            requests:
-              cpu: 25m
-              memory: 64Mi
-        - name: init-caps
-          image: ghcr.io/migel9090/zeek:main
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              set -e
-              python3 - <<'PY'
-              import os, struct
-              # vfs_cap_data v2 + VFS_CAP_FLAGS_EFFECTIVE;
-              # permitted = CAP_NET_ADMIN (12) | CAP_NET_RAW (13)
-              data = struct.pack('<5I', 0x02000001, (1 << 12) | (1 << 13), 0, 0, 0)
-              os.setxattr('/opt/ntopng-cap/ntopng', 'security.capability', data)
-              PY
-          securityContext:
-            runAsUser: 0
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              add:
-                - SETFCAP
-              drop:
-                - ALL
-          volumeMounts:
-            - name: ntopng-cap
-              mountPath: /opt/ntopng-cap
-          resources:
-            limits:
-              cpu: 100m
-              memory: 128Mi
-            requests:
-              cpu: 25m
-              memory: 64Mi
       containers:
         - name: ntopng
           image: ntop/ntopng@sha256:c029d8351490ffdfb51904e4cb06de89b3b992966ee31879bff87dfab7e9baf4
           command:
-            - /opt/ntopng-cap/ntopng
+            - ntopng
             - /etc/ntopng/ntopng.conf
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 65534
+            runAsUser: 0
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
             capabilities:
@@ -123,9 +71,6 @@ spec:
               cpu: 250m
               memory: 384Mi
           volumeMounts:
-            - name: ntopng-cap
-              mountPath: /opt/ntopng-cap
-              readOnly: true
             - name: config
               mountPath: /etc/ntopng
               readOnly: true
@@ -182,9 +127,6 @@ spec:
         - name: config
           configMap:
             name: ntopng-config
-        - name: ntopng-cap
-          emptyDir:
-            sizeLimit: 200Mi
         - name: data
           emptyDir:
             sizeLimit: 1Gi

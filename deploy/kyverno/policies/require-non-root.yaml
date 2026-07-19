@@ -25,6 +25,19 @@ spec:
                 - argocd
                 - observability
                 - dns
+          # ntopng must start as root to open its capture socket, then drops
+          # to `nobody` (-u=nobody) for its lifetime — it cannot capture when
+          # started non-root, even with file capabilities (its libcap
+          # privilege management resets the effective set). Scoped to the
+          # ntopng pod only; all other hardening controls still apply.
+          # The zeek/suricata sensors do NOT need this — they run fully
+          # non-root via baked-in file capabilities.
+          - resources:
+              namespaces:
+                - netsoldier
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: ntopng
       validate:
         message: >-
           Running as root is not allowed. Either the pod or all containers

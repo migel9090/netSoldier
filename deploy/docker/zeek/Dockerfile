@@ -19,9 +19,12 @@ USER root
 # git is required by zkg to clone packages; installed defensively in case
 # the base image trims it. Pinning git's exact patch version across Debian
 # point releases is brittle, so DL3008 is intentionally ignored.
+# git: required by zkg to clone packages. libcap2-bin: provides setcap so we
+# can bake the capture capabilities into the binary at build time (see below).
+# Pinning exact patch versions across Debian point releases is brittle.
 # hadolint ignore=DL3008
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends git libcap2-bin \
     && rm -rf /var/lib/apt/lists/* \
     && zkg autoconfig --force \
     && zkg install --force --skiptests \
@@ -30,7 +33,13 @@ RUN apt-get update \
 
 COPY scripts/ /usr/local/zeek/share/zeek/site/
 
-# Default to non-root; the Pod securityContext still pins uid 65534 (and the
-# init container overrides to 0 only to write the capability xattr). Packages
-# live in the image filesystem, world-readable, read-only at runtime.
+# Bake the capture capabilities into the binary as *file capabilities*. This
+# lets the pod run fully non-root: at runtime the kernel grants a non-root
+# process cap_net_raw/cap_net_admin on exec because they are file caps AND
+# present in the container's bounding set (Pod securityContext capabilities:
+# add). No root init container, no runtime setcap — even with
+# allowPrivilegeEscalation:false (no_new_privs), file caps within the bounding
+# set are honored. readOnlyRootFilesystem is fine: caps are read-only xattrs.
+RUN setcap cap_net_raw,cap_net_admin+ep /usr/local/zeek/bin/zeek
+
 USER 65534

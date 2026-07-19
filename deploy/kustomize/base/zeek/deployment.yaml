@@ -16,6 +16,7 @@ spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       securityContext:
+        runAsNonRoot: true
         fsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
@@ -50,49 +51,16 @@ spec:
             requests:
               cpu: 25m
               memory: 32Mi
-        # the zeek image ships no setcap and the binary has no file
-        # capabilities, so non-root capture would fail with EPERM;
-        # copy the binary and write the security.capability xattr
-        # (equivalent of: setcap cap_net_raw,cap_net_admin+ep)
-        - name: init-caps
-          image: ghcr.io/migel9090/zeek:main
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              set -e
-              cp /usr/local/zeek/bin/zeek /opt/zeek-cap/zeek
-              chmod 755 /opt/zeek-cap/zeek
-              python3 - <<'PY'
-              import os, struct
-              # vfs_cap_data v2 + VFS_CAP_FLAGS_EFFECTIVE;
-              # permitted = CAP_NET_ADMIN (12) | CAP_NET_RAW (13)
-              data = struct.pack('<5I', 0x02000001, (1 << 12) | (1 << 13), 0, 0, 0)
-              os.setxattr('/opt/zeek-cap/zeek', 'security.capability', data)
-              PY
-          securityContext:
-            runAsUser: 0
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              add:
-                - SETFCAP
-              drop:
-                - ALL
-          volumeMounts:
-            - name: zeek-cap
-              mountPath: /opt/zeek-cap
-          resources:
-            limits:
-              cpu: 100m
-              memory: 128Mi
-            requests:
-              cpu: 25m
-              memory: 64Mi
       containers:
         - name: zeek
+          # The image bakes cap_net_raw,cap_net_admin into the zeek binary as
+          # file capabilities (see the Dockerfile), so the pod captures fully
+          # non-root with no privileged init container — the kernel grants the
+          # caps on exec because they are file caps within the bounding set
+          # (capabilities.add below).
           image: ghcr.io/migel9090/zeek:main
           command:
-            - /opt/zeek-cap/zeek
+            - /usr/local/zeek/bin/zeek
             - "-i"
             - af_packet::eth1
             - /etc/zeek-site/netsoldier.zeek
@@ -120,9 +88,6 @@ spec:
               cpu: 250m
               memory: 384Mi
           volumeMounts:
-            - name: zeek-cap
-              mountPath: /opt/zeek-cap
-              readOnly: true
             - name: site
               mountPath: /etc/zeek-site
               readOnly: true
@@ -211,9 +176,6 @@ spec:
         - name: vector-config
           configMap:
             name: zeek-vector-config
-        - name: zeek-cap
-          emptyDir:
-            sizeLimit: 500Mi
         - name: log
           emptyDir:
             sizeLimit: 1Gi

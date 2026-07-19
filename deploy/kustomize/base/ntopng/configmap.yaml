@@ -14,3 +14,8 @@ data:
     --data-dir=/var/lib/ntopng
     --community
     --local-networks=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
+    # ntopng requires a root start to open the capture socket, then drops to
+    # this unprivileged user for the rest of its lifetime (its native
+    # privilege model — it cannot capture when started non-root, even with
+    # file capabilities). See the require-non-root Kyverno exception.
+    -u=nobody

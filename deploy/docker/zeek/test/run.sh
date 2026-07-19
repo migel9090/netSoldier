@@ -14,7 +14,14 @@ set -eu
 IMAGE="${1:-ghcr.io/migel9090/zeek:main}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
-got=$(docker run --rm -v "$DIR:/t:ro" --entrypoint sh "$IMAGE" -c '
+# The zeek binary carries cap_net_raw,cap_net_admin as file capabilities
+# (baked into the image so the pod runs non-root). Execing it requires those
+# caps in the container bounding set even for offline pcap replay, which uses
+# no interface — so grant them here (NET_RAW is a docker default, NET_ADMIN
+# is not).
+CAPS="--cap-add net_raw --cap-add net_admin"
+
+got=$(docker run --rm $CAPS -v "$DIR:/t:ro" --entrypoint sh "$IMAGE" -c '
     set -eu
     cd /tmp
     for p in handshakes synthetic; do
@@ -42,7 +49,7 @@ echo "JA4 golden test passed ($(echo "$got" | wc -l) fingerprints)"
 
 # Phase 2: Intel framework — the intel/intel.dat fixture must produce hits
 # for the first-party Intel::JA4 type plus the stock DOMAIN/ADDR seen paths.
-intel_out=$(docker run --rm -v "$DIR:/t:ro" --entrypoint sh "$IMAGE" -c '
+intel_out=$(docker run --rm $CAPS -v "$DIR:/t:ro" --entrypoint sh "$IMAGE" -c '
     set -eu
     cd /tmp
     zeek -C -r /t/pcaps/handshakes.pcap /t/intel/site.zeek >/dev/null
