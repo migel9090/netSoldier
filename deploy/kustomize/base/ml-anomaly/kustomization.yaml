@@ -11,3 +11,4 @@ resources:
   - serviceaccount.yaml
   - deployment.yaml
   - pdb.yaml
+  - models-pvc.yaml

@@ -67,6 +67,13 @@ spec:
               value: "600"
             - name: FLOW_SCORE_THRESHOLD
               value: "0.65"
+            # step 114: versioned model artifacts survive restarts; the
+            # daily retrain only promotes models passing FP/detection bars.
+            - name: MODEL_DIR
+              value: "/models"
+          volumeMounts:
+            - name: models
+              mountPath: /models
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -80,3 +87,7 @@ spec:
             requests:
               cpu: 100m
               memory: 192Mi
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: ml-models
