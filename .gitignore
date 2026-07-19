@@ -62,6 +62,8 @@ kubeconfig
 *.log
 *.pcap
 *.pcapng
+# Exception: tiny loopback/synthetic golden pcaps for the JA4 test
+!deploy/docker/zeek/test/pcaps/*.pcap
 
 # ── Local-only working context (used by AI tooling, never committed) ──
 context/
