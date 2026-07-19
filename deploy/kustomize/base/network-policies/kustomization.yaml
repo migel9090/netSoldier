@@ -17,4 +17,5 @@ resources:
   - ntopng.yaml
   - suricata.yaml
   - zeek.yaml
+  - rita.yaml
   - backup.yaml

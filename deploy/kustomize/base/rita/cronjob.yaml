@@ -1,0 +1,107 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rita-import
+spec:
+  # every 30 min, aligned with the Zeek log rotation interval
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1500
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: rita
+            app.kubernetes.io/component: importer
+        spec:
+          serviceAccountName: rita
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            fsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: rita
+              image: ghcr.io/activecm/rita:v5.1.2
+              workingDir: /work
+              args:
+                - import
+                - --logs=/spool
+                - --database=netsoldier_rita
+                - --rolling
+              env:
+                - name: DB_ADDRESS
+                  value: "clickhouse.netsoldier.svc:9000"
+                - name: CLICKHOUSE_USERNAME
+                  value: "rita"
+                - name: CLICKHOUSE_PASSWORD
+                  value: ""
+                - name: CONFIG_DIR
+                  value: "/work"
+                - name: CONFIG_FILE
+                  value: "/work/config.hjson"
+                - name: HTTP_EXTENSIONS_FILE_PATH
+                  value: "/work/http_extensions_list.csv"
+                - name: THREAT_INTEL_CUSTOM_FEEDS_DIRECTORY
+                  value: "/work/threat_intel_feeds"
+                - name: LOGS
+                  value: "/spool"
+                - name: APP_LOGS
+                  value: "/tmp"
+                - name: LOG_LEVEL
+                  value: "1"
+                - name: LOGGING_ENABLED
+                  value: "false"
+                - name: SYSLOG_ADDRESS
+                  value: ""
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              resources:
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+                requests:
+                  cpu: 250m
+                  memory: 256Mi
+              volumeMounts:
+                - name: config
+                  mountPath: /work/config.hjson
+                  subPath: config.hjson
+                  readOnly: true
+                - name: config
+                  mountPath: /work/http_extensions_list.csv
+                  subPath: http_extensions_list.csv
+                  readOnly: true
+                - name: config
+                  mountPath: /work/.env
+                  subPath: dotenv
+                  readOnly: true
+                - name: feeds
+                  mountPath: /work/threat_intel_feeds
+                - name: spool
+                  mountPath: /spool
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: config
+              configMap:
+                name: rita-config
+            - name: feeds
+              emptyDir: {}
+            - name: spool
+              persistentVolumeClaim:
+                claimName: zeek-spool
+            - name: tmp
+              emptyDir: {}
+          restartPolicy: OnFailure

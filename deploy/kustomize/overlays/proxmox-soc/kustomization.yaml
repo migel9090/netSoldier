@@ -10,6 +10,7 @@ resources:
   - ../../base/ntopng
   - ../../base/suricata
   - ../../base/zeek
+  - ../../base/rita
 
 commonLabels:
   app.kubernetes.io/instance: proxmox-soc

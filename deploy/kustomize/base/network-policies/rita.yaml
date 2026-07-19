@@ -1,0 +1,31 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-rita
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: rita
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    # ClickHouse native protocol for import + analysis
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: clickhouse
+              app.kubernetes.io/component: server
+      ports:
+        - port: 9000
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

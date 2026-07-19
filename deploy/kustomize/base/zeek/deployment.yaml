@@ -97,6 +97,10 @@ spec:
             - af_packet::eth1
             - /etc/zeek-site/netsoldier.zeek
           workingDir: /var/log/zeek
+          env:
+            # RITA log-spool retention (minutes); prune in archive-rotated.sh
+            - name: ZEEK_SPOOL_RETENTION_MIN
+              value: "360"
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
@@ -127,6 +131,8 @@ spec:
               readOnly: true
             - name: log
               mountPath: /var/log/zeek
+            - name: spool
+              mountPath: /var/spool/zeek
             - name: tmp
               mountPath: /tmp
         # refresh the Intel indicator file; atomic rename triggers the
@@ -199,6 +205,9 @@ spec:
         - name: intel
           emptyDir:
             sizeLimit: 200Mi
+        - name: spool
+          persistentVolumeClaim:
+            claimName: zeek-spool
         - name: vector-config
           configMap:
             name: zeek-vector-config

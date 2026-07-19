@@ -17,7 +17,27 @@ data:
                 <max_memory_usage>1073741824</max_memory_usage>
                 <max_execution_time>60</max_execution_time>
             </default>
+            <!-- RITA v5 emits SQL that the new ClickHouse analyzer rejects
+                 (ARRAY JOIN aliases not in GROUP BY); scope the legacy
+                 analyzer to RITA only so netSoldier's own queries keep the
+                 default. RITA imports are long-running batch scans. -->
+            <rita>
+                <allow_experimental_analyzer>0</allow_experimental_analyzer>
+                <max_execution_time>1800</max_execution_time>
+            </rita>
         </profiles>
+        <users>
+            <!-- Dedicated user for the RITA importer; manages only its own
+                 netsoldier_rita / metadatabase databases. Reachable only
+                 from the rita pod via NetworkPolicy. -->
+            <rita>
+                <password></password>
+                <profile>rita</profile>
+                <networks><ip>::/0</ip></networks>
+                <access_management>1</access_management>
+                <named_collection_control>1</named_collection_control>
+            </rita>
+        </users>
     </clickhouse>
 ---
 apiVersion: v1

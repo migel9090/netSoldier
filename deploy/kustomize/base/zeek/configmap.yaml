@@ -27,9 +27,30 @@ data:
     redef Site::local_nets = { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 };
 
     redef Log::default_rotation_interval = 30 min;
-    redef Log::default_rotation_postprocessor_cmd = "/etc/zeek-site/delete-rotated.sh";
-  delete-rotated.sh: |
+    redef Log::default_rotation_postprocessor_cmd = "/etc/zeek-site/archive-rotated.sh";
+  archive-rotated.sh: |
     #!/bin/sh
-    # Rotation postprocessor: Vector has already shipped the contents,
-    # rotated files only need removal.
-    rm -f -- "$1"
+    # Rotation postprocessor. Vector tails the live logs, so a rotated file
+    # is already shipped; RITA (step 111), however, imports from files on
+    # disk, so archive conn/dns/http/ssl/x509 into the spool for it and
+    # drop everything else. RITA globs one flat directory by log-type
+    # prefix, so files stay flat; a time-based prune bounds the spool.
+    set -eu
+    src="$1"
+    base="$(basename "$src")"
+    spool="/var/spool/zeek"
+
+    case "$base" in
+      conn.*|dns.*|http.*|ssl.*|x509.*)
+        mkdir -p "$spool"
+        if mv -f -- "$src" "$spool/$base" 2>/dev/null; then
+          # prune anything older than the retention window (minutes)
+          find "$spool" -type f -mmin "+${ZEEK_SPOOL_RETENTION_MIN:-360}" -delete 2>/dev/null || true
+        else
+          rm -f -- "$src"
+        fi
+        ;;
+      *)
+        rm -f -- "$src"
+        ;;
+    esac

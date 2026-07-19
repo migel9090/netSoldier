@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rita-config
+data:
+  # RITA (activecm/rita, GPLv3) beaconing/C2 analysis over Zeek conn logs,
+  # ClickHouse backend. Config keys mirror the upstream default_config.hjson.
+  config.hjson: |
+    {
+      // update check would need outbound egress; the SOC stays offline-first
+      "update_check_enabled": false,
+      // RITA's own threat-intel scoring; netSoldier feeds IoCs via
+      // threat-intel-sync elsewhere, so no online feeds here (no egress).
+      "threat_intel": {
+        "online_feeds": []
+      },
+      "filtering": {
+        "internal_subnets": [
+          "10.0.0.0/8",
+          "172.16.0.0/12",
+          "192.168.0.0/16",
+          "fd00::/8"
+        ],
+        "always_included_subnets": [],
+        "always_included_domains": [],
+        "never_included_subnets": [],
+        "never_included_domains": [],
+        "filter_external_to_internal": true
+      },
+      "scoring": {
+        "beacon": {
+          "unique_connection_threshold": 4,
+          "timestamp_score_weight": 0.25,
+          "datasize_score_weight": 0.25,
+          "duration_score_weight": 0.25,
+          "histogram_score_weight": 0.25,
+          "duration_min_hours_seen": 6,
+          "duration_consistency_ideal_hours_seen": 12,
+          "histogram_mode_sensitivity": 0.05,
+          "histogram_bimodal_outlier_removal": 1,
+          "histogram_bimodal_min_hours_seen": 11
+        }
+      }
+    }
+  # RITA requires this file to exist; empty means "no known extensions",
+  # which only affects the MIME-vs-extension mismatch check (HTTP).
+  http_extensions_list.csv: ""
+  # RITA loads a .env from its workdir; env vars still win, but the file
+  # must exist to silence the loader.
+  dotenv: ""
