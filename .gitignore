@@ -75,3 +75,8 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+
+apps/detection-engine/detection-engine
+apps/device-inventory/device-inventory
+apps/killswitch-controller/killswitch-controller
+apps/threat-intel-sync/threat-intel-sync
