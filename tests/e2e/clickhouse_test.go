@@ -77,16 +77,33 @@ func runMigrations(t *testing.T, chURL string) {
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
 		}
-		for _, stmt := range strings.Split(string(data), ";") {
-			stmt = strings.TrimSpace(stmt)
-			if stmt == "" {
-				continue
-			}
+		for _, stmt := range splitStatements(string(data)) {
 			if err := chExec(chURL, stmt); err != nil {
 				t.Fatalf("migration %s: %v", f, err)
 			}
 		}
 	}
+}
+
+// splitStatements splits a migration file into individual statements for the
+// HTTP interface (one statement per request). "--" comment lines are dropped
+// first: the production init path (clickhouse-client multiquery) parses them,
+// but a naive ";" split would break on semicolons inside comment text.
+func splitStatements(sql string) []string {
+	var kept []string
+	for _, line := range strings.Split(sql, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	var stmts []string
+	for _, stmt := range strings.Split(strings.Join(kept, "\n"), ";") {
+		if stmt = strings.TrimSpace(stmt); stmt != "" {
+			stmts = append(stmts, stmt)
+		}
+	}
+	return stmts
 }
 
 func chExec(baseURL, query string) error {
@@ -162,7 +179,10 @@ func TestClickHouseSchema(t *testing.T) {
 	t.Run("AllTablesCreated", func(t *testing.T) {
 		expected := []string{
 			"alerts", "audit_log", "connections", "device_events",
-			"devices", "dns_queries", "events", "network_flows",
+			"devices", "dns_queries", "events", "ml_anomalies",
+			"ml_beacons", "network_flows", "suricata_alerts",
+			"suricata_dns", "suricata_tls", "zeek_conn", "zeek_dns",
+			"zeek_http", "zeek_intel", "zeek_ssl", "zeek_x509",
 		}
 
 		type tableRow struct {

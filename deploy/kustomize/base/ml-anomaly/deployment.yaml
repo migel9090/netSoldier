@@ -49,3 +49,34 @@ spec:
             requests:
               cpu: 50m
               memory: 96Mi
+        - name: flow-anomaly
+          image: ghcr.io/migel9090/ml-anomaly:main
+          # step 113: Isolation Forest over connection windows; writes
+          # ml_anomalies, tailed by detection-engine (step 116).
+          command: ["python", "-m", "ml_anomaly.flowsync"]
+          env:
+            - name: CLICKHOUSE_URL
+              value: "http://clickhouse.netsoldier.svc:8123"
+            - name: CLICKHOUSE_DATABASE
+              value: "netsoldier"
+            - name: FLOW_WINDOW_MINUTES
+              value: "10"
+            - name: FLOW_BASELINE_DAYS
+              value: "7"
+            - name: FLOW_SYNC_INTERVAL_SECONDS
+              value: "600"
+            - name: FLOW_SCORE_THRESHOLD
+              value: "0.65"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 192Mi
