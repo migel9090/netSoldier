@@ -39,3 +39,21 @@ if [ "$got" != "$expected" ]; then
 fi
 
 echo "JA4 golden test passed ($(echo "$got" | wc -l) fingerprints)"
+
+# Phase 2: Intel framework — the intel/intel.dat fixture must produce hits
+# for the first-party Intel::JA4 type plus the stock DOMAIN/ADDR seen paths.
+intel_out=$(docker run --rm -v "$DIR:/t:ro" --entrypoint sh "$IMAGE" -c '
+    set -eu
+    cd /tmp
+    zeek -C -r /t/pcaps/handshakes.pcap /t/intel/site.zeek >/dev/null
+    cat intel.log')
+
+for want in Intel::JA4 Intel::DOMAIN Intel::ADDR; do
+    if ! printf '%s' "$intel_out" | grep -q "\"seen.indicator_type\":\"$want\""; then
+        echo "Intel golden test FAILED: no $want hit in intel.log" >&2
+        printf '%s\n' "$intel_out" >&2
+        exit 1
+    fi
+done
+
+echo "Intel golden test passed (JA4/DOMAIN/ADDR hits present)"

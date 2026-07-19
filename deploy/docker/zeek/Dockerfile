@@ -28,7 +28,7 @@ RUN apt-get update \
          https://github.com/salesforce/ja3 \
          --version 502cc6395811c54743b0561419d61900a6df3ff7
 
-COPY scripts/netsoldier-ja4.zeek /usr/local/zeek/share/zeek/site/netsoldier-ja4.zeek
+COPY scripts/ /usr/local/zeek/share/zeek/site/
 
 # Default to non-root; the Pod securityContext still pins uid 65534 (and the
 # init container overrides to 0 only to write the capability xattr). Packages
