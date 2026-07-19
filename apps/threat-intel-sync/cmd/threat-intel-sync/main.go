@@ -92,6 +92,7 @@ func configureSources() []source {
 						misp.TypeDomain, misp.TypeHostname,
 						misp.TypeIPDst, misp.TypeIPSrc,
 						misp.TypeURL, misp.TypeMD5, misp.TypeSHA256, misp.TypeJA3,
+						misp.TypeX509SHA1, misp.TypeX509SHA256,
 					},
 					Published: true,
 					Timestamp: envOr("MISP_LOOKBACK", "7d"),
@@ -211,6 +212,10 @@ func mapMISPType(t string) string {
 		return ioc.TypeSHA256
 	case misp.TypeJA3:
 		return ioc.TypeJA3
+	case misp.TypeX509SHA1:
+		return ioc.TypeCertSHA1
+	case misp.TypeX509SHA256:
+		return ioc.TypeCertSHA256
 	default:
 		return ""
 	}

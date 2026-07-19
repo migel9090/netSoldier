@@ -6,15 +6,19 @@ import (
 )
 
 // MISP attribute type constants used by the netSoldier detection pipeline.
+// (MISP 2.4/2.5 has no JA4 attribute type yet; JA4 IoCs currently have no
+// MISP source and enter the store only via future feeds.)
 const (
-	TypeDomain  = "domain"
-	TypeIPDst   = "ip-dst"
-	TypeIPSrc   = "ip-src"
-	TypeJA3     = "ja3-fingerprint-md5"
-	TypeMD5     = "md5"
-	TypeSHA256  = "sha256"
-	TypeURL     = "url"
-	TypeHostname = "hostname"
+	TypeDomain     = "domain"
+	TypeIPDst      = "ip-dst"
+	TypeIPSrc      = "ip-src"
+	TypeJA3        = "ja3-fingerprint-md5"
+	TypeMD5        = "md5"
+	TypeSHA256     = "sha256"
+	TypeURL        = "url"
+	TypeHostname   = "hostname"
+	TypeX509SHA1   = "x509-fingerprint-sha1"
+	TypeX509SHA256 = "x509-fingerprint-sha256"
 )
 
 // Attribute represents a single MISP indicator of compromise.

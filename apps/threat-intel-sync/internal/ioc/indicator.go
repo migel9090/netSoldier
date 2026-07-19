@@ -7,12 +7,15 @@ import (
 
 // Normalized IoC type constants.
 const (
-	TypeDomain = "domain"
-	TypeIP     = "ip"
-	TypeURL    = "url"
-	TypeMD5    = "md5"
-	TypeSHA256 = "sha256"
-	TypeJA3    = "ja3"
+	TypeDomain     = "domain"
+	TypeIP         = "ip"
+	TypeURL        = "url"
+	TypeMD5        = "md5"
+	TypeSHA256     = "sha256"
+	TypeJA3        = "ja3"
+	TypeJA4        = "ja4"
+	TypeCertSHA1   = "cert-sha1"
+	TypeCertSHA256 = "cert-sha256"
 )
 
 // Indicator is the common representation of an indicator of compromise
