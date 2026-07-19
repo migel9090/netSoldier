@@ -1,12 +1,15 @@
 """Flow anomaly worker: Isolation Forest over connection windows (step 113).
 
-Fits a baseline model on the household's own recent history, then
-periodically scores fresh windows and writes anomalies into
-``ml_anomalies``, where detection-engine's unified ingest picks them up
-as a volumetric signal for composite-confidence (step 116).
+Scores fresh windows with the latest healthy model from the store and
+writes anomalies into ``ml_anomalies``, where detection-engine's unified
+ingest picks them up as a volumetric signal for composite-confidence
+(step 116).
 
-The model refits once a day so the baseline tracks the household (new
-devices, seasonal habits) without chasing short-lived spikes.
+Model lifecycle (step 114): on start the worker loads the newest
+persisted artifact; once a day it re-runs the training pipeline
+(fit → evaluate → store), which only promotes models that pass the
+FP/detection health bars — an unhealthy retrain leaves the previous
+model serving.
 """
 
 from __future__ import annotations
@@ -17,40 +20,13 @@ import time
 
 from ml_anomaly.clickhouse import ClickHouseClient
 from ml_anomaly.flows import internal_only
-from ml_anomaly.iforest import (
-    DEFAULT_SCORE_THRESHOLD,
-    MIN_TRAINING_WINDOWS,
-    FlowAnomalyModel,
-)
+from ml_anomaly.iforest import DEFAULT_SCORE_THRESHOLD, FlowAnomalyModel
+from ml_anomaly.modelstore import ModelStore
+from ml_anomaly.train import train_once
 
 log = logging.getLogger("ml_anomaly.flows")
 
-REFIT_INTERVAL_SECONDS = 24 * 3600
-
-
-def fit_baseline(
-    client: ClickHouseClient, window_minutes: int, baseline_days: int
-) -> FlowAnomalyModel | None:
-    """Fit on the trailing baseline; None when there is too little history
-    (fresh install, sensor offline) — scoring then waits for data rather
-    than alerting on everything."""
-    windows = internal_only(
-        client.fetch_flow_windows(
-            window_minutes=window_minutes,
-            lookback_minutes=baseline_days * 24 * 60,
-        )
-    )
-    if len(windows) < MIN_TRAINING_WINDOWS:
-        log.warning(
-            "baseline too small windows=%d need=%d — skipping fit",
-            len(windows),
-            MIN_TRAINING_WINDOWS,
-        )
-        return None
-    version = "adhoc-" + time.strftime("%Y%m%d%H%M", time.gmtime())
-    model = FlowAnomalyModel.fit(windows, version=version)
-    log.info("fitted model version=%s baseline_windows=%d", version, len(windows))
-    return model
+RETRAIN_INTERVAL_SECONDS = 24 * 3600
 
 
 def score_pass(
@@ -69,7 +45,8 @@ def score_pass(
     anomalies = model.detect(windows, threshold=threshold)
     written = client.insert_anomalies(anomalies)
     log.info(
-        "flow scoring pass complete windows=%d anomalies=%d written=%d",
+        "flow scoring pass complete model=%s windows=%d anomalies=%d written=%d",
+        model.version,
         len(windows),
         len(anomalies),
         written,
@@ -91,6 +68,7 @@ def main() -> None:
     threshold = float(
         os.environ.get("FLOW_SCORE_THRESHOLD", str(DEFAULT_SCORE_THRESHOLD))
     )
+    store = ModelStore(os.environ.get("MODEL_DIR", "/models"))
 
     log.info(
         "flow anomaly worker starting window=%dm baseline=%dd interval=%.0fs threshold=%.2f",
@@ -100,17 +78,30 @@ def main() -> None:
         threshold,
     )
     model: FlowAnomalyModel | None = None
-    fitted_at = 0.0
+    loaded = store.load()
+    if loaded is not None:
+        model, meta = loaded
+        log.info("loaded model %s (trained %s)", meta.version, meta.created_at)
+    trained_at = 0.0
     with ClickHouseClient(
         base_url, database=database, username=username, password=password
     ) as client:
         while True:
             try:
-                if model is None or time.time() - fitted_at > REFIT_INTERVAL_SECONDS:
-                    fresh = fit_baseline(client, window_minutes, baseline_days)
-                    if fresh is not None:
-                        model = fresh
-                        fitted_at = time.time()
+                if model is None or time.time() - trained_at > RETRAIN_INTERVAL_SECONDS:
+                    meta, _ = train_once(
+                        client,
+                        store,
+                        window_minutes=window_minutes,
+                        baseline_days=baseline_days,
+                        threshold=threshold,
+                    )
+                    if meta is not None:
+                        trained_at = time.time()
+                    # too little history? retry next cycle, not next day
+                    refreshed = store.load()
+                    if refreshed is not None:
+                        model = refreshed[0]
                 if model is not None:
                     score_pass(client, model, window_minutes, threshold)
             except Exception:
