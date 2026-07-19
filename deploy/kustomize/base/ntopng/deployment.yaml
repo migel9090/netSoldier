@@ -1,0 +1,197 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ntopng
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ntopng
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ntopng
+    spec:
+      serviceAccountName: ntopng
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      securityContext:
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # ntopng ships no file capabilities and the image has no python3;
+        # stage the binary here, then write the security.capability xattr
+        # from the zeek image (same pattern as the zeek sensor).
+        - name: copy-binary
+          image: ntop/ntopng@sha256:c029d8351490ffdfb51904e4cb06de89b3b992966ee31879bff87dfab7e9baf4
+          command: ["/bin/sh", "-c"]
+          args:
+            - cp /usr/bin/ntopng /opt/ntopng-cap/ntopng && chmod 755 /opt/ntopng-cap/ntopng
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: ntopng-cap
+              mountPath: /opt/ntopng-cap
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
+        - name: init-caps
+          image: ghcr.io/migel9090/zeek:main
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              python3 - <<'PY'
+              import os, struct
+              # vfs_cap_data v2 + VFS_CAP_FLAGS_EFFECTIVE;
+              # permitted = CAP_NET_ADMIN (12) | CAP_NET_RAW (13)
+              data = struct.pack('<5I', 0x02000001, (1 << 12) | (1 << 13), 0, 0, 0)
+              os.setxattr('/opt/ntopng-cap/ntopng', 'security.capability', data)
+              PY
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              add:
+                - SETFCAP
+              drop:
+                - ALL
+          volumeMounts:
+            - name: ntopng-cap
+              mountPath: /opt/ntopng-cap
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
+      containers:
+        - name: ntopng
+          image: ntop/ntopng@sha256:c029d8351490ffdfb51904e4cb06de89b3b992966ee31879bff87dfab7e9baf4
+          command:
+            - /opt/ntopng-cap/ntopng
+            - /etc/ntopng/ntopng.conf
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+                - NET_RAW
+                - NET_ADMIN
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 3001
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /
+              port: 3001
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3001
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3001
+            periodSeconds: 15
+          resources:
+            limits:
+              cpu: "1"
+              memory: 768Mi
+            requests:
+              cpu: 250m
+              memory: 384Mi
+          volumeMounts:
+            - name: ntopng-cap
+              mountPath: /opt/ntopng-cap
+              readOnly: true
+            - name: config
+              mountPath: /etc/ntopng
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/ntopng
+            - name: run
+              mountPath: /var/run
+            - name: tmp
+              mountPath: /tmp
+        # hostNetwork pod: redis must stay loopback-only
+        - name: redis
+          image: redis:7-alpine
+          args:
+            - "--bind"
+            - "127.0.0.1"
+            - "--port"
+            - "6379"
+            - "--save"
+            - ""
+            - "--appendonly"
+            - "no"
+            - "--maxmemory"
+            - "128mb"
+            - "--maxmemory-policy"
+            - "allkeys-lru"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          startupProbe:
+            exec:
+              command: ["redis-cli", "-h", "127.0.0.1", "ping"]
+            periodSeconds: 2
+            failureThreshold: 15
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "-h", "127.0.0.1", "ping"]
+            periodSeconds: 10
+          resources:
+            limits:
+              cpu: 200m
+              memory: 160Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - name: redis-tmp
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: ntopng-config
+        - name: ntopng-cap
+          emptyDir:
+            sizeLimit: 200Mi
+        - name: data
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: redis-tmp
+          emptyDir:
+            sizeLimit: 64Mi

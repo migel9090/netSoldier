@@ -13,6 +13,7 @@ resources:
   - misp-mariadb.yaml
   - misp-redis.yaml
   - fluent-bit.yaml
+  - ntopng.yaml
   - suricata.yaml
   - zeek.yaml
   - backup.yaml

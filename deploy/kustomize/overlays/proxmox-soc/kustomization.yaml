@@ -7,6 +7,7 @@ resources:
   - ../../base/misp
   - ../../base/killswitch-controller
   - ../../base/threat-intel-sync
+  - ../../base/ntopng
   - ../../base/suricata
   - ../../base/zeek
 
