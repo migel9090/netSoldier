@@ -27,8 +27,10 @@ select = [
 ]
 
 [lint.per-file-ignores]
-"tests/**/*.py" = ["S101"]
-"**/tests/**/*.py" = ["S101"]
+# S101: assert is the pytest idiom. S311: tests use random for synthetic
+# fixtures, not cryptography.
+"tests/**/*.py" = ["S101", "S311"]
+"**/tests/**/*.py" = ["S101", "S311"]
 
 [format]
 quote-style = "double"
