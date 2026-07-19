@@ -29,7 +29,7 @@ type DetectionEvent struct {
 	// What was detected.
 	Domain     string `json:"domain"`
 	MatchedIoC string `json:"matched_ioc"`
-	IoCType    string `json:"ioc_type"` // "domain", "ip", "ja3", "ja4", "md5", "sha256"
+	IoCType    string `json:"ioc_type"` // "domain", "ip", "ja3", "tlsfp", "md5", "sha256"
 
 	// Who triggered it.
 	ClientIP   string `json:"client_ip"`

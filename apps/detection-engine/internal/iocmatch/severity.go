@@ -44,7 +44,7 @@ func DeriveMitre(ioc IoC) (id, name string) {
 		return "T1095", "Non-Application Layer Protocol"
 	case "url":
 		return "T1071.001", "Application Layer Protocol: Web Protocols"
-	case "ja3", "ja4":
+	case "ja3", "tlsfp":
 		return "T1071.001", "Application Layer Protocol: Web Protocols"
 	default:
 		return "T1071", "Application Layer Protocol"

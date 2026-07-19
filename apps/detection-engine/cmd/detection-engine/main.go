@@ -98,8 +98,8 @@ func main() {
 		go ingest.NewPoller(chc, ingest.NewSuricataAlerts(), sensorInterval, emit).Run(ctx)
 		go ingest.NewPoller(chc, ingest.NewZeekIntel(), sensorInterval, emit).Run(ctx)
 
-		// TLS client heuristics (step 110): JA4/JA3 IoC matches plus
-		// JA4/SNI/DNS correlation, decryption-free.
+		// TLS client heuristics (step 110): TLS-client-fingerprint/JA3 IoC
+		// matches plus fingerprint/SNI/DNS correlation, decryption-free.
 		localNets := strings.Split(envOr("LOCAL_NETWORKS",
 			strings.Join(tlsheur.DefaultLocalCIDRs, ",")), ",")
 		tlsAnalyzer := tlsheur.New(matcher, dnsCache, localNets, engine.Ingest)

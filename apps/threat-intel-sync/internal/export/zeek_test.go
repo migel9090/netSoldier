@@ -14,7 +14,7 @@ func TestWriteZeekIntelTypes(t *testing.T) {
 		{Type: ioc.TypeIP, Value: "203.0.113.7"},
 		{Type: ioc.TypeIP, Value: "198.51.100.0/24"},
 		{Type: ioc.TypeJA3, Value: "db8a6f4f9f8195ea17db377175d2cb08"},
-		{Type: ioc.TypeJA4, Value: "t13d3012h2_1d37bd780c83_882d495ac381"},
+		{Type: ioc.TypeTLSFP, Value: "t13d3012h2_1d37bd780c83_882d495ac381"},
 		{Type: ioc.TypeCertSHA1, Value: "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3"},
 		{Type: ioc.TypeCertSHA256, Value: strings.Repeat("ab", 32)},
 		{Type: "unknown-type", Value: "dropped"},
@@ -37,7 +37,7 @@ func TestWriteZeekIntelTypes(t *testing.T) {
 		"203.0.113.7":                              "Intel::ADDR",
 		"198.51.100.0/24":                          "Intel::SUBNET",
 		"db8a6f4f9f8195ea17db377175d2cb08":         "Intel::JA3",
-		"t13d3012h2_1d37bd780c83_882d495ac381":     "Intel::JA4",
+		"t13d3012h2_1d37bd780c83_882d495ac381":     "Intel::TLSFP",
 		"a94a8fe5ccb19ba61c4c0873d391e987982fbbd3": "Intel::CERT_HASH",
 		strings.Repeat("ab", 32):                   "Intel::CERT_HASH",
 	}

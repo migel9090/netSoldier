@@ -42,8 +42,8 @@
     },
     "ioc_type": {
       "type": "string",
-      "enum": ["domain", "ip", "url", "ja3", "ja4", "md5", "sha256"],
-      "description": "Type of the matched indicator."
+      "enum": ["domain", "ip", "url", "ja3", "tlsfp", "md5", "sha256"],
+      "description": "Type of the matched indicator. 'tlsfp' is the TLS client fingerprint (JA4-format)."
     },
     "client_ip": {
       "type": "string",

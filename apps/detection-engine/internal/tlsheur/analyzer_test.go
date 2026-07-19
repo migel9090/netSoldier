@@ -13,11 +13,11 @@ type fakeResolver map[string]string
 
 func (f fakeResolver) Get(ip string) string { return f[ip] }
 
-func tlsEvent(src, dst, sni, ja3, ja4 string) ingest.SensorEvent {
+func tlsEvent(src, dst, sni, ja3, fp string) ingest.SensorEvent {
 	return ingest.SensorEvent{
 		Sensor: "zeek", Kind: "tls-client", Timestamp: time.Unix(1789000000, 0),
 		SrcIP: src, DstIP: dst, SNI: sni, JA3: ja3,
-		Indicator: ja4, IndicatorType: "ja4",
+		Indicator: fp, IndicatorType: "tlsfp",
 	}
 }
 
@@ -27,10 +27,10 @@ func newTestAnalyzer(m *iocmatch.Matcher, r Resolver) (*Analyzer, *[]detection.A
 	return a, &alerts
 }
 
-func TestJA4IoCMatch(t *testing.T) {
+func TestTLSFPIoCMatch(t *testing.T) {
 	m := iocmatch.New()
 	m.Add([]iocmatch.IoC{{
-		Value: "t13d3012h2_1d37bd780c83_882d495ac381", Type: "ja4",
+		Value: "t13d3012h2_1d37bd780c83_882d495ac381", Type: "tlsfp",
 		Source: "misp", Threat: "c2", Confidence: 95,
 	}})
 	a, alerts := newTestAnalyzer(m, fakeResolver{})

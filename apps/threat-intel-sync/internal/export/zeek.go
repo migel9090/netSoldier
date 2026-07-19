@@ -51,9 +51,10 @@ func mapZeekType(ind ioc.Indicator) string {
 		return "Intel::CERT_HASH"
 	case ioc.TypeJA3:
 		return "Intel::JA3"
-	case ioc.TypeJA4:
-		// first-party type, registered by netsoldier-intel.zeek on the sensor
-		return "Intel::JA4"
+	case ioc.TypeTLSFP:
+		// first-party type (JA4-format TLS client fingerprint), registered by
+		// netsoldier-intel.zeek on the sensor as Intel::TLSFP
+		return "Intel::TLSFP"
 	default:
 		return ""
 	}

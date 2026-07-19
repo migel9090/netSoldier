@@ -58,13 +58,13 @@ func TestSuricataSeverityWithoutIntel(t *testing.T) {
 func TestZeekIntelParseAndNormalize(t *testing.T) {
 	row := json.RawMessage(`{"ts":1789000100,"uid":"CxUAB2kZ1","src_ip":"192.168.1.60","src_port":40000,
 		"dst_ip":"198.51.100.9","dst_port":443,"indicator":"t13d3012h2_1d37bd780c83_882d495ac381",
-		"indicator_type":"Intel::JA4","seen_where":"SSL::IN_JA4","sources":["misp"]}`)
+		"indicator_type":"Intel::TLSFP","seen_where":"SSL::IN_TLSFP","sources":["misp"]}`)
 
 	ev, key, err := ZeekIntel{}.Parse(row)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ev.IndicatorType != "ja4" {
+	if ev.IndicatorType != "tlsfp" {
 		t.Errorf("intel type not normalized: %s", ev.IndicatorType)
 	}
 	if ev.Kind != "intel-hit" || ev.Source != "misp" {
@@ -87,14 +87,14 @@ func TestZeekIntelParseAndNormalize(t *testing.T) {
 func TestToAlertEnrichesIntelHitFromMatcher(t *testing.T) {
 	m := iocmatch.New()
 	m.Add([]iocmatch.IoC{{
-		Value: "t13d3012h2_1d37bd780c83_882d495ac381", Type: "ja4",
+		Value: "t13d3012h2_1d37bd780c83_882d495ac381", Type: "tlsfp",
 		Source: "misp", Threat: "c2 beacon", Confidence: 92,
 	}})
 
 	ev := SensorEvent{
 		Sensor: "zeek", Kind: "intel-hit", Timestamp: time.Unix(1789000100, 0),
 		SrcIP: "192.168.1.60", Indicator: "t13d3012h2_1d37bd780c83_882d495ac381",
-		IndicatorType: "ja4", Source: "zeek-intel",
+		IndicatorType: "tlsfp", Source: "zeek-intel",
 	}
 	a := ToAlert(ev, m)
 	if a.Severity != "critical" || a.Confidence != 92 {

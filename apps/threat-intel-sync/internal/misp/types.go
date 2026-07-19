@@ -6,8 +6,10 @@ import (
 )
 
 // MISP attribute type constants used by the netSoldier detection pipeline.
-// (MISP 2.4/2.5 has no JA4 attribute type yet; JA4 IoCs currently have no
-// MISP source and enter the store only via future feeds.)
+// (MISP 2.4/2.5 has no TLS-client-fingerprint attribute type yet; such IoCs
+// — JA4-format, our TypeTLSFP — currently have no MISP source and enter the
+// store only via future feeds. A feed that labels them "ja4" would be mapped
+// to ioc.TypeTLSFP at ingestion.)
 const (
 	TypeDomain     = "domain"
 	TypeIPDst      = "ip-dst"

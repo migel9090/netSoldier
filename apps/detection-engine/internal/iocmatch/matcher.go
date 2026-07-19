@@ -75,7 +75,7 @@ func (m *Matcher) Add(iocs []IoC) {
 					m.ips[host] = ioc
 				}
 			}
-		case "ja3", "ja4", "md5", "sha256":
+		case "ja3", "tlsfp", "md5", "sha256":
 			key := strings.ToLower(ioc.Value)
 			if old, ok := m.hashes[key]; !ok || ioc.Confidence >= old.Confidence {
 				m.hashes[key] = ioc
@@ -120,7 +120,8 @@ func (m *Matcher) MatchIP(ip string) (IoC, bool) {
 	return IoC{}, false
 }
 
-// MatchHash checks a hash (JA3, JA4, MD5, SHA256) against the IoC list.
+// MatchHash checks a fingerprint/hash (JA3, tls_client_fp, MD5, SHA256)
+// against the IoC list.
 func (m *Matcher) MatchHash(hash string) (IoC, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

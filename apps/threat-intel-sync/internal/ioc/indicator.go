@@ -13,7 +13,7 @@ const (
 	TypeMD5        = "md5"
 	TypeSHA256     = "sha256"
 	TypeJA3        = "ja3"
-	TypeJA4        = "ja4"
+	TypeTLSFP      = "tlsfp" // TLS client fingerprint (JA4-format)
 	TypeCertSHA1   = "cert-sha1"
 	TypeCertSHA256 = "cert-sha256"
 )

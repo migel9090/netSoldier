@@ -1,5 +1,6 @@
 // Package tlsheur flags suspicious TLS clients from passive metadata only
-// (step 110): JA4/JA3 fingerprint IoC matches and JA4/SNI/DNS correlation.
+// (step 110): TLS-client-fingerprint/JA3 IoC matches and fingerprint/SNI/DNS
+// correlation. The fingerprint is JA4-format (tls_client_fp).
 // No decryption is involved — everything derives from the ClientHello
 // metadata Zeek already logged.
 package tlsheur
@@ -79,7 +80,7 @@ func (a *Analyzer) Handle(ev ingest.SensorEvent) {
 	// lags behind the live matcher state.
 	if ev.Indicator != "" {
 		if ioc, ok := a.matcher.MatchHash(ev.Indicator); ok {
-			a.alert(ev, "ja4-ioc", ev.Indicator, ioc.Severity, ioc.Confidence, ioc)
+			a.alert(ev, "tlsfp-ioc", ev.Indicator, ioc.Severity, ioc.Confidence, ioc)
 			return
 		}
 	}
@@ -136,7 +137,7 @@ func (a *Analyzer) alert(ev ingest.SensorEvent, reason, value, severity string, 
 	}
 
 	slog.Info("suspicious tls client", "reason", reason, "client", ev.SrcIP,
-		"dst", ev.DstIP, "sni", ev.SNI, "ja4", ev.Indicator)
+		"dst", ev.DstIP, "sni", ev.SNI, "tls_client_fp", ev.Indicator)
 	a.emit(alert)
 }
 

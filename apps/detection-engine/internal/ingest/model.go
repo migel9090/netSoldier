@@ -29,7 +29,7 @@ type SensorEvent struct {
 	Signature     string // rule message or observation point
 	Category      string
 	Indicator     string // matched IoC value ("" for pure IDS alerts)
-	IndicatorType string // normalized: domain, ip, ja3, ja4, cert-sha1, ...
+	IndicatorType string // normalized: domain, ip, ja3, tlsfp, cert-sha1, ...
 	Severity      string
 	Confidence    int
 	Source        string // feed / ruleset attribution
@@ -52,8 +52,8 @@ func normalizeIntelType(t string) string {
 		return "url"
 	case "JA3":
 		return "ja3"
-	case "JA4":
-		return "ja4"
+	case "TLSFP":
+		return "tlsfp"
 	case "CERT_HASH":
 		return "cert-sha256"
 	case "FILE_HASH":
@@ -164,7 +164,7 @@ func lookup(m *iocmatch.Matcher, iocType, value string) (iocmatch.IoC, bool) {
 		return m.MatchDomain(value)
 	case "ip":
 		return m.MatchIP(value)
-	case "ja3", "ja4", "md5", "sha256":
+	case "ja3", "tlsfp", "md5", "sha256":
 		return m.MatchHash(value)
 	default:
 		return iocmatch.IoC{}, false
