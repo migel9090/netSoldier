@@ -5,7 +5,7 @@
 
 ## What it does
 
-- **Inventories every device** on the home LAN/WiFi (DHCP fingerprinting, mDNS, ARP/OUI, Fingerbank) — resilient to MAC randomization.
+- **Inventories every device** on the home LAN/WiFi (first-party DHCP fingerprinting, mDNS, ARP/OUI) — resilient to MAC randomization.
 - **Shows who → where → what**: per-device DNS, flow records and L7 metadata from a SPAN tap (Suricata, Zeek, ntopng), passive TLS/QUIC client fingerprinting (JA4-format, first-party clean-room) — **metadata only, no MITM**.
 - **Flags malware & anomalies**: IoC feeds (abuse.ch, GreyNoise, Spamhaus → MISP), C2 beaconing (RITA), volumetric anomalies (Isolation Forest), composite confidence scoring.
 - **Quarantines threats** via an out-of-band killswitch (DNS sinkhole → ARP isolation → managed-switch ACL) — threshold-based, **human-in-the-loop**, with allowlist (fail-open), TTL auto-revert and a full audit log.
