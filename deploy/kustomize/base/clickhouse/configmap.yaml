@@ -313,3 +313,21 @@ data:
     -- first-party JA4 (BSD spec) implementation; JA4S/JA4H are gone.
     ALTER TABLE netsoldier.zeek_ssl DROP COLUMN IF EXISTS ja4s;
     ALTER TABLE netsoldier.zeek_http DROP COLUMN IF EXISTS ja4h;
+  013_zeek_intel.sql: |
+    -- Zeek Intel framework hits (step 107): IoC observations on live
+    -- traffic (DOMAIN via SNI/DNS/cert, ADDR, JA3, first-party JA4, ...).
+    CREATE TABLE IF NOT EXISTS netsoldier.zeek_intel (
+        timestamp      DateTime,
+        uid            String,
+        src_ip         String,
+        src_port       UInt16,
+        dst_ip         String,
+        dst_port       UInt16,
+        indicator      String,
+        indicator_type LowCardinality(String),
+        seen_where     LowCardinality(String),
+        matched        Array(String),
+        sources        Array(String)
+    ) ENGINE = MergeTree()
+    ORDER BY (timestamp, indicator)
+    TTL timestamp + INTERVAL 30 DAY;
