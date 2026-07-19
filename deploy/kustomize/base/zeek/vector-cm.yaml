@@ -45,6 +45,14 @@ data:
         fingerprint:
           strategy: device_and_inode
 
+      intel_log:
+        type: file
+        include:
+          - /var/log/zeek/intel.log
+        read_from: beginning
+        fingerprint:
+          strategy: device_and_inode
+
     transforms:
       shape_conn:
         type: remap
@@ -152,6 +160,24 @@ data:
           .request_body_len = to_int(.request_body_len) ?? 0
           .response_body_len = to_int(.response_body_len) ?? 0
 
+      shape_intel:
+        type: remap
+        inputs:
+          - intel_log
+        source: |
+          . = parse_json!(.message)
+          .timestamp = to_int(floor(to_float(.ts) ?? 0.0))
+          .uid = to_string(.uid) ?? ""
+          .src_ip = to_string(."id.orig_h") ?? ""
+          .src_port = to_int(."id.orig_p") ?? 0
+          .dst_ip = to_string(."id.resp_h") ?? ""
+          .dst_port = to_int(."id.resp_p") ?? 0
+          .indicator = to_string(."seen.indicator") ?? ""
+          .indicator_type = to_string(."seen.indicator_type") ?? ""
+          .seen_where = to_string(."seen.where") ?? ""
+          .matched = array(.matched) ?? []
+          .sources = array(.sources) ?? []
+
     sinks:
       clickhouse_conn:
         type: clickhouse
@@ -204,6 +230,17 @@ data:
         endpoint: http://clickhouse.netsoldier.svc:8123
         database: netsoldier
         table: zeek_http
+        skip_unknown_fields: true
+        encoding:
+          timestamp_format: unix
+
+      clickhouse_intel:
+        type: clickhouse
+        inputs:
+          - shape_intel
+        endpoint: http://clickhouse.netsoldier.svc:8123
+        database: netsoldier
+        table: zeek_intel
         skip_unknown_fields: true
         encoding:
           timestamp_format: unix

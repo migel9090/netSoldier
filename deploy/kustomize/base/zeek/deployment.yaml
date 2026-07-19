@@ -20,6 +20,36 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
+        # seed /var/intel/intel.dat before zeek starts so the Intel
+        # framework never sees a missing file; on failure fall back to
+        # a header-only file (the sidecar retries every 15 min).
+        - name: intel-init
+          image: curlimages/curl:8.11.1
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              curl -fsS --max-time 30 -o /var/intel/intel.dat \
+                "http://threat-intel-sync.netsoldier.svc:8083/export/zeek/intel.dat" \
+              || printf '#fields\tindicator\tindicator_type\tmeta.source\tmeta.desc\tmeta.url\n' \
+                   > /var/intel/intel.dat
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: intel
+              mountPath: /var/intel
+          resources:
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            requests:
+              cpu: 25m
+              memory: 32Mi
         # the zeek image ships no setcap and the binary has no file
         # capabilities, so non-root capture would fail with EPERM;
         # copy the binary and write the security.capability xattr
@@ -92,10 +122,45 @@ spec:
             - name: site
               mountPath: /etc/zeek-site
               readOnly: true
+            - name: intel
+              mountPath: /var/intel
+              readOnly: true
             - name: log
               mountPath: /var/log/zeek
             - name: tmp
               mountPath: /tmp
+        # refresh the Intel indicator file; atomic rename triggers the
+        # input framework's re-read on the zeek side
+        - name: intel-sync
+          image: curlimages/curl:8.11.1
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                sleep 900
+                if curl -fsS --max-time 30 -o /var/intel/intel.dat.tmp \
+                     "http://threat-intel-sync.netsoldier.svc:8083/export/zeek/intel.dat"; then
+                  mv /var/intel/intel.dat.tmp /var/intel/intel.dat
+                fi
+              done
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: intel
+              mountPath: /var/intel
+          resources:
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
         - name: vector
           image: timberio/vector:0.43.1-distroless-libc
           args:
@@ -131,6 +196,9 @@ spec:
           configMap:
             name: zeek-config
             defaultMode: 493
+        - name: intel
+          emptyDir:
+            sizeLimit: 200Mi
         - name: vector-config
           configMap:
             name: zeek-vector-config

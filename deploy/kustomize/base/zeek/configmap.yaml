@@ -13,6 +13,12 @@ data:
     @load packages
     @load netsoldier-ja4
 
+    # Threat-intel matching (Intel framework, step 107): the intel-sync
+    # sidecar refreshes /var/intel/intel.dat from threat-intel-sync's
+    # /export/zeek/intel.dat; hits land in intel.log -> ClickHouse.
+    @load netsoldier-intel
+    redef Intel::read_files += { "/var/intel/intel.dat" };
+
     redef LogAscii::use_json = T;
 
     # mirrored SPAN traffic carries bad checksums from TX offloading

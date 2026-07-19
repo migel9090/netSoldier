@@ -19,6 +19,14 @@ spec:
       ports:
         - port: 8123
           protocol: TCP
+    # intel-init/intel-sync fetch the Intel indicator file
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: threat-intel-sync
+      ports:
+        - port: 8083
+          protocol: TCP
     - to:
         - namespaceSelector:
             matchLabels:
