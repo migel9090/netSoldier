@@ -63,9 +63,9 @@ type Alert struct {
 }
 
 type Engine struct {
-	adguard  *adguard.Client
-	matcher  *iocmatch.Matcher
-	interval time.Duration
+	adguard     *adguard.Client
+	matcher     *iocmatch.Matcher
+	interval    time.Duration
 	lastSeen    time.Time
 	OnAlert     func(Alert)
 	OnDNSAnswer func(ip, domain string, ttl int)
@@ -172,6 +172,24 @@ func (e *Engine) emitAlert(entry adguard.QueryLogEntry, domain string, ioc iocma
 		"id", id, "domain", domain, "client", entry.Client,
 		"matched_ioc", ioc.Value, "severity", alert.Severity,
 		"mitre", ioc.MitreID,
+	)
+}
+
+// Ingest routes an externally-built alert (unified sensor events from
+// Suricata/Zeek) through the same path as AdGuard-sourced detections:
+// ring buffer, metrics, and the OnAlert fan-out.
+func (e *Engine) Ingest(a Alert) {
+	if a.ID == "" {
+		a.ID = fmt.Sprintf("DET-%d", alertCounter.Add(1))
+	}
+	if a.Severity == "" {
+		a.Severity = "medium"
+	}
+	e.addAlert(a)
+	alertsGenerated.WithLabelValues(a.Severity).Inc()
+	slog.Warn("sensor threat detected",
+		"id", a.ID, "matched_ioc", a.MatchedIoC, "client", a.ClientIP,
+		"severity", a.Severity, "source", a.Source,
 	)
 }
 

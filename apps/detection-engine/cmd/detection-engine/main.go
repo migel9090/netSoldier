@@ -14,6 +14,7 @@ import (
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/capture"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/correlator"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/ingest"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/iocmatch"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/tracing"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/webhook"
@@ -82,6 +83,20 @@ func main() {
 	}
 
 	go engine.Run(ctx)
+
+	// Unified sensor ingest (step 109): consume Suricata EVE alerts and
+	// Zeek Intel hits landed in ClickHouse and route them through the
+	// same alert path as DNS detections.
+	if chURL := os.Getenv("CLICKHOUSE_URL"); chURL != "" {
+		chc := ingest.NewCHClient(chURL, envOr("CLICKHOUSE_DATABASE", "netsoldier"))
+		sensorInterval := parseDuration(envOr("SENSOR_POLL_INTERVAL", "30s"), 30*time.Second)
+		emit := func(ev ingest.SensorEvent) {
+			engine.Ingest(ingest.ToAlert(ev, matcher))
+		}
+		go ingest.NewPoller(chc, ingest.NewSuricataAlerts(), sensorInterval, emit).Run(ctx)
+		go ingest.NewPoller(chc, ingest.NewZeekIntel(), sensorInterval, emit).Run(ctx)
+		slog.Info("unified sensor ingest enabled", "interval", sensorInterval)
+	}
 
 	if spanIface := os.Getenv("SPAN_INTERFACE"); spanIface != "" {
 		flowCh := make(chan capture.FlowRecord, 256)
