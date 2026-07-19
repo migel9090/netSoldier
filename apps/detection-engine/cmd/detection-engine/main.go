@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/ingest"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/iocmatch"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/tlsheur"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/tracing"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/webhook"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -95,6 +97,14 @@ func main() {
 		}
 		go ingest.NewPoller(chc, ingest.NewSuricataAlerts(), sensorInterval, emit).Run(ctx)
 		go ingest.NewPoller(chc, ingest.NewZeekIntel(), sensorInterval, emit).Run(ctx)
+
+		// TLS client heuristics (step 110): JA4/JA3 IoC matches plus
+		// JA4/SNI/DNS correlation, decryption-free.
+		localNets := strings.Split(envOr("LOCAL_NETWORKS",
+			strings.Join(tlsheur.DefaultLocalCIDRs, ",")), ",")
+		tlsAnalyzer := tlsheur.New(matcher, dnsCache, localNets, engine.Ingest)
+		go ingest.NewPoller(chc, ingest.NewZeekSSL(), sensorInterval, tlsAnalyzer.Handle).Run(ctx)
+
 		slog.Info("unified sensor ingest enabled", "interval", sensorInterval)
 	}
 

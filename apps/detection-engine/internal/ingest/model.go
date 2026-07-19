@@ -34,6 +34,10 @@ type SensorEvent struct {
 	Confidence    int
 	Source        string // feed / ruleset attribution
 	Threat        string
+
+	// TLS client observations (kind "tls-client").
+	SNI string
+	JA3 string
 }
 
 // normalizeIntelType maps Zeek Intel framework type names to the
