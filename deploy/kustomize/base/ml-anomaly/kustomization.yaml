@@ -10,5 +10,7 @@ commonLabels:
 resources:
   - serviceaccount.yaml
   - deployment.yaml
+  - service.yaml
+  - servicemonitor.yaml
   - pdb.yaml
   - models-pvc.yaml

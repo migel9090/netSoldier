@@ -87,6 +87,61 @@ spec:
             requests:
               cpu: 100m
               memory: 192Mi
+        - name: scoring-api
+          image: ghcr.io/migel9090/ml-anomaly:main
+          # step 115: model serving API — scores windows on demand and
+          # exposes model metadata + Prometheus metrics.
+          command:
+            - "uvicorn"
+            - "--factory"
+            - "ml_anomaly.api:create_app"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8090"
+          ports:
+            - name: http
+              containerPort: 8090
+          env:
+            - name: MODEL_DIR
+              value: "/models"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "otel-collector.observability.svc:4317"
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 15
+          readinessProbe:
+            # readyz is 503 until the first trained model exists; the pod
+            # stays out of the Service instead of serving errors.
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: 500m
+              memory: 384Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
       volumes:
         - name: models
           persistentVolumeClaim:

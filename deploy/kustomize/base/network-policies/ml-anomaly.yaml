@@ -15,7 +15,23 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: observability
+    # scoring API consumers (composite-confidence, step 116)
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: detection-engine
+      ports:
+        - port: 8090
+          protocol: TCP
   egress:
+    # OTel traces from the scoring API (step 115)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - port: 4317
+          protocol: TCP
     # read RITA threat_mixtape + write ml_beacons over the HTTP interface
     - to:
         - podSelector:
