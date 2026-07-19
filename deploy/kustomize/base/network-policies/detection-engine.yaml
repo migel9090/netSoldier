@@ -42,6 +42,31 @@ spec:
       ports:
         - port: 4317
           protocol: TCP
+    # correlator writes + unified sensor ingest reads (step 109)
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: clickhouse
+              app.kubernetes.io/component: server
+      ports:
+        - port: 8123
+          protocol: TCP
+    # device enrichment for the correlator
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: device-inventory
+      ports:
+        - port: 8081
+          protocol: TCP
+    # IoC feed sync (iocmatch.SyncLoop)
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: threat-intel-sync
+      ports:
+        - port: 8083
+          protocol: TCP
     - to:
         - namespaceSelector:
             matchLabels:

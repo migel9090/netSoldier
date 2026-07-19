@@ -4,6 +4,7 @@ kind: Kustomization
 resources:
   - default-deny.yaml
   - detection-engine.yaml
+  - device-inventory.yaml
   - killswitch-controller.yaml
   - threat-intel-sync.yaml
   - web-ui.yaml

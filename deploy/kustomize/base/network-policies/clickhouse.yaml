@@ -15,6 +15,12 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: killswitch-controller
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: detection-engine
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: device-inventory
       ports:
         - port: 8123
           protocol: TCP
