@@ -7,10 +7,11 @@ data:
     # netSoldier site policy: JSON logs for the Vector -> ClickHouse
     # pipeline, bounded disk via rotation + delete.
 
-    # Passive TLS/HTTP fingerprinting (salesforce/ja3 + FoxIO-LLC/ja4),
-    # baked into the image via zkg. Adds ja3/ja3s/ja4/ja4s to ssl.log
-    # and ja4h to http.log. See /NOTICE for JA4+ (FoxIO License 1.1).
+    # Passive TLS fingerprinting: salesforce/ja3 via zkg (@load packages)
+    # plus the first-party JA4 implementation baked into the image site
+    # dir. Adds ja3/ja3s/ja4 to ssl.log. See /NOTICE and ADR-0003.
     @load packages
+    @load netsoldier-ja4
 
     redef LogAscii::use_json = T;
 

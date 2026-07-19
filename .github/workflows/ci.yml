@@ -278,10 +278,17 @@ jobs:
           context: deploy/docker/zeek
           platforms: linux/amd64
           push: ${{ github.event_name == 'push' }}
+          load: ${{ github.event_name != 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=zeek
           cache-to: type=gha,scope=zeek,mode=max
+
+      # Golden test for the first-party JA4 implementation: replay pinned
+      # pcaps through the freshly built image and diff against fingerprints
+      # cross-validated with Wireshark. Runs before the image is signed.
+      - name: Test JA4 fingerprinting
+        run: deploy/docker/zeek/test/run.sh "$(echo "${{ steps.meta.outputs.tags }}" | head -n1)"
 
       - name: Sign image
         if: github.event_name == 'push'

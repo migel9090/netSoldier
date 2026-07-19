@@ -109,11 +109,10 @@ data:
           .established = if (to_bool(.established) ?? false) { 1 } else { 0 }
           .subject = to_string(.subject) ?? ""
           .issuer = to_string(.issuer) ?? ""
-          # JA3/JA3S (salesforce/ja3) and JA4/JA4S (FoxIO ja4) added to ssl.log
+          # JA3/JA3S (salesforce/ja3) and the first-party JA4 on ssl.log
           .ja3 = to_string(.ja3) ?? ""
           .ja3s = to_string(.ja3s) ?? ""
           .ja4 = to_string(.ja4) ?? ""
-          .ja4s = to_string(.ja4s) ?? ""
 
       shape_x509:
         type: remap
@@ -152,8 +151,6 @@ data:
           .status_code = to_int(.status_code) ?? 0
           .request_body_len = to_int(.request_body_len) ?? 0
           .response_body_len = to_int(.response_body_len) ?? 0
-          # JA4H (FoxIO ja4) added to http.log
-          .ja4h = to_string(.ja4h) ?? ""
 
     sinks:
       clickhouse_conn:

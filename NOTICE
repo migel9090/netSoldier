@@ -7,34 +7,24 @@ retain their own licenses, listed below. These licenses are NOT changed
 by inclusion here; recipients must comply with each separately.
 
 ================================================================================
-Zeek TLS/HTTP fingerprinting packages (baked into the ghcr.io/migel9090/zeek
-image, loaded by Zeek at runtime as interpreted scripts)
+Zeek TLS fingerprinting (baked into the ghcr.io/migel9090/zeek image,
+loaded by Zeek at runtime as interpreted scripts)
 ================================================================================
 
 salesforce/ja3  — https://github.com/salesforce/ja3
     Produces JA3 / JA3S fingerprints on ssl.log and JA3 Intel entries.
     License: BSD 3-Clause. Copyright (c) Salesforce.com, Inc.
 
-FoxIO-LLC/ja4   — https://github.com/FoxIO-LLC/ja4  (v0.18.8)
-    Produces JA4+ network fingerprints. Copyright (c) 2023 FoxIO.
+netsoldier-ja4.zeek — first-party (deploy/docker/zeek/scripts/)
+    Produces JA4 TLS client fingerprints on ssl.log. A clean-room
+    implementation written from the published JA4 specification, which
+    FoxIO, LLC releases under BSD 3-Clause; it contains no FoxIO code.
+    "JA4" is a trademark of FoxIO, LLC — the name is used solely to
+    identify the fingerprint format. The FoxIO-licensed, patent-pending
+    JA4+ methods (JA4S, JA4H, JA4X, JA4L, JA4SSH, JA4T, ...) are NOT
+    implemented, so no FoxIO License 1.1 obligations — including its
+    restriction on monetization — apply to netSoldier.
 
-    DUAL-LICENSED, per component:
-
-      * JA4 (TLS client fingerprint, on ssl.log)
-            BSD 3-Clause (see the project's LICENSE-JA4). No usage
-            restriction; equivalent to JA3.
-
-      * JA4+ — JA4S (ssl.log), JA4H (http.log), and all other JA4*
-        methods (JA4X, JA4L, JA4SSH, JA4T, JA4D, ...)
-            FoxIO License 1.1 (see the project's LICENSE).
-            Permissive for internal and defensive/academic use, but
-            NOT for monetization: selling JA4+ fingerprinting as part
-            of a product or service requires a separate OEM license
-            from FoxIO (https://www.fox-io.com/). All JA4+ methods are
-            patent pending.
-
-netSoldier loads these packages inside the Zeek process (Zeek itself is
-BSD-licensed); the GPL-3.0 Go services consume only the resulting log
-records via ClickHouse — an arm's-length separation per the FoxIO
-Licensing FAQ. See docs/adr/0002-tls-fingerprinting.md for the full
-analysis and the obligations that apply if netSoldier is monetized.
+The JA3 package runs inside the BSD-licensed Zeek process; the GPL-3.0
+Go services consume only the resulting log records via ClickHouse. See
+docs/adr/0003-first-party-ja4.md for the licensing analysis.

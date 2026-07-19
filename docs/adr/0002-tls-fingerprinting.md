@@ -1,7 +1,9 @@
 # ADR-0002: Passive TLS/HTTP fingerprinting with JA3 + JA4+
 
 - **Date:** 2026-06-12
-- **Status:** Accepted
+- **Status:** Accepted — amended by ADR-0003 (2026-07-19): the FoxIO-LLC/ja4
+  package was replaced by a first-party JA4 implementation; JA4S/JA4H were
+  dropped to remove the FoxIO License 1.1 monetization restriction.
 - **Deciders:** magiccactus42 (project owner), migel9090 (DevOps)
 
 ## Context and problem
