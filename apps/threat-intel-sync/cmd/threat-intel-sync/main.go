@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -107,32 +108,46 @@ func configureSources() []source {
 		slog.Info("source configured", "source", "misp", "url", mispURL)
 	}
 
-	tfClient := abusech.NewThreatFoxClient()
-	tfDays := parseIntOr(envOr("THREATFOX_DAYS", "7"), 7)
-	sources = append(sources, source{
-		name: "threatfox",
-		fetch: func(ctx context.Context) ([]ioc.Indicator, error) {
-			return tfClient.Fetch(ctx, tfDays)
-		},
-	})
+	// abuse.ch feeds (ThreatFox / URLhaus / Feodo) dropped their CC0
+	// dedication in 2025; the current terms of use restrict free access to
+	// non-commercial use (commercial use needs a paid Spamhaus subscription).
+	// They are ON by default for the project's primary home/non-commercial
+	// use, and disabled when COMMERCIAL_MODE=true so a commercial deployment
+	// ships clean. See COMPLIANCE.md.
+	if commercialModeEnabled() {
+		slog.Info("COMMERCIAL_MODE on: abuse.ch feeds (ThreatFox/URLhaus/Feodo) disabled (non-commercial terms)")
+	} else {
+		slog.Warn("abuse.ch feeds enabled (ThreatFox/URLhaus/Feodo): non-commercial use only — set COMMERCIAL_MODE=true to disable for commercial deployments")
 
-	uhClient := abusech.NewURLhausClient()
-	uhLimit := parseIntOr(envOr("URLHAUS_LIMIT", "1000"), 1000)
-	sources = append(sources, source{
-		name: "urlhaus",
-		fetch: func(ctx context.Context) ([]ioc.Indicator, error) {
-			return uhClient.Fetch(ctx, uhLimit)
-		},
-	})
+		tfClient := abusech.NewThreatFoxClient()
+		tfDays := parseIntOr(envOr("THREATFOX_DAYS", "7"), 7)
+		sources = append(sources, source{
+			name: "threatfox",
+			fetch: func(ctx context.Context) ([]ioc.Indicator, error) {
+				return tfClient.Fetch(ctx, tfDays)
+			},
+		})
 
-	feClient := abusech.NewFeodoClient()
-	sources = append(sources, source{
-		name: "feodo",
-		fetch: func(ctx context.Context) ([]ioc.Indicator, error) {
-			return feClient.Fetch(ctx)
-		},
-	})
+		uhClient := abusech.NewURLhausClient()
+		uhLimit := parseIntOr(envOr("URLHAUS_LIMIT", "1000"), 1000)
+		sources = append(sources, source{
+			name: "urlhaus",
+			fetch: func(ctx context.Context) ([]ioc.Indicator, error) {
+				return uhClient.Fetch(ctx, uhLimit)
+			},
+		})
 
+		feClient := abusech.NewFeodoClient()
+		sources = append(sources, source{
+			name: "feodo",
+			fetch: func(ctx context.Context) ([]ioc.Indicator, error) {
+				return feClient.Fetch(ctx)
+			},
+		})
+	}
+
+	// Spamhaus DROP is free for commercial use too (attribution required,
+	// see COMPLIANCE.md), so it stays enabled regardless of COMMERCIAL_MODE.
 	spClient := spamhaus.NewClient()
 	sources = append(sources, source{
 		name: "spamhaus",
@@ -231,6 +246,17 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// commercialModeEnabled reports whether the deployment must exclude data
+// sources whose terms forbid commercial use (see COMPLIANCE.md).
+func commercialModeEnabled() bool {
+	switch strings.ToLower(os.Getenv("COMMERCIAL_MODE")) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseDuration(s string, fallback time.Duration) time.Duration {
