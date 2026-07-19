@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-anomaly
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ml-anomaly
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ml-anomaly
+    spec:
+      serviceAccountName: ml-anomaly
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: beacon-sync
+          image: ghcr.io/migel9090/ml-anomaly:main
+          # step 112: RITA beacon consumer. The FastAPI scoring server
+          # (step 115) will be a second container/command on this image.
+          command: ["python", "-m", "ml_anomaly.sync"]
+          env:
+            - name: CLICKHOUSE_URL
+              value: "http://clickhouse.netsoldier.svc:8123"
+            - name: CLICKHOUSE_DATABASE
+              value: "netsoldier"
+            - name: RITA_DATABASE
+              value: "netsoldier_rita"
+            - name: BEACON_SYNC_INTERVAL_SECONDS
+              value: "300"
+            - name: BEACON_SCORE_THRESHOLD
+              value: "0.7"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: 250m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 96Mi

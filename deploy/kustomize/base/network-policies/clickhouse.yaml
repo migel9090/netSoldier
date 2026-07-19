@@ -64,6 +64,13 @@ spec:
         - port: 9000
           protocol: TCP
     - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ml-anomaly
+      ports:
+        - port: 8123
+          protocol: TCP
+    - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: observability

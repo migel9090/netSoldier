@@ -11,6 +11,7 @@ resources:
   - ../../base/suricata
   - ../../base/zeek
   - ../../base/rita
+  - ../../base/ml-anomaly
 
 commonLabels:
   app.kubernetes.io/instance: proxmox-soc
