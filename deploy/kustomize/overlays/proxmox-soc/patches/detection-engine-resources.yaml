@@ -44,6 +44,11 @@ spec:
               value: "5m"
             - name: WEBHOOK_URL
               value: "http://killswitch-controller:8084/evaluate"
+            # Step 116: window over which per-client signals corroborate
+            # into a composite. C2 beacon + its volumetric burst can be
+            # minutes apart, so keep it generous but bounded.
+            - name: COMPOSITE_WINDOW
+              value: "15m"
           securityContext:
             runAsNonRoot: true
             readOnlyRootFilesystem: true

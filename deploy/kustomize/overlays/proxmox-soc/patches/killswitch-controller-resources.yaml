@@ -7,6 +7,13 @@ spec:
     spec:
       containers:
         - name: killswitch-controller
+          # Step 117: require >=2 corroborating signal classes for auto-block.
+          # A single known-bad IoC feed match (no composite metadata) still
+          # auto-blocks instantly; lone heuristics (beacon/volumetric/TLS)
+          # go to human approval unless a composite corroborates them.
+          env:
+            - name: POLICY_AUTO_MIN_SIGNALS
+              value: "2"
           securityContext:
             allowPrivilegeEscalation: false
           resources:

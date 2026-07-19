@@ -178,9 +178,9 @@ func TestClickHouseSchema(t *testing.T) {
 
 	t.Run("AllTablesCreated", func(t *testing.T) {
 		expected := []string{
-			"alerts", "audit_log", "connections", "device_events",
-			"devices", "dns_queries", "events", "ml_anomalies",
-			"ml_beacons", "network_flows", "suricata_alerts",
+			"alerts", "audit_log", "connections", "detection_feedback",
+			"device_events", "devices", "dns_queries", "events",
+			"ml_anomalies", "ml_beacons", "network_flows", "suricata_alerts",
 			"suricata_dns", "suricata_tls", "zeek_conn", "zeek_dns",
 			"zeek_http", "zeek_intel", "zeek_ssl", "zeek_x509",
 		}
