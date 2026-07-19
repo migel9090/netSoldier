@@ -15,7 +15,7 @@ import (
 	ch "github.com/migel9090/netSoldier/apps/device-inventory/internal/clickhouse"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/dhcp"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/fingerbank"
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/dhcpfp"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/lldp"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/mdns"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/oui"
@@ -88,7 +88,7 @@ func main() {
 				dhcpPacketsTotal.Inc()
 				vendor := oui.Lookup(info.MAC)
 				var osName, devType string
-				if p := fingerbank.Lookup(info.Fingerprint, info.VendorClass); p != nil {
+				if p := dhcpfp.Lookup(info.Fingerprint, info.VendorClass); p != nil {
 					osName = p.OS
 					devType = p.DeviceType
 				}

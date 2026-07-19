@@ -1,4 +1,13 @@
-package fingerbank
+// Package dhcpfp identifies device OS/type from passive DHCP metadata
+// (option 55 parameter request list + option 60 vendor class) using a
+// first-party lookup table.
+//
+// This is NOT Fingerbank: it bundles no Fingerbank data and calls no
+// Fingerbank API. The Fingerbank device DB is proprietary (non-commercial
+// redistribution), so it is deliberately not used — this table is our own,
+// hand-curated from common DHCP fingerprints, and is fully open and
+// monetization-safe. See COMPLIANCE.md.
+package dhcpfp
 
 import "strings"
 
