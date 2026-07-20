@@ -2,27 +2,39 @@
 
 ## Data retention summary
 
-| Table | TTL | Engine | Notes |
-|-------|-----|--------|-------|
-| `devices` | none | ReplacingMergeTree | Persistent device registry |
-| `device_events` | 30 days | MergeTree | Auto-pruned |
-| `network_flows` | 30 days | MergeTree | Auto-pruned |
-| `dns_queries` | 30 days | MergeTree | Auto-pruned |
-| `connections` | 30 days | MergeTree | Auto-pruned |
-| `alerts` | 90 days | ReplacingMergeTree | Auto-pruned |
-| `events` | 90 days | MergeTree | Auto-pruned |
-| `audit_log` | 180 days | MergeTree | Auto-pruned; do not truncate |
-| `suricata_alerts` | 90 days | MergeTree | Suricata IDS alerts (EVE) |
-| `suricata_dns` | 30 days | MergeTree | Suricata DNS events |
-| `suricata_tls` | 30 days | MergeTree | Suricata TLS handshakes (JA3) |
-| `zeek_conn` | 30 days | MergeTree | Zeek connection log |
-| `zeek_dns` | 30 days | MergeTree | Zeek DNS log |
-| `zeek_ssl` | 30 days | MergeTree | Zeek TLS/SSL log |
-| `zeek_x509` | 30 days | MergeTree | Zeek certificate log |
-| `zeek_http` | 30 days | MergeTree | Zeek HTTP log |
+Since step 119 the append-only time-series tables are tiered (storage
+policy `tiered`): parts stay on the local hot disk for the "Hot" window,
+then move to the S3 `cold` volume (in-cluster MinIO, bucket
+`netsoldier-cold`, prefix `native/`), and are deleted at the "Delete"
+horizon. Queries read both tiers transparently.
 
-ClickHouse enforces TTL automatically during merges. No manual cleanup is
-needed under normal operation.
+| Table | Hot (local) | Delete | Engine | Notes |
+|-------|------------|--------|--------|-------|
+| `devices` | forever | never | ReplacingMergeTree | Persistent device registry; not tiered |
+| `device_events` | 30 days | 365 days | MergeTree | Tiered |
+| `network_flows` | 30 days | 365 days | MergeTree | Tiered |
+| `dns_queries` | 30 days | 365 days | MergeTree | Tiered |
+| `connections` | 30 days | 365 days | MergeTree | Tiered |
+| `alerts` | 90 days | 365 days | ReplacingMergeTree | Tiered |
+| `events` | 90 days | 365 days | MergeTree | Tiered |
+| `audit_log` | 180 days | 730 days | MergeTree | Tiered; do not truncate |
+| `suricata_alerts` | 90 days | 365 days | MergeTree | Tiered; Suricata IDS alerts (EVE) |
+| `suricata_dns` | 30 days | 365 days | MergeTree | Tiered |
+| `suricata_tls` | 30 days | 365 days | MergeTree | Tiered; TLS handshakes (JA3) |
+| `zeek_conn` | 30 days | 365 days | MergeTree | Tiered |
+| `zeek_dns` | 30 days | 365 days | MergeTree | Tiered |
+| `zeek_ssl` | 30 days | 365 days | MergeTree | Tiered |
+| `zeek_x509` | 30 days | 365 days | MergeTree | Tiered |
+| `zeek_http` | 30 days | 365 days | MergeTree | Tiered |
+| `zeek_intel` | 30 days | 365 days | MergeTree | Tiered; Intel framework hits |
+| `ml_beacons` | 30 days | 30 days | ReplacingMergeTree | State table, not tiered (Parquet export only) |
+| `ml_anomalies` | 30 days | 30 days | ReplacingMergeTree | State table, not tiered (Parquet export only) |
+| `detection_feedback` | 365 days | 365 days | ReplacingMergeTree | State table, not tiered |
+
+ClickHouse enforces TTL automatically during merges and background moves.
+No manual cleanup is needed under normal operation. Inserts never touch
+S3 (`perform_ttl_move_on_insert=false`): if MinIO is down, ingest
+continues hot-only and moves catch up later.
 
 ---
 
@@ -229,19 +241,55 @@ shred -u secrets-decrypted.json
 
 ---
 
-## DM-9: Cold-export verification
+## DM-9: Cold tier verification
 
-The cold-export CronJob runs daily at 02:00 UTC and archives yesterday's data
-to S3 in Parquet format.
+There are two cold paths (step 119), both landing in the MinIO bucket
+`netsoldier-cold` (namespace `storage`):
+
+1. **Native tiering** (`native/` prefix): the `tiered` storage policy moves
+   parts older than the hot window to the S3 disk. Data stays queryable
+   through the normal tables.
+2. **Parquet archive** (`cold/` prefix): the cold-export CronJob runs daily
+   at 02:00 UTC and writes yesterday's rows as open-format Parquet — this
+   copy survives a total ClickHouse loss.
 
 ```bash
-# Check recent job history
+# Native tier: rows per disk (expect old parts on s3_cold)
+kubectl exec -n netsoldier clickhouse-0 -- clickhouse-client --query \
+  "SELECT table, disk_name, sum(rows) AS rows
+   FROM system.parts
+   WHERE database = 'netsoldier' AND active
+   GROUP BY table, disk_name
+   ORDER BY table FORMAT PrettyCompact"
+
+# Failed background moves surface here (e.g. MinIO down / missing creds)
+kubectl logs -n netsoldier clickhouse-0 | grep -i "MergeTreePartsMover\|s3_cold" | tail
+
+# Historical query smoke test (reads from the cold volume once data ages out)
+kubectl exec -n netsoldier clickhouse-0 -- clickhouse-client --query \
+  "SELECT count() FROM netsoldier.network_flows
+   WHERE timestamp < now() - INTERVAL 30 DAY"
+
+# Parquet archive: check recent job history
 kubectl get jobs -n netsoldier -l app.kubernetes.io/component=cold-export \
   --sort-by=.metadata.creationTimestamp
 
 # Verify yesterday's export exists
 YESTERDAY=$(date -d yesterday +%Y-%m-%d)
 mc ls minio/netsoldier-cold/cold/network_flows/year=${YESTERDAY:0:4}/month=${YESTERDAY:5:2}/day=${YESTERDAY:8:2}/
+
+# Query the Parquet archive directly (works even without ClickHouse state)
+kubectl exec -n netsoldier clickhouse-0 -- clickhouse-client --query \
+  "SELECT count() FROM s3('http://minio.storage.svc:9000/netsoldier-cold/cold/network_flows/year=*/month=*/day=*/network_flows.parquet',
+   '<S3_ACCESS_KEY>', '<S3_SECRET_KEY>', 'Parquet')"
+```
+
+**Applying migration 018 to an existing instance:** the init ConfigMap only
+runs on first boot. On an already-initialized server, apply it manually:
+
+```bash
+kubectl exec -n netsoldier clickhouse-0 -- clickhouse-client \
+  --multiquery < deploy/clickhouse/migrations/018_cold_tier.sql
 ```
 
 ---

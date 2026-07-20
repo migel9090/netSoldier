@@ -24,7 +24,11 @@ data:
     MONTH=$(date -d yesterday +%m)
     DAY=$(date -d yesterday +%d)
 
-    TABLES="network_flows dns_queries connections device_events suricata_alerts suricata_dns suricata_tls zeek_conn zeek_dns zeek_ssl zeek_x509 zeek_http"
+    # All time-series tables (hot tier is 30-90d per table TTL; cold tier
+    # keeps Parquet in object storage indefinitely). Includes the Phase-2
+    # analytics tables (step 119): Suricata/Zeek sensors, RITA beacons,
+    # Isolation-Forest anomalies, Zeek Intel hits, alerts and FP feedback.
+    TABLES="network_flows dns_queries connections device_events alerts suricata_alerts suricata_dns suricata_tls zeek_conn zeek_dns zeek_ssl zeek_x509 zeek_http zeek_intel ml_beacons ml_anomalies detection_feedback"
 
     for TABLE in $TABLES; do
       DEST="${S3_ENDPOINT}/${S3_BUCKET}/cold/${TABLE}/year=${YEAR}/month=${MONTH}/day=${DAY}/${TABLE}.parquet"

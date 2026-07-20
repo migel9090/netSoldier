@@ -31,6 +31,16 @@ spec:
       ports:
         - port: 443
           protocol: TCP
+    # In-cluster MinIO (step 119): the export target is
+    # http://minio.storage.svc:9000, which the external-HTTPS rule above
+    # does not cover.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: storage
+      ports:
+        - port: 9000
+          protocol: TCP
     - to:
         - namespaceSelector:
             matchLabels:

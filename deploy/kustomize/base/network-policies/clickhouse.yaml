@@ -89,3 +89,12 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
+    # MinIO cold tier: background TTL moves and historical reads from the
+    # s3_cold disk (step 119).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: storage
+      ports:
+        - port: 9000
+          protocol: TCP
