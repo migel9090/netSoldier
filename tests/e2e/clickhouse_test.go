@@ -21,17 +21,37 @@ import (
 )
 
 func startClickHouse(t *testing.T) string {
+	return startClickHouseContainer(t, nil)
+}
+
+// startClickHouseContainer starts clickhouse-server with the cold-tier
+// storage policy mounted: migration 018 requires the `tiered` policy to
+// exist. customize lets the cold-tier test attach the container to a Docker
+// network with a live MinIO; without it the s3_cold disk points at an
+// unreachable endpoint, which skip_access_check tolerates — parts simply
+// stay on the hot volume.
+func startClickHouseContainer(t *testing.T, customize func(*testcontainers.ContainerRequest)) string {
 	t.Helper()
 	ctx := context.Background()
 
+	req := testcontainers.ContainerRequest{
+		Image:        "clickhouse/clickhouse-server:24.8",
+		ExposedPorts: []string{"8123/tcp"},
+		Env:          map[string]string{"CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT": "1"},
+		Files: []testcontainers.ContainerFile{{
+			HostFilePath:      writeStorageXML(t),
+			ContainerFilePath: "/etc/clickhouse-server/config.d/storage.xml",
+			FileMode:          0o644,
+		}},
+		WaitingFor: wait.ForHTTP("/ping").WithPort("8123/tcp"),
+	}
+	if customize != nil {
+		customize(&req)
+	}
+
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        "clickhouse/clickhouse-server:24.8",
-			ExposedPorts: []string{"8123/tcp"},
-			Env:          map[string]string{"CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT": "1"},
-			WaitingFor:   wait.ForHTTP("/ping").WithPort("8123/tcp"),
-		},
-		Started: true,
+		ContainerRequest: req,
+		Started:          true,
 	})
 	if err != nil {
 		t.Fatalf("start clickhouse container: %v", err)
