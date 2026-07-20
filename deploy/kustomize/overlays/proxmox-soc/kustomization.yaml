@@ -4,6 +4,7 @@ kind: Kustomization
 resources:
   - ../../base
   - ../../base/clickhouse
+  - ../../base/minio
   - ../../base/misp
   - ../../base/killswitch-controller
   - ../../base/threat-intel-sync

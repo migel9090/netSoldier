@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: storage
+
+commonLabels:
+  app.kubernetes.io/name: minio
+  app.kubernetes.io/part-of: netsoldier
+
+resources:
+  - namespace.yaml
+  - statefulset.yaml
+  - service.yaml
+  - bucket-init-job.yaml
+  - network-policy.yaml

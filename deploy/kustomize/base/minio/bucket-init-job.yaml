@@ -1,0 +1,62 @@
+# One-shot bucket bootstrap: creates the cold-tier and backup buckets after
+# MinIO comes up. Idempotent (--ignore-existing), so re-applying the Job on a
+# fresh sync is safe. ArgoCD replaces the immutable Job on spec change.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-bucket-init
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: bucket-init
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mc
+          image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              for i in $(seq 1 30); do
+                if mc alias set local http://minio.storage.svc:9000 \
+                    "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}"; then
+                  break
+                fi
+                echo "MinIO not ready yet (attempt ${i}/30)"; sleep 5
+              done
+              mc mb --ignore-existing local/netsoldier-cold
+              mc mb --ignore-existing local/netsoldier-backup
+              mc ls local
+          env:
+            - name: HOME
+              value: /tmp
+          envFrom:
+            - secretRef:
+                name: minio-root
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 25m
+              memory: 32Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

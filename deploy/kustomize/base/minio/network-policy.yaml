@@ -1,0 +1,73 @@
+# The storage namespace mirrors the netsoldier default-deny posture: MinIO
+# accepts S3 traffic only from the workloads that ship data to it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-minio
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+      app.kubernetes.io/component: server
+  policyTypes:
+    - Ingress
+  ingress:
+    # ClickHouse server (native cold-tier moves + historical reads),
+    # cold-export CronJob (Parquet archive) and backup CronJob.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: netsoldier
+      ports:
+        - port: 9000
+          protocol: TCP
+    # Same-namespace bucket bootstrap Job.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: bucket-init
+      ports:
+        - port: 9000
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-minio-bucket-init
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+      app.kubernetes.io/component: bucket-init
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: server
+      ports:
+        - port: 9000
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
