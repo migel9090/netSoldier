@@ -20,12 +20,165 @@ service:
       port: 8686
       protocol: TCP
 
+# --watch-config (step 120): the ioc-refresh sidecar atomically swaps
+# ioc.csv and then rewrites the trigger file under /etc/vector-dynamic/.
+# The trigger change fires a config reload; the reload re-reads every file
+# enrichment table whose mtime moved (Vector reloads them by mtime check,
+# the config diff itself stays empty).
+args:
+  - --config-dir
+  - /etc/vector/
+  - --config-dir
+  - /etc/vector-dynamic/
+  - --watch-config
+
+# Enrichment data (step 120): DB-IP Lite mmdb (CC-BY-4.0 — attribution
+# "IP Geolocation by DB-IP" required in the UI, see COMPLIANCE.md) and the
+# threat-intel-sync IoC snapshot. Fetched into an emptyDir at pod start;
+# a failed mmdb download with no cached copy fails the init on purpose
+# (crash-loop is visible; see runbook service-operations).
+initContainers:
+  - name: enrich-init
+    image: curlimages/curl:8.21.0
+    command: ["/bin/sh", "-c"]
+    args:
+      - |
+        set -eu
+        DIR=/var/lib/netsoldier-enrich
+        if curl -fsS --max-time 30 "${IOC_URL}" -o "${DIR}/ioc.csv.tmp"; then
+          mv "${DIR}/ioc.csv.tmp" "${DIR}/ioc.csv"
+        elif [ ! -s "${DIR}/ioc.csv" ]; then
+          echo "value,type,source,threat,confidence" > "${DIR}/ioc.csv"
+          echo "WARN: threat-intel-sync unreachable; starting with empty IoC table"
+        fi
+        fetch_mmdb() {
+          y=$(date -u +%Y); m=$(date -u +%m); m=${m#0}; i=0
+          while [ "$i" -lt 6 ]; do
+            ym=$(printf '%04d-%02d' "$y" "$m")
+            echo "fetching dbip-$1-lite-${ym}.mmdb.gz"
+            if curl -fsS --max-time 120 \
+                "https://download.db-ip.com/free/dbip-$1-lite-${ym}.mmdb.gz" \
+                -o "${DIR}/$1.gz"; then
+              gunzip -c "${DIR}/$1.gz" > "${DIR}/$2.tmp"
+              mv "${DIR}/$2.tmp" "${DIR}/$2"
+              rm -f "${DIR}/$1.gz"
+              return 0
+            fi
+            m=$((m - 1)); [ "$m" -eq 0 ] && { m=12; y=$((y - 1)); }
+            i=$((i + 1))
+          done
+          echo "ERROR: no DB-IP $1 release found in the last 6 months"
+          return 1
+        }
+        [ -s "${DIR}/dbip-asn-lite.mmdb" ] || fetch_mmdb asn dbip-asn-lite.mmdb
+        [ -s "${DIR}/dbip-country-lite.mmdb" ] || fetch_mmdb country dbip-country-lite.mmdb
+        echo "enrichment data ready:"; ls -l "${DIR}"
+    env:
+      - name: IOC_URL
+        value: "http://threat-intel-sync.netsoldier.svc:8083/export/csv"
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 100
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ALL]
+    resources:
+      limits:
+        cpu: 200m
+        memory: 128Mi
+      requests:
+        cpu: 50m
+        memory: 32Mi
+    volumeMounts:
+      - name: enrich-data
+        mountPath: /var/lib/netsoldier-enrich
+
+extraContainers:
+  - name: ioc-refresh
+    image: curlimages/curl:8.21.0
+    command: ["/bin/sh", "-c"]
+    args:
+      - |
+        set -u
+        while true; do
+          sleep "${REFRESH_SECONDS}"
+          if curl -fsS --max-time 30 "${IOC_URL}" \
+              -o /var/lib/netsoldier-enrich/ioc.csv.tmp; then
+            mv /var/lib/netsoldier-enrich/ioc.csv.tmp \
+               /var/lib/netsoldier-enrich/ioc.csv
+            ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            printf '# ioc.csv refreshed %s\ntests: []\n' "$ts" \
+              > /etc/vector-dynamic/zz-ioc-refresh.yaml.tmp
+            mv /etc/vector-dynamic/zz-ioc-refresh.yaml.tmp \
+               /etc/vector-dynamic/zz-ioc-refresh.yaml
+            echo "ioc.csv refreshed at ${ts}"
+          else
+            echo "WARN: ioc refresh failed; keeping previous snapshot"
+          fi
+        done
+    env:
+      - name: IOC_URL
+        value: "http://threat-intel-sync.netsoldier.svc:8083/export/csv"
+      - name: REFRESH_SECONDS
+        value: "900"
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 100
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ALL]
+    resources:
+      limits:
+        cpu: 100m
+        memory: 64Mi
+      requests:
+        cpu: 10m
+        memory: 16Mi
+    volumeMounts:
+      - name: enrich-data
+        mountPath: /var/lib/netsoldier-enrich
+      - name: vector-dynamic
+        mountPath: /etc/vector-dynamic
+
+extraVolumes:
+  - name: enrich-data
+    emptyDir: {}
+  - name: vector-dynamic
+    emptyDir: {}
+
+extraVolumeMounts:
+  - name: enrich-data
+    mountPath: /var/lib/netsoldier-enrich
+    readOnly: true
+  - name: vector-dynamic
+    mountPath: /etc/vector-dynamic
+    readOnly: true
+
 customConfig:
   data_dir: /vector-data-dir
 
   api:
     enabled: true
     address: "0.0.0.0:8686"
+
+  # ── Enrichment tables (step 120) ────────────────────────────
+  enrichment_tables:
+    geo_asn:
+      type: mmdb
+      path: /var/lib/netsoldier-enrich/dbip-asn-lite.mmdb
+    geo_country:
+      type: mmdb
+      path: /var/lib/netsoldier-enrich/dbip-country-lite.mmdb
+    # Snapshot of threat-intel-sync /export/csv (domain + exact-IP IoCs);
+    # refreshed by the ioc-refresh sidecar, reloaded via --watch-config.
+    ioc:
+      type: file
+      file:
+        path: /var/lib/netsoldier-enrich/ioc.csv
+        encoding:
+          type: csv
 
   # ── Sources ─────────────────────────────────────────────────
   sources:
@@ -38,7 +191,7 @@ customConfig:
 
   # ── Transforms ──────────────────────────────────────────────
   transforms:
-    # Route events by Fluent Bit tag.
+    # Stage 1: route by Fluent Bit tag (edge source).
     route_by_tag:
       type: route
       inputs: ["fluent_input"]
@@ -46,17 +199,34 @@ customConfig:
         suricata: '.tag == "suricata.eve"'
         journal: 'starts_with!(.tag, "journal.")'
 
-    # Remap Suricata EVE flow events → ClickHouse network_flows schema.
-    suricata_flows:
-      type: remap
+    # Stage 2 (step 120): route Suricata EVE per event type. Anything
+    # unmatched (stats, netflow, …) falls out of `._unmatched` into the
+    # generic events table.
+    route_suricata:
+      type: route
       inputs: ["route_by_tag.suricata"]
+      route:
+        flow: '.event_type == "flow"'
+        dns: '.event_type == "dns"'
+        alert: '.event_type == "alert"'
+
+    # Shape transforms validate + rename into the ClickHouse schemas
+    # (drop_on_abort: a malformed event is dropped). Enrich transforms
+    # never abort: a failed lookup leaves the defaults in place.
+    shape_flow:
+      type: remap
+      inputs: ["route_suricata.flow"]
       drop_on_abort: true
       source: |-
-        if .event_type != "flow" { abort }
-        .timestamp = .flow.start ?? .timestamp ?? now()
+        ts = .flow.start
+        if ts == null { ts = .timestamp }
+        if ts == null { ts = now() }
+        .timestamp = ts
         .src_port = to_int(.src_port) ?? 0
+        .dst_ip = to_string(.dest_ip) ?? ""
         .dst_port = to_int(.dest_port) ?? 0
-        .protocol = to_int(.proto) ?? 0
+        proto = downcase(to_string(.proto) ?? "")
+        .protocol = if proto == "tcp" { 6 } else if proto == "udp" { 17 } else if proto == "icmp" { 1 } else if proto == "ipv6-icmp" { 58 } else { to_int(.proto) ?? 0 }
         .bytes_in = to_int(.flow.bytes_toclient) ?? 0
         .bytes_out = to_int(.flow.bytes_toserver) ?? 0
         .packets_in = to_int(.flow.pkts_toclient) ?? 0
@@ -64,91 +234,146 @@ customConfig:
         .duration_ms = (to_int(.flow.age) ?? 0) * 1000
         .tcp_flags = 0
         .vlan_id = to_int(.vlan) ?? 0
-        del(.flow); del(.event_type); del(.proto)
+        del(.flow); del(.event_type); del(.proto); del(.dest_ip); del(.dest_port)
 
-    # Remap Suricata DNS events → ClickHouse dns_queries schema.
-    suricata_dns:
+    enrich_flow:
       type: remap
-      inputs: ["route_by_tag.suricata"]
+      inputs: ["shape_flow"]
+      source: |-
+        .dst_country = ""
+        .dst_asn = 0
+        .dst_as_org = ""
+        .threat_source = ""
+        .threat_name = ""
+        dst = to_string(.dst_ip) ?? ""
+        if dst != "" {
+          is_internal = (ip_cidr_contains("10.0.0.0/8", dst) ?? true) || (ip_cidr_contains("172.16.0.0/12", dst) ?? false) || (ip_cidr_contains("192.168.0.0/16", dst) ?? false) || (ip_cidr_contains("127.0.0.0/8", dst) ?? false) || (ip_cidr_contains("169.254.0.0/16", dst) ?? false)
+          if !is_internal {
+            asn_row, asn_err = get_enrichment_table_record("geo_asn", {"ip": dst})
+            if asn_err == null {
+              .dst_asn = to_int(asn_row.autonomous_system_number) ?? 0
+              .dst_as_org = to_string(asn_row.autonomous_system_organization) ?? ""
+            }
+            geo_row, geo_err = get_enrichment_table_record("geo_country", {"ip": dst})
+            if geo_err == null {
+              .dst_country = to_string(geo_row.country.iso_code) ?? ""
+            }
+          }
+          ioc_row, ioc_err = get_enrichment_table_record("ioc", {"value": dst})
+          if ioc_err == null {
+            .threat_source = to_string(ioc_row.source) ?? ""
+            .threat_name = to_string(ioc_row.threat) ?? ""
+          }
+        }
+
+    shape_dns:
+      type: remap
+      inputs: ["route_suricata.dns"]
       drop_on_abort: true
       source: |-
-        if .event_type != "dns" { abort }
-        .timestamp = .timestamp ?? now()
-        .client_ip = .src_ip ?? ""
-        .domain = .dns.rrname ?? ""
-        .query_type = .dns.rrtype ?? ""
-        .answer = join(.dns.answers ?? [], ",") ?? ""
-        .status = .dns.rcode ?? ""
+        if !exists(.timestamp) { .timestamp = now() }
+        .client_ip = to_string(.src_ip) ?? ""
+        .domain = to_string(.dns.rrname) ?? ""
+        .query_type = to_string(.dns.rrtype) ?? ""
+        .answer = join(array(.dns.answers) ?? [], ",") ?? ""
+        .status = to_string(.dns.rcode) ?? ""
         .response_ms = 0
         .blocked = 0
         del(.dns); del(.event_type)
 
-    # Remap Suricata alert events → ClickHouse alerts schema.
-    suricata_alerts:
+    enrich_dns:
       type: remap
-      inputs: ["route_by_tag.suricata"]
+      inputs: ["shape_dns"]
+      source: |-
+        .threat_source = ""
+        .threat_name = ""
+        d = downcase(to_string(.domain) ?? "")
+        if d != "" {
+          ioc_row, ioc_err = get_enrichment_table_record("ioc", {"value": d})
+          if ioc_err == null {
+            .threat_source = to_string(ioc_row.source) ?? ""
+            .threat_name = to_string(ioc_row.threat) ?? ""
+          }
+        }
+
+    shape_alert:
+      type: remap
+      inputs: ["route_suricata.alert"]
       drop_on_abort: true
       source: |-
-        if .event_type != "alert" { abort }
-        .timestamp = .timestamp ?? now()
-        .id = join(["SUR", to_string(.alert.signature_id) ?? "0"], "-")
-        .domain = .dns.rrname ?? .dest_ip ?? ""
-        .client_ip = .src_ip ?? ""
+        if !exists(.timestamp) { .timestamp = now() }
+        .id = "SUR-" + (to_string(.alert.signature_id) ?? "0")
+        d = to_string(.dns.rrname) ?? ""
+        if d == "" { d = to_string(.dest_ip) ?? "" }
+        .domain = d
+        .client_ip = to_string(.src_ip) ?? ""
         .query_type = ""
-        .matched_ioc = .alert.signature ?? ""
-        .severity = if to_int(.alert.severity) ?? 3 <= 1 { "critical" } else if to_int(.alert.severity) ?? 3 == 2 { "high" } else { "medium" }
+        .matched_ioc = to_string(.alert.signature) ?? ""
+        sev = to_int(.alert.severity) ?? 3
+        .severity = if sev <= 1 { "critical" } else if sev == 2 { "high" } else { "medium" }
         .source = "suricata"
         .acknowledged = 0
         del(.alert); del(.event_type)
 
-    # Remap Suricata misc events → ClickHouse events schema.
+    # Reverse-DNS only on alerts: dns_lookup blocks on a single-threaded
+    # worker, so it must stay off the flow/dns hot path. Alert volume on a
+    # home network is a handful per hour.
+    enrich_alert:
+      type: remap
+      inputs: ["shape_alert"]
+      source: |-
+        .rdns = ""
+        dst = to_string(.dest_ip) ?? ""
+        if dst != "" && !contains(dst, ":") {
+          is_internal = (ip_cidr_contains("10.0.0.0/8", dst) ?? true) || (ip_cidr_contains("172.16.0.0/12", dst) ?? false) || (ip_cidr_contains("192.168.0.0/16", dst) ?? false) || (ip_cidr_contains("127.0.0.0/8", dst) ?? false)
+          if !is_internal {
+            parts = split(dst, ".")
+            if length(parts) == 4 {
+              arpa, arpa_err = join([parts[3], parts[2], parts[1], parts[0], "in-addr.arpa"], ".")
+              if arpa_err == null {
+                res, dns_err = dns_lookup(arpa, qtype: "PTR", options: {"timeout": 1, "attempts": 1})
+                if dns_err == null {
+                  answers = res.answers
+                  if is_array(answers) && length!(answers) > 0 {
+                    rd = answers[0].rData
+                    if rd != null { .rdns = rd }
+                  }
+                }
+              }
+            }
+          }
+        }
+
     suricata_events:
       type: remap
-      inputs: ["route_by_tag.suricata"]
+      inputs: ["route_suricata._unmatched"]
       drop_on_abort: true
       source: |-
-        types = ["flow", "dns", "alert"]
-        if includes(types, .event_type) { abort }
-        .timestamp = .timestamp ?? now()
+        if !exists(.timestamp) { .timestamp = now() }
         .source = "suricata"
         .level = "info"
-        .message = join(["event_type=", .event_type ?? "unknown"], "")
+        .message = "event_type=" + (to_string(.event_type) ?? "unknown")
         .metadata = encode_json(.)
 
-    # Prepare journal logs for Loki: extract structured fields.
+    # Prepare journal logs for Loki: extract structured fields. Note: `??`
+    # coalesces errors, not missing fields — a bare-path `??` is a VRL
+    # compile error in run mode (E651), hence the null checks.
     journal_remap:
       type: remap
       inputs: ["route_by_tag.journal"]
       source: |-
-        ._source = ._source ?? .SYSTEMD_UNIT ?? "unknown"
-        ._profile = ._profile ?? "unknown"
-        ._edge_host = ._edge_host ?? "unknown"
-
-    # GeoIP enrichment placeholder (uncomment when MaxMind GeoLite2 is mounted):
-    #
-    # geoip_src:
-    #   type: geoip
-    #   inputs: ["route_by_tag.suricata"]
-    #   database: /geoip/GeoLite2-ASN.mmdb
-    #   source: src_ip
-    #   target: src_geo
-    #
-    # geoip_dst:
-    #   type: geoip
-    #   inputs: ["geoip_src"]
-    #   database: /geoip/GeoLite2-ASN.mmdb
-    #   source: dest_ip
-    #   target: dst_geo
-    #
-    # To activate: mount GeoLite2-ASN.mmdb, update suricata transform
-    # inputs to chain through geoip_src → geoip_dst, add persistence
-    # volume for the database file.
+        src = ._source
+        if src == null { src = .SYSTEMD_UNIT }
+        if src == null { src = "unknown" }
+        ._source = src
+        if ._profile == null { ._profile = "unknown" }
+        if ._edge_host == null { ._edge_host = "unknown" }
 
   # ── Sinks ───────────────────────────────────────────────────
   sinks:
     clickhouse_flows:
       type: clickhouse
-      inputs: ["suricata_flows"]
+      inputs: ["enrich_flow"]
       endpoint: "http://clickhouse.netsoldier.svc:8123"
       database: netsoldier
       table: network_flows
@@ -159,7 +384,7 @@ customConfig:
 
     clickhouse_dns:
       type: clickhouse
-      inputs: ["suricata_dns"]
+      inputs: ["enrich_dns"]
       endpoint: "http://clickhouse.netsoldier.svc:8123"
       database: netsoldier
       table: dns_queries
@@ -170,7 +395,7 @@ customConfig:
 
     clickhouse_alerts:
       type: clickhouse
-      inputs: ["suricata_alerts"]
+      inputs: ["enrich_alert"]
       endpoint: "http://clickhouse.netsoldier.svc:8123"
       database: netsoldier
       table: alerts

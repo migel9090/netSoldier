@@ -497,3 +497,15 @@ data:
     ALTER TABLE netsoldier.zeek_intel MODIFY TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
     ALTER TABLE netsoldier.audit_log MODIFY SETTING storage_policy = 'tiered';
     ALTER TABLE netsoldier.audit_log MODIFY TTL timestamp + INTERVAL 180 DAY TO VOLUME 'cold', timestamp + INTERVAL 730 DAY DELETE;
+  019_flow_enrichment.sql: |
+    -- Vector aggregator enrichment (step 120): geo/ASN (DB-IP Lite),
+    -- threat-intel tags (threat-intel-sync /export/csv) and reverse-DNS
+    -- on alerts.
+    ALTER TABLE netsoldier.network_flows ADD COLUMN IF NOT EXISTS dst_country LowCardinality(String) DEFAULT '';
+    ALTER TABLE netsoldier.network_flows ADD COLUMN IF NOT EXISTS dst_asn UInt32 DEFAULT 0;
+    ALTER TABLE netsoldier.network_flows ADD COLUMN IF NOT EXISTS dst_as_org String DEFAULT '';
+    ALTER TABLE netsoldier.network_flows ADD COLUMN IF NOT EXISTS threat_source LowCardinality(String) DEFAULT '';
+    ALTER TABLE netsoldier.network_flows ADD COLUMN IF NOT EXISTS threat_name String DEFAULT '';
+    ALTER TABLE netsoldier.dns_queries ADD COLUMN IF NOT EXISTS threat_source LowCardinality(String) DEFAULT '';
+    ALTER TABLE netsoldier.dns_queries ADD COLUMN IF NOT EXISTS threat_name String DEFAULT '';
+    ALTER TABLE netsoldier.alerts ADD COLUMN IF NOT EXISTS rdns String DEFAULT '';

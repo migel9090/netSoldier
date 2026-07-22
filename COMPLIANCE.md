@@ -49,6 +49,7 @@ commercial-safe intel remains (your own MISP + Spamhaus DROP).
 | ntopng Community Edition | GPL-3.0 | ✅ | CE cannot export flows to ClickHouse (Enterprise-only) — used as live nDPI UI only. |
 | nDPI | LGPL-3.0 | ✅ | — |
 | DB-IP Lite (bundled in ntopng) | CC-BY-4.0 | ✅ | **Attribution required** in the UI ("IP Geolocation by DB-IP"). |
+| DB-IP Lite mmdb (Vector geo/ASN enrichment, step 120) | CC-BY-4.0 | ✅ | Same **attribution** obligation — carried in the Grafana panel descriptions that show country/ASN data. Downloaded at pod start, never redistributed. |
 | RITA v5 | GPL-3.0 | ✅ | — |
 | ClickHouse | Apache-2.0 | ✅ | Don't use "ClickHouse" in the product name. |
 | Vector | MPL-2.0 | ✅ | File-level copyleft only if you edit Vector's own files. |

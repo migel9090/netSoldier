@@ -318,7 +318,7 @@ data:
           "id": 9,
           "type": "table",
           "title": "Top External Destinations",
-          "description": "Non-RFC1918 destination IPs ranked by traffic volume. Enable GeoIP enrichment in Vector for country/ASN resolution.",
+          "description": "Non-RFC1918 destination IPs ranked by traffic volume. IP Geolocation by DB-IP (db-ip.com), enriched by the Vector aggregator.",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
           "gridPos": { "h": 9, "w": 14, "x": 0, "y": 26 },
           "targets": [
@@ -326,7 +326,7 @@ data:
               "editorType": "sql",
               "format": 1,
               "queryType": "sql",
-              "rawSql": "SELECT dst_ip, sum(bytes_in + bytes_out) AS total_bytes, sum(packets_in + packets_out) AS total_packets, count() AS flow_count FROM netsoldier.network_flows WHERE $__timeFilter(timestamp) AND NOT (isIPAddressInRange(dst_ip, '10.0.0.0/8') OR isIPAddressInRange(dst_ip, '172.16.0.0/12') OR isIPAddressInRange(dst_ip, '192.168.0.0/16') OR isIPAddressInRange(dst_ip, '127.0.0.0/8')) GROUP BY dst_ip ORDER BY total_bytes DESC LIMIT 20",
+              "rawSql": "SELECT dst_ip, anyLast(dst_country) AS country, anyLast(dst_as_org) AS as_org, sum(bytes_in + bytes_out) AS total_bytes, sum(packets_in + packets_out) AS total_packets, count() AS flow_count FROM netsoldier.network_flows WHERE $__timeFilter(timestamp) AND NOT (isIPAddressInRange(dst_ip, '10.0.0.0/8') OR isIPAddressInRange(dst_ip, '172.16.0.0/12') OR isIPAddressInRange(dst_ip, '192.168.0.0/16') OR isIPAddressInRange(dst_ip, '127.0.0.0/8')) GROUP BY dst_ip ORDER BY total_bytes DESC LIMIT 20",
               "refId": "A"
             }
           ],
@@ -356,6 +356,18 @@ data:
                 "matcher": { "id": "byName", "options": "dst_ip" },
                 "properties": [
                   { "id": "displayName", "value": "Destination IP" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "country" },
+                "properties": [
+                  { "id": "displayName", "value": "Country" }
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "as_org" },
+                "properties": [
+                  { "id": "displayName", "value": "AS Organization" }
                 ]
               }
             ]
