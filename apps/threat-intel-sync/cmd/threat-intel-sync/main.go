@@ -48,6 +48,7 @@ func main() {
 	mux.HandleFunc("GET /export/suricata/sha256", export.HandleSuricataDataset(store, false, ioc.TypeSHA256))
 	mux.HandleFunc("GET /export/zeek/intel.dat", export.HandleZeekIntel(store))
 	mux.HandleFunc("GET /export/json", export.HandleJSON(store))
+	mux.HandleFunc("GET /export/csv", export.HandleCSV(store, ioc.TypeDomain, ioc.TypeIP))
 
 	srv := &http.Server{
 		Addr:         addr,
