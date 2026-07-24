@@ -7,4 +7,5 @@ resources:
   - grafana-killswitch-audit-cm.yaml
   - grafana-network-overview-cm.yaml
   - grafana-dpi-protocols-cm.yaml
+  - grafana-tls-anomalies-cm.yaml
   - prometheus-rules.yaml
