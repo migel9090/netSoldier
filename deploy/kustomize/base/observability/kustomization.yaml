@@ -6,4 +6,5 @@ resources:
   - grafana-dns-threat-intel-cm.yaml
   - grafana-killswitch-audit-cm.yaml
   - grafana-network-overview-cm.yaml
+  - grafana-dpi-protocols-cm.yaml
   - prometheus-rules.yaml
