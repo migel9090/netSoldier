@@ -1,0 +1,381 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netsoldier-beaconing-anomalies
+  labels:
+    grafana_dashboard: "1"
+data:
+  netsoldier-beaconing-anomalies.json: |-
+    {
+      "uid": "netsoldier-beaconing-anomalies",
+      "title": "netSoldier — Beaconing & Anomalies",
+      "description": "RITA beaconing scores (ml_beacons) and Isolation-Forest volumetric anomalies (ml_anomalies) with drill-down: pick a source IP in the variable above, or follow a Device link into the netSoldier web-ui (set the webui variable to where you port-forward it, default http://localhost:3000).",
+      "tags": ["netsoldier", "beaconing", "ml", "anomalies"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "1m",
+      "editable": true,
+      "time": { "from": "now-24h", "to": "now" },
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          }
+        ]
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "clickhouse",
+            "type": "datasource",
+            "query": "grafana-clickhouse-datasource",
+            "current": { "selected": true, "text": "ClickHouse", "value": "ClickHouse" }
+          },
+          {
+            "name": "src_ip",
+            "label": "Source device (IP)",
+            "type": "query",
+            "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+            "query": "SELECT DISTINCT src_ip FROM netsoldier.ml_beacons UNION DISTINCT SELECT DISTINCT src_ip FROM netsoldier.ml_anomalies",
+            "refresh": 2,
+            "includeAll": true,
+            "allValue": "",
+            "multi": false,
+            "current": { "selected": true, "text": "All", "value": "$__all" }
+          },
+          {
+            "name": "webui",
+            "label": "web-ui base URL",
+            "type": "textbox",
+            "query": "http://localhost:3000",
+            "current": { "selected": true, "text": "http://localhost:3000", "value": "http://localhost:3000" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 100,
+          "type": "row",
+          "title": "Beaconing (RITA)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false
+        },
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "High-Score Beacon Pairs (≥ 0.9)",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT count() AS pairs FROM (SELECT src_ip, dst_ip, argMax(beacon_score, timestamp) AS score FROM netsoldier.ml_beacons WHERE $__timeFilter(timestamp) GROUP BY src_ip, dst_ip HAVING score >= 0.9)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Max Beacon Score",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT round(max(beacon_score), 3) AS max_score FROM netsoldier.ml_beacons WHERE $__timeFilter(timestamp)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "decimals": 3, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 0.8 }, { "color": "red", "value": 0.9 } ] } } },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" }
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "Beacon Detections by Severity",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 2,
+              "queryType": "sql",
+              "rawSql": "SELECT $__timeInterval(timestamp) AS time, severity, count() AS detections FROM netsoldier.ml_beacons WHERE $__timeFilter(timestamp) AND (('$src_ip' = '') OR (src_ip = '$src_ip')) GROUP BY time, severity ORDER BY time",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "drawStyle": "bars", "fillOpacity": 60, "showPoints": "never", "stacking": { "mode": "normal" } }
+            }
+          },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } }
+        },
+        {
+          "id": 4,
+          "type": "table",
+          "title": "Top Beacons",
+          "description": "Latest RITA beacon scores per src→dst pair, joined to the device inventory. The Device column links into the netSoldier web-ui.",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 9 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT b.src_ip AS src_ip, d.mac AS mac, if(d.hostname != '', d.hostname, b.src_ip) AS device, b.dst_ip AS dst_ip, anyLast(b.dst_domain) AS dst_domain, round(argMax(b.beacon_score, b.timestamp), 3) AS score, max(b.connection_count) AS connections, anyLast(b.beacon_type) AS beacon_type, anyLast(b.severity) AS severity FROM netsoldier.ml_beacons AS b LEFT JOIN (SELECT ip, argMax(mac, updated_at) AS mac, argMax(hostname, updated_at) AS hostname FROM netsoldier.devices GROUP BY ip) AS d ON d.ip = b.src_ip WHERE $__timeFilter(b.timestamp) AND (('$src_ip' = '') OR (b.src_ip = '$src_ip')) GROUP BY b.src_ip, d.mac, d.hostname, b.dst_ip ORDER BY score DESC LIMIT 20",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "src_ip" }, "properties": [ { "id": "displayName", "value": "Source IP" } ] },
+              { "matcher": { "id": "byName", "options": "mac" }, "properties": [ { "id": "custom.hidden", "value": true } ] },
+              { "matcher": { "id": "byName", "options": "device" }, "properties": [
+                { "id": "displayName", "value": "Device" },
+                { "id": "links", "value": [ { "title": "Open device in netSoldier web-ui", "url": "${webui}/devices/${__data.fields.mac}", "targetBlank": true } ] }
+              ] },
+              { "matcher": { "id": "byName", "options": "dst_ip" }, "properties": [ { "id": "displayName", "value": "Destination" } ] },
+              { "matcher": { "id": "byName", "options": "dst_domain" }, "properties": [ { "id": "displayName", "value": "Domain" } ] },
+              { "matcher": { "id": "byName", "options": "score" }, "properties": [
+                { "id": "displayName", "value": "Score" },
+                { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 0.8 }, { "color": "red", "value": 0.9 } ] } },
+                { "id": "color", "value": { "mode": "thresholds" } }
+              ] },
+              { "matcher": { "id": "byName", "options": "connections" }, "properties": [ { "id": "displayName", "value": "Connections" } ] },
+              { "matcher": { "id": "byName", "options": "beacon_type" }, "properties": [ { "id": "displayName", "value": "Type" } ] },
+              { "matcher": { "id": "byName", "options": "severity" }, "properties": [
+                { "id": "displayName", "value": "Severity" },
+                { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+                { "id": "mappings", "value": [ { "type": "value", "options": { "critical": { "color": "dark-red", "text": "CRITICAL" }, "high": { "color": "red", "text": "HIGH" }, "medium": { "color": "orange", "text": "MEDIUM" }, "low": { "color": "yellow", "text": "LOW" } } } ] }
+              ] }
+            ]
+          },
+          "options": { "showHeader": true, "sortBy": [{ "displayName": "Score", "desc": true }], "footer": { "show": false } }
+        },
+        {
+          "id": 200,
+          "type": "row",
+          "title": "Volumetric Anomalies (Isolation Forest)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 19 },
+          "collapsed": false
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "Anomaly Windows",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 20 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT count() AS anomalies FROM netsoldier.ml_anomalies WHERE $__timeFilter(timestamp) AND (('$src_ip' = '') OR (src_ip = '$src_ip'))",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 } ] } } },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" }
+        },
+        {
+          "id": 6,
+          "type": "stat",
+          "title": "Max Anomaly Score",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 20 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT round(max(anomaly_score), 3) AS max_score FROM netsoldier.ml_anomalies WHERE $__timeFilter(timestamp) AND (('$src_ip' = '') OR (src_ip = '$src_ip'))",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "decimals": 3, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 0.6 }, { "color": "red", "value": 0.8 } ] } } },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" }
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "Anomaly Scores per Device",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 2,
+              "queryType": "sql",
+              "rawSql": "SELECT $__timeInterval(window_start) AS time, src_ip, max(anomaly_score) AS score FROM netsoldier.ml_anomalies WHERE $__timeFilter(window_start) AND (('$src_ip' = '') OR (src_ip = '$src_ip')) GROUP BY time, src_ip ORDER BY time",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 1,
+              "color": { "mode": "palette-classic" },
+              "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "auto" }
+            }
+          },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } }
+        },
+        {
+          "id": 8,
+          "type": "table",
+          "title": "Top Anomalies (feature snapshot)",
+          "description": "Isolation-Forest windows with the feature values that drove the score. The Device column links into the netSoldier web-ui.",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 28 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT a.window_start AS window_start, a.src_ip AS src_ip, d.mac AS mac, if(d.hostname != '', d.hostname, a.src_ip) AS device, round(max(a.anomaly_score), 3) AS score, anyLast(a.severity) AS severity, max(a.conn_count) AS conns, max(a.bytes_out) AS bytes_out, max(a.dst_fanout) AS dst_fanout, max(a.port_fanout) AS port_fanout, anyLast(a.model_version) AS model FROM netsoldier.ml_anomalies AS a LEFT JOIN (SELECT ip, argMax(mac, updated_at) AS mac, argMax(hostname, updated_at) AS hostname FROM netsoldier.devices GROUP BY ip) AS d ON d.ip = a.src_ip WHERE $__timeFilter(a.timestamp) AND (('$src_ip' = '') OR (a.src_ip = '$src_ip')) GROUP BY a.window_start, a.src_ip, d.mac, d.hostname ORDER BY score DESC LIMIT 20",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "window_start" }, "properties": [ { "id": "displayName", "value": "Window" }, { "id": "unit", "value": "dateTimeAsLocal" } ] },
+              { "matcher": { "id": "byName", "options": "src_ip" }, "properties": [ { "id": "displayName", "value": "Source IP" } ] },
+              { "matcher": { "id": "byName", "options": "mac" }, "properties": [ { "id": "custom.hidden", "value": true } ] },
+              { "matcher": { "id": "byName", "options": "device" }, "properties": [
+                { "id": "displayName", "value": "Device" },
+                { "id": "links", "value": [ { "title": "Open device in netSoldier web-ui", "url": "${webui}/devices/${__data.fields.mac}", "targetBlank": true } ] }
+              ] },
+              { "matcher": { "id": "byName", "options": "score" }, "properties": [
+                { "id": "displayName", "value": "Score" },
+                { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 0.6 }, { "color": "red", "value": 0.8 } ] } },
+                { "id": "color", "value": { "mode": "thresholds" } }
+              ] },
+              { "matcher": { "id": "byName", "options": "severity" }, "properties": [
+                { "id": "displayName", "value": "Severity" },
+                { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+                { "id": "mappings", "value": [ { "type": "value", "options": { "critical": { "color": "dark-red", "text": "CRITICAL" }, "high": { "color": "red", "text": "HIGH" }, "medium": { "color": "orange", "text": "MEDIUM" }, "low": { "color": "yellow", "text": "LOW" } } } ] }
+              ] },
+              { "matcher": { "id": "byName", "options": "bytes_out" }, "properties": [ { "id": "displayName", "value": "Bytes Out" }, { "id": "unit", "value": "bytes" } ] },
+              { "matcher": { "id": "byName", "options": "conns" }, "properties": [ { "id": "displayName", "value": "Connections" } ] },
+              { "matcher": { "id": "byName", "options": "dst_fanout" }, "properties": [ { "id": "displayName", "value": "Dst Fanout" } ] },
+              { "matcher": { "id": "byName", "options": "port_fanout" }, "properties": [ { "id": "displayName", "value": "Port Fanout" } ] },
+              { "matcher": { "id": "byName", "options": "model" }, "properties": [ { "id": "displayName", "value": "Model" } ] }
+            ]
+          },
+          "options": { "showHeader": true, "sortBy": [{ "displayName": "Score", "desc": true }], "footer": { "show": false } }
+        },
+        {
+          "id": 300,
+          "type": "row",
+          "title": "Device Drill-Down ($src_ip)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 },
+          "collapsed": false
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "Device Traffic (network_flows)",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 39 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 2,
+              "queryType": "sql",
+              "rawSql": "SELECT $__timeInterval(timestamp) AS time, sum(bytes_out) AS tx, sum(bytes_in) AS rx FROM netsoldier.network_flows WHERE $__timeFilter(timestamp) AND (('$src_ip' = '') OR (src_ip = '$src_ip')) GROUP BY time ORDER BY time",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": { "mode": "palette-classic" },
+              "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "showPoints": "never" }
+            }
+          },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } }
+        },
+        {
+          "id": 10,
+          "type": "table",
+          "title": "Recent DNS Queries",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 39 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT timestamp, client_ip, domain, query_type, threat_source FROM netsoldier.dns_queries WHERE $__timeFilter(timestamp) AND (('$src_ip' = '') OR (client_ip = '$src_ip')) ORDER BY timestamp DESC LIMIT 20",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "timestamp" }, "properties": [ { "id": "displayName", "value": "Time" }, { "id": "unit", "value": "dateTimeAsLocal" } ] },
+              { "matcher": { "id": "byName", "options": "threat_source" }, "properties": [
+                { "id": "displayName", "value": "Threat Intel" },
+                { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+                { "id": "mappings", "value": [ { "type": "special", "options": { "match": "empty", "result": { "text": "-" } } } ] }
+              ] }
+            ]
+          },
+          "options": { "showHeader": true, "sortBy": [{ "displayName": "Time", "desc": true }], "footer": { "show": false } }
+        },
+        {
+          "id": 11,
+          "type": "table",
+          "title": "Beacon History",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 47 },
+          "targets": [
+            {
+              "editorType": "sql",
+              "format": 1,
+              "queryType": "sql",
+              "rawSql": "SELECT timestamp, src_ip, dst_ip, dst_domain, round(beacon_score, 3) AS score, connection_count, beacon_type, severity FROM netsoldier.ml_beacons WHERE $__timeFilter(timestamp) AND (('$src_ip' = '') OR (src_ip = '$src_ip')) ORDER BY timestamp DESC LIMIT 20",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "timestamp" }, "properties": [ { "id": "displayName", "value": "Time" }, { "id": "unit", "value": "dateTimeAsLocal" } ] },
+              { "matcher": { "id": "byName", "options": "score" }, "properties": [
+                { "id": "displayName", "value": "Score" },
+                { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 0.8 }, { "color": "red", "value": 0.9 } ] } },
+                { "id": "color", "value": { "mode": "thresholds" } }
+              ] },
+              { "matcher": { "id": "byName", "options": "severity" }, "properties": [
+                { "id": "displayName", "value": "Severity" },
+                { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+                { "id": "mappings", "value": [ { "type": "value", "options": { "critical": { "color": "dark-red", "text": "CRITICAL" }, "high": { "color": "red", "text": "HIGH" }, "medium": { "color": "orange", "text": "MEDIUM" }, "low": { "color": "yellow", "text": "LOW" } } } ] }
+              ] }
+            ]
+          },
+          "options": { "showHeader": true, "sortBy": [{ "displayName": "Time", "desc": true }], "footer": { "show": false } }
+        }
+      ]
+    }

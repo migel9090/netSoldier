@@ -8,4 +8,5 @@ resources:
   - grafana-network-overview-cm.yaml
   - grafana-dpi-protocols-cm.yaml
   - grafana-tls-anomalies-cm.yaml
+  - grafana-beaconing-anomalies-cm.yaml
   - prometheus-rules.yaml
