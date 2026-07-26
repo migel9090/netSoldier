@@ -1,0 +1,27 @@
+# Go image builds use the repository root as their context so modules can
+# resolve their `replace` targets under libs/ (see apps/detection-engine/
+# Dockerfile). Exclude everything, then re-admit only what a build needs —
+# an allowlist keeps an unrelated new directory from silently bloating the
+# context or landing in an image layer.
+*
+!apps
+!libs
+
+# Nothing heavy from apps/: the frontend and its dependencies are built by
+# their own toolchain, never by a Go image build.
+apps/web-ui
+**/node_modules
+**/.svelte-kit
+
+# Locally built binaries, caches and test artifacts (gitignored, but a dirty
+# working tree must not change what a build produces).
+**/*.test
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/*.pcap
+**/*.pcapng
+apps/detection-engine/detection-engine
+apps/device-inventory/device-inventory
+apps/killswitch-controller/killswitch-controller
+apps/threat-intel-sync/threat-intel-sync

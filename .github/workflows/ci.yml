@@ -200,7 +200,11 @@ jobs:
       - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         id: build
         with:
-          context: apps/detection-engine
+          # Repo root: apps/detection-engine/go.mod replaces libs/events with a
+          # relative path, so that module must be inside the build context.
+          # .dockerignore keeps the context to just apps/ + libs/.
+          context: .
+          file: apps/detection-engine/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
