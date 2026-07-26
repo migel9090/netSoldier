@@ -68,6 +68,12 @@ tasks:
     cmds:
       - go test -v -race -count=1 ./internal/pcapreplay/...
 
+  test:corpus:
+    desc: Replay the malware/C2 PCAP corpus through Suricata + Zeek (needs docker)
+    dir: detections/pcap-corpus
+    cmds:
+      - ./test/verify.py {{.CLI_ARGS}}
+
   test:python:
     desc: Run Python tests
     dir: apps/ml-anomaly
