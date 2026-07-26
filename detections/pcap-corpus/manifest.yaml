@@ -1,54 +1,238 @@
-version: "1.0"
+version: "2.0"
 description: >
-  PCAP corpus for netSoldier detection regression testing.
-  Synthetic entries are generated at test time by the Go test harness.
-  External entries can be downloaded via download.sh using url/sha256.
+  netSoldier PCAP corpus — one capture per malware/C2 traffic family, plus a
+  benign control. Generated entries are committed to the repo and replayed
+  through Suricata and Zeek by test/verify.py (detection-as-code regression
+  testing); external entries are real-world captures, pinned by checksum and
+  fetched on demand for deep local validation only — CI never needs them.
+
+  Regenerate:  ./gen_corpus.py         (deterministic; re-pin sha256 on change)
+  Verify:      ./test/verify.py        (needs docker)
+  Fetch real:  ./download.sh --external
+
+  Expectation semantics:
+    packets              exact frame count in the file
+    suricata.sids        each sid must fire at least once
+    suricata.max_alerts  upper bound on total alerts (false-positive guard)
+    zeek.min_lines       minimum rows per log
+    zeek.contains        a row must exist whose field contains the value
 
 corpus:
-  - name: dns-c2-callback
-    description: "DNS queries to known C2 domains mixed with benign traffic"
-    source: synthetic
+  # ── C2 channels ──────────────────────────────────────────────────────
+  - name: c2-http-beacon
+    description: >
+      Fixed-interval HTTP callbacks to a C2 gate (60s +/- 2s jitter, 12
+      check-ins) — the shape RITA scores as beaconing and the reason
+      ml_beacons exists. Also exercises the dataset rule on http.host.
+    family: HTTP C2 beacon
+    attack: T1071.001
+    source: generated
+    file: pcaps/c2-http-beacon.pcap
+    sha256: d45babccd92503fe8939008ed819cbd2604e05b70254ded2443a92790abea586
     iocs:
-      - value: evil.example.com
+      - value: cdn.badupdate.example
         type: domain
+        source: threatfox
         confidence: 90
-      - value: c2.malware.net
+    expect:
+      packets: 122
+      suricata:
+        sids: [9100001, 9100003]
+      zeek:
+        min_lines: {conn: 13, http: 12, dns: 1}
+        contains:
+          http: {host: cdn.badupdate.example, method: GET}
+
+  - name: c2-tls-beacon
+    description: >
+      HTTPS C2 check-ins every 5 minutes. Detection is metadata-only — SNI
+      and the first-party TLS client fingerprint — so this is the capture
+      that proves tls_client_fp survives the pipeline without decryption.
+    family: TLS C2 beacon
+    attack: T1573.002
+    source: generated
+    file: pcaps/c2-tls-beacon.pcap
+    sha256: e65b71ac2249b89ec9effa3ecb99286d0d72f7db7c488030773080dc0b5badb3
+    iocs:
+      - value: panel.evilcorp.example
         type: domain
+        source: misp
         confidence: 85
-    expected:
-      packets: 3
-      queries: 3
-      alerts:
-        - domain: evil.example.com
-          client_ip: "192.168.1.42"
-          severity: critical
-        - domain: c2.malware.net
-          client_ip: "192.168.1.100"
-          severity: high
+    expect:
+      packets: 122
+      suricata:
+        sids: [9100001, 9100002]
+      zeek:
+        min_lines: {conn: 11, ssl: 10, dns: 1}
+        contains:
+          ssl:
+            server_name: panel.evilcorp.example
+            # Implant profile: small dated cipher list, http/1.1 only. Pinned
+            # exactly — it must stay distinct from the browser fingerprint in
+            # benign-baseline, or a fingerprint IoC could never separate them.
+            tls_client_fp: t12d0305h1_13bac7b83268_4b455dd4e13d
 
-  - name: dns-subdomain-match
-    description: "Subdomain query matching parent IoC domain"
-    source: synthetic
+  - name: ioc-ip-contact
+    description: >
+      Direct-to-IP TLS on a non-standard port with no preceding DNS lookup and
+      no SNI — matches the IoC-IP dataset rule and both TLS heuristics from
+      step 110 (dns-less-TLS, and the SNI-less hunting view).
+    family: Direct-to-IP C2
+    attack: T1571
+    source: generated
+    file: pcaps/ioc-ip-contact.pcap
+    sha256: a44c9a036dfb6c9cd6c782d238fdf715e32bfc73cff0ff4205a0562660c48496
     iocs:
-      - value: evil.com
+      - value: 198.51.100.66
+        type: ip
+        source: spamhaus-drop
+        confidence: 75
+    expect:
+      packets: 30
+      suricata:
+        sids: [9100004]
+      zeek:
+        min_lines: {conn: 3, ssl: 3}
+        contains:
+          # Same implant profile as c2-tls-beacon but with no SNI, so the
+          # fingerprint's second character is "i" (no domain) rather than "d".
+          ssl: {tls_client_fp: t12i0304h1_13bac7b83268_4b455dd4e13d}
+
+  # ── DNS abuse ────────────────────────────────────────────────────────
+  - name: dns-dga
+    description: >
+      Domain generation algorithm: 20 high-entropy labels, 19 NXDOMAIN and
+      one live rendezvous. No IoC can match by definition — this is the
+      capture the entropy/lexical DGA detector (step 127) has to earn.
+    family: DGA rendezvous
+    attack: T1568.002
+    source: generated
+    file: pcaps/dns-dga.pcap
+    sha256: d2aef62364a0367fc7871262fc312fad14b631d1586b2e921ae088c13ddd1082
+    iocs: []
+    expect:
+      packets: 40
+      suricata:
+        sids: []
+        max_alerts: 0
+      zeek:
+        min_lines: {dns: 20}
+
+  - name: dns-tunnel-exfil
+    description: >
+      Data exfiltrated through DNS — 48-character encoded labels under one
+      delegated zone, TXT answers as the reply channel. Documents a real gap:
+      the Suricata dataset rule matches the full qname exactly, so tunnelled
+      subdomains of a known-bad zone do NOT fire it, while detection-engine's
+      matcher (which walks parent domains) does. Closing it in the sensor is
+      step 127/128 work.
+    family: DNS tunnelling / exfiltration
+    attack: T1048.003
+    source: generated
+    file: pcaps/dns-tunnel-exfil.pcap
+    sha256: 2e5315decf0326efaf711ceee03fc4ad4bf944911cd20e1936a21bf3674c4160
+    iocs:
+      - value: t.exfil-tunnel.example
         type: domain
+        source: misp
         confidence: 80
-    expected:
-      packets: 1
-      queries: 1
-      alerts:
-        - domain: sub.evil.com
-          matched_ioc: evil.com
-          severity: high
+    expect:
+      packets: 30
+      suricata:
+        sids: []
+      zeek:
+        min_lines: {dns: 15}
+        contains:
+          dns: {qtype_name: TXT, query: t.exfil-tunnel.example}
 
-  - name: benign-only
-    description: "Benign DNS traffic — should produce zero alerts"
-    source: synthetic
-    iocs:
-      - value: evil.example.com
-        type: domain
-        confidence: 90
-    expected:
-      packets: 2
-      queries: 2
-      alerts: []
+  # ── Reconnaissance ───────────────────────────────────────────────────
+  - name: scan-portsweep
+    description: >
+      Internal port sweep, 18 ports across 3 hosts with no replies, which
+      Zeek records as S0 connections — the fan-out the lateral-movement
+      heuristics (step 128) key off.
+    family: Port sweep / lateral movement
+    attack: T1046
+    source: generated
+    file: pcaps/scan-portsweep.pcap
+    sha256: 231fb084d8347c2b07b2bdea097c9598361822e4c8ebd5d368e9de33d8e53c22
+    iocs: []
+    expect:
+      packets: 54
+      suricata:
+        sids: []
+        max_alerts: 0
+      zeek:
+        min_lines: {conn: 54}
+        contains:
+          conn: {conn_state: S0}
+
+  # ── Control ──────────────────────────────────────────────────────────
+  - name: benign-baseline
+    description: >
+      Ordinary browsing — DNS, one HTTPS session, one plain-HTTP fetch, all
+      to RFC 2606 reserved domains. Must produce zero alerts: a corpus of
+      only-malicious traffic cannot catch a rule that fires on everything.
+    family: Benign control
+    attack: null
+    source: generated
+    file: pcaps/benign-baseline.pcap
+    sha256: f026774af364ff60e38d96da93f2a11d953632067e425f12b9f205a24f85b39a
+    iocs: []
+    expect:
+      packets: 26
+      suricata:
+        sids: []
+        max_alerts: 0
+      zeek:
+        min_lines: {conn: 5, dns: 3, ssl: 1, http: 1}
+        contains:
+          # Browser profile — deliberately unlike the implant fingerprints
+          # pinned on c2-tls-beacon and ioc-ip-contact.
+          ssl: {tls_client_fp: t13d0905h2_e58ff226e52e_86e27bfa1be9}
+
+  # ── Real-world captures (optional, not used by CI) ───────────────────
+  # From malware-traffic-analysis.net, (c) Brad Duncan, shared for research
+  # and education. Checksums are of the distributed .zip and were verified on
+  # 2026-07-26. The archives are password-protected and the password is
+  # published only as an image on the site's about page — the operator
+  # extracts them by hand; download.sh deliberately does not automate it.
+  - name: mta-2024-12-17-netsupport-rat
+    description: SmartApeSG injected script leading to NetSupport RAT C2.
+    family: RAT / fake-update chain
+    attack: T1219
+    source: external
+    optional: true
+    url: https://www.malware-traffic-analysis.net/2024/12/17/2024-12-17-SmartApeSG-to-NetSupport-RAT.pcap.zip
+    sha256: 5b9991118db4b4367fbc4fe0ce636488d15c889aa45fcbb00de32c4e769d7955
+    archive: zip-encrypted
+
+  - name: mta-2024-12-04-agenttesla-ftp
+    description: AgentTesla variant exfiltrating over FTP.
+    family: Infostealer exfiltration
+    attack: T1048
+    source: external
+    optional: true
+    url: https://www.malware-traffic-analysis.net/2024/12/04/2024-12-04-AgentTesla-variant-using-FTP.pcap.zip
+    sha256: 157f69a787eee99b1f6b4215af2c1275fd6ab9b628069a70aed2896612c01122
+    archive: zip-encrypted
+
+  - name: mta-2024-11-24-redtail-linux
+    description: Redtail bash-script infection of a Linux host (coinminer).
+    family: Linux malware / coinminer
+    attack: T1496
+    source: external
+    optional: true
+    url: https://www.malware-traffic-analysis.net/2024/11/24/2024-11-24-infection-by-Redtail-bash-script-from-45.202.35_190.pcap.zip
+    sha256: 21c2f553d367a8aecb9595c331a3475e6f0030408a6fd39ae7c5835e2a81e67d
+    archive: zip-encrypted
+
+  - name: mta-2024-11-24-webserver-scans
+    description: A week of real internet-background scans and probes.
+    family: Scanning / exploitation attempts
+    attack: T1595
+    source: external
+    optional: true
+    url: https://www.malware-traffic-analysis.net/2024/11/24/2024-11-24-webserver-scans-and-probes.pcap.zip
+    sha256: e024e6487204b31519a593d8f6b99607f343a1f6df291ceb7c744eccb2b7d791
+    archive: zip-encrypted
