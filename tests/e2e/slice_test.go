@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/migel9090/netSoldier/libs/events"
 )
 
 // TestVerticalSlice validates the full detection pipeline end-to-end:
@@ -78,15 +80,18 @@ func TestVerticalSlice(t *testing.T) {
 		t.Fatalf("webhook unmarshal: %v", err)
 	}
 
-	assertEq(t, "webhook.event", "threat_detected", wp.Event)
-	assertEq(t, "webhook.service", "detection-engine", wp.Service)
-	assertEq(t, "alert.domain", "evil.example.com", wp.Alert.Domain)
-	assertEq(t, "alert.client_ip", "192.168.1.42", wp.Alert.ClientIP)
-	assertEq(t, "alert.matched_ioc", "evil.example.com", wp.Alert.MatchedIoC)
-	assertEq(t, "alert.severity", "high", wp.Alert.Severity)
-	assertEq(t, "alert.source", "local", wp.Alert.Source)
-	if wp.Alert.ID == "" {
-		t.Error("alert.id is empty")
+	assertEq(t, "webhook.schema_version", events.DetectionSchemaVersion, wp.SchemaVersion)
+	assertEq(t, "webhook.domain", "evil.example.com", wp.Domain)
+	assertEq(t, "webhook.client_ip", "192.168.1.42", wp.ClientIP)
+	assertEq(t, "webhook.matched_ioc", "evil.example.com", wp.MatchedIoC)
+	assertEq(t, "webhook.ioc_type", "domain", wp.IoCType)
+	assertEq(t, "webhook.severity", "high", wp.Severity)
+	assertEq(t, "webhook.source", "local", wp.Source)
+	if wp.ID == "" {
+		t.Error("webhook id is empty")
+	}
+	if wp.Timestamp.IsZero() {
+		t.Error("webhook timestamp is zero")
 	}
 
 	// /alerts API — same data the web-ui renders.
@@ -104,11 +109,11 @@ func TestVerticalSlice(t *testing.T) {
 	t.Logf("/devices: %d entries (0 expected)", len(devices))
 }
 
-type whPayload struct {
-	Event   string     `json:"event"`
-	Service string     `json:"service"`
-	Alert   alertEntry `json:"alert"`
-}
+// whPayload is the webhook body: since step 116 detection-engine sends the
+// shared events.DetectionEvent directly, not the old {event, service, alert}
+// envelope. Decoding into the real type keeps this test tied to the contract
+// the killswitch consumes.
+type whPayload = events.DetectionEvent
 
 type alertEntry struct {
 	ID         string `json:"id"`

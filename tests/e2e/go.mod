@@ -56,3 +56,7 @@ require (
 	golang.org/x/sys v0.45.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+require github.com/migel9090/netSoldier/libs/events v0.0.0
+
+replace github.com/migel9090/netSoldier/libs/events v0.0.0 => ../../libs/events

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/migel9090/netSoldier/libs/events"
 )
 
 // TestPhase1E2E validates the complete Phase 1 flow end-to-end:
@@ -92,9 +94,9 @@ func TestPhase1E2E(t *testing.T) {
 	if err := json.Unmarshal(payloads[0], &wp); err != nil {
 		t.Fatalf("webhook unmarshal: %v", err)
 	}
-	assertEq(t, "webhook.event", "threat_detected", wp.Event)
-	assertEq(t, "alert.domain", "evil.example.com", wp.Alert.Domain)
-	assertEq(t, "alert.client_ip", "192.168.1.42", wp.Alert.ClientIP)
+	assertEq(t, "webhook.schema_version", events.DetectionSchemaVersion, wp.SchemaVersion)
+	assertEq(t, "webhook.domain", "evil.example.com", wp.Domain)
+	assertEq(t, "webhook.client_ip", "192.168.1.42", wp.ClientIP)
 	t.Log("detection pipeline OK")
 
 	// ── Alerts API ──────────────────────────────────────────────────
