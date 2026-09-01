@@ -3,7 +3,7 @@
 # shared contract module has to be inside the context or `go mod download`
 # cannot resolve the module graph. See /.dockerignore for what the context
 # actually carries, and the `build` job in .github/workflows/ci.yml.
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 
 ARG TARGETOS
 ARG TARGETARCH
