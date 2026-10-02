@@ -1,5 +1,8 @@
 """API tests for the model serving endpoint (step 115)."""
 
+import threading
+import time
+
 from fastapi.testclient import TestClient
 from ml_anomaly.api import create_app
 from ml_anomaly.flows import FEATURE_NAMES
@@ -122,3 +125,74 @@ def test_metrics_exposed(tmp_path):
     text = client.get("/metrics").text
     assert "ml_anomaly_score_requests_total" in text
     assert "ml_anomaly_model_loaded 1.0" in text
+
+
+def test_score_runs_the_forest_once(tmp_path, monkeypatch):
+    """detect() recomputes the same scores internally.
+
+    Calling scores() and detect() separately ran the forest twice over every
+    window — up to 10,000 of them per request.
+    """
+    store = _store_with_model(tmp_path)
+    app = create_app(store)
+    serving, _ = app.state.holder.current()
+
+    calls = {"n": 0}
+    original = serving.scores
+
+    def counting_scores(windows):
+        calls["n"] += 1
+        return original(windows)
+
+    monkeypatch.setattr(serving, "scores", counting_scores)
+
+    client = TestClient(app)
+    resp = client.post("/score", json={"windows": [_payload(exfil_window())]})
+    assert resp.status_code == 200
+    assert calls["n"] == 1, f"forest should run once per request, ran {calls['n']}x"
+
+
+def test_concurrent_scoring_is_race_free(tmp_path):
+    """FastAPI runs ``def`` endpoints in a threadpool.
+
+    Before the holder took a lock, one thread could clear the model between
+    another thread's None-check and its use, producing a 500 rather than a
+    score or a clean 503.
+    """
+    store = _store_with_model(tmp_path)
+    app = create_app(store)
+    client = TestClient(app)
+    holder = app.state.holder
+
+    errors: list[int] = []
+    stop = threading.Event()
+
+    def hammer():
+        while not stop.is_set():
+            resp = client.post("/score", json={"windows": [_payload(exfil_window())]})
+            if resp.status_code not in (200, 503):
+                errors.append(resp.status_code)
+
+    def churn():
+        while not stop.is_set():
+            holder.refresh()
+
+    threads = [threading.Thread(target=hammer) for _ in range(4)]
+    threads.append(threading.Thread(target=churn))
+    for t in threads:
+        t.start()
+    time.sleep(1.0)
+    stop.set()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"concurrent scoring produced unexpected statuses: {set(errors)}"
+
+
+def test_refresh_returns_current_pair(tmp_path):
+    store = _store_with_model(tmp_path)
+    app = create_app(store)
+    model, meta = app.state.holder.refresh()
+    assert model is not None
+    assert meta is not None
+    assert meta.version == "v1"

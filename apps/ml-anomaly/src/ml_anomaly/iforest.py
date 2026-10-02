@@ -118,10 +118,17 @@ class FlowAnomalyModel:
         self,
         windows: list[FlowWindow],
         threshold: float = DEFAULT_SCORE_THRESHOLD,
+        scores: list[float] | None = None,
     ) -> list[FlowAnomaly]:
-        """Score windows and keep those at/above threshold, highest first."""
+        """Score windows and keep those at/above threshold, highest first.
+
+        ``scores`` lets a caller that already computed them pass them in
+        rather than running the forest a second time over the same windows.
+        """
         anomalies: list[FlowAnomaly] = []
-        for w, score in zip(windows, self.scores(windows), strict=True):
+        if scores is None:
+            scores = self.scores(windows)
+        for w, score in zip(windows, scores, strict=True):
             if score < threshold:
                 continue
             anomalies.append(

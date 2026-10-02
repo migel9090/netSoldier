@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import asdict
 
 from fastapi import FastAPI, HTTPException, Response
@@ -90,24 +91,55 @@ class ScoreResponse(BaseModel):
 
 
 class _ModelHolder:
-    """Keeps the serving model in sync with the store's latest pointer."""
+    """Keeps the serving model in sync with the store's latest pointer.
+
+    Access is guarded by a lock and reads return the (model, meta) pair taken
+    atomically. FastAPI runs ``def`` endpoints in a threadpool, so without
+    this two concurrent /score requests could race: one thread clearing the
+    model while another had already passed its ``is None`` check, producing
+    an AttributeError and a 500 instead of a score.
+    """
 
     def __init__(self, store: ModelStore) -> None:
         self.store = store
-        self.model = None
-        self.meta = None
+        self._lock = threading.Lock()
+        self._model = None
+        self._meta = None
         self.refresh()
 
-    def refresh(self) -> None:
-        latest = self.store.latest_version()
-        if latest is None:
-            self.model, self.meta = None, None
-        elif self.meta is None or self.meta.version != latest:
-            loaded = self.store.load(latest)
-            if loaded is not None:
-                self.model, self.meta = loaded
-                log.info("serving model %s", latest)
-        MODEL_LOADED.set(0 if self.model is None else 1)
+    def refresh(self) -> tuple[object | None, object | None]:
+        """Reload if ``latest`` moved; return the current (model, meta)."""
+        with self._lock:
+            latest = self.store.latest_version()
+            if latest is None:
+                self._model, self._meta = None, None
+            elif self._meta is None or self._meta.version != latest:
+                loaded = self.store.load(latest)
+                if loaded is not None:
+                    self._model, self._meta = loaded
+                    log.info("serving model %s", latest)
+                else:
+                    # A rejected or corrupt artifact must not silently keep an
+                    # older model serving under the new version's name.
+                    log.error(
+                        "model %s failed to load; keeping the previous model", latest
+                    )
+            MODEL_LOADED.set(0 if self._model is None else 1)
+            return self._model, self._meta
+
+    def current(self) -> tuple[object | None, object | None]:
+        with self._lock:
+            return self._model, self._meta
+
+    # Read-only views, kept so tests and callers can inspect state.
+    @property
+    def model(self):
+        return self.current()[0]
+
+    @property
+    def meta(self):
+        return self.current()[1]
+
 
 
 def create_app(store: ModelStore | None = None) -> FastAPI:
@@ -122,36 +154,42 @@ def create_app(store: ModelStore | None = None) -> FastAPI:
 
     @app.get("/readyz")
     def readyz() -> dict[str, str]:
-        holder.refresh()
-        if holder.model is None:
+        model, meta = holder.refresh()
+        if model is None or meta is None:
             raise HTTPException(status_code=503, detail="no model loaded")
-        return {"status": "ready", "model": holder.meta.version}
+        return {"status": "ready", "model": meta.version}
 
     @app.get("/model")
     def model_info() -> dict:
-        holder.refresh()
-        if holder.meta is None:
+        _, meta = holder.refresh()
+        if meta is None:
             raise HTTPException(status_code=503, detail="no model loaded")
-        return asdict(holder.meta)
+        return asdict(meta)
 
     @app.post("/score")
     def score(req: ScoreRequest) -> ScoreResponse:
-        holder.refresh()
-        if holder.model is None:
+        model, meta = holder.refresh()
+        if model is None or meta is None:
             SCORE_REQUESTS.labels(outcome="no_model").inc()
             raise HTTPException(status_code=503, detail="no model loaded")
         threshold = (
             req.threshold
             if req.threshold is not None
-            else holder.meta.threshold or DEFAULT_SCORE_THRESHOLD
+            else meta.threshold or DEFAULT_SCORE_THRESHOLD
         )
         windows = [w.to_window() for w in req.windows]
+
+        # Score once. detect() computes the same scores internally, so calling
+        # both ran the forest twice over every window — up to 10,000 of them
+        # per request.
+        scores = model.scores(windows)
         anomalies = {
             (a.src_ip, a.window_start): a
-            for a in holder.model.detect(windows, threshold=threshold)
+            for a in model.detect(windows, threshold=threshold, scores=scores)
         }
+
         results = []
-        for w, s in zip(windows, holder.model.scores(windows), strict=True):
+        for w, s in zip(windows, scores, strict=True):
             hit = anomalies.get((w.src_ip, w.window_start))
             results.append(
                 ScoredWindow(
@@ -168,7 +206,7 @@ def create_app(store: ModelStore | None = None) -> FastAPI:
         SCORED_WINDOWS.inc(len(results))
         ANOMALOUS_WINDOWS.inc(sum(1 for r in results if r.anomalous))
         return ScoreResponse(
-            model_version=holder.model.version,
+            model_version=model.version,
             threshold=threshold,
             results=results,
         )
