@@ -2,6 +2,7 @@ package events
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -196,28 +197,126 @@ func TestDetectionEventBackwardCompat(t *testing.T) {
 	}
 }
 
-func TestIsSevereEnoughForAuto(t *testing.T) {
+func TestIsKnownBadSignal(t *testing.T) {
 	tests := []struct {
-		severity   string
-		confidence int
-		want       bool
+		class string
+		want  bool
 	}{
-		{SeverityCritical, 95, true},
-		{SeverityCritical, 80, true},
-		{SeverityHigh, 90, true},
-		{SeverityHigh, 80, true},
-		{SeverityCritical, 79, false},
-		{SeverityMedium, 95, false},
-		{SeverityLow, 100, false},
-		{SeverityHigh, 50, false},
-		{"", 95, false},
+		{SignalIoC, true},
+		{SignalIDS, true},
+		{SignalBeacon, false},
+		{SignalVolumetric, false},
+		{SignalTLS, false},
+		{SignalComposite, false},
+		{"", false},
+		{"unknown-class", false},
 	}
 	for _, tt := range tests {
-		ev := DetectionEvent{Severity: tt.severity, Confidence: tt.confidence}
-		got := ev.IsSevereEnoughForAuto()
-		if got != tt.want {
-			t.Errorf("IsSevereEnoughForAuto(severity=%q, confidence=%d) = %v, want %v",
-				tt.severity, tt.confidence, got, tt.want)
+		if got := IsKnownBadSignal(tt.class); got != tt.want {
+			t.Errorf("IsKnownBadSignal(%q) = %v, want %v", tt.class, got, tt.want)
 		}
+	}
+}
+
+func TestKnownBadSignals(t *testing.T) {
+	tests := []struct {
+		name      string
+		ev        DetectionEvent
+		want      []string
+		wantKnown bool
+	}{
+		{
+			name:      "single feed match",
+			ev:        DetectionEvent{SignalClass: SignalIoC},
+			want:      []string{SignalIoC},
+			wantKnown: true,
+		},
+		{
+			name:      "single IDS signature",
+			ev:        DetectionEvent{SignalClass: SignalIDS},
+			want:      []string{SignalIDS},
+			wantKnown: true,
+		},
+		{
+			name:      "lone beacon heuristic is not known-bad",
+			ev:        DetectionEvent{SignalClass: SignalBeacon},
+			want:      nil,
+			wantKnown: false,
+		},
+		{
+			// The case that matters for auto-enforcement: two heuristics
+			// corroborate each other and clear the confidence bar, but
+			// nothing external attests the destination is malicious.
+			name: "composite of two heuristics is not known-bad",
+			ev: DetectionEvent{
+				SignalClass: SignalComposite,
+				Signals:     []string{SignalBeacon, SignalVolumetric},
+				SignalCount: 2,
+			},
+			want:      nil,
+			wantKnown: false,
+		},
+		{
+			name: "composite including a feed match is known-bad",
+			ev: DetectionEvent{
+				SignalClass: SignalComposite,
+				Signals:     []string{SignalBeacon, SignalIoC},
+				SignalCount: 2,
+			},
+			want:      []string{SignalIoC},
+			wantKnown: true,
+		},
+		{
+			name:      "unlabelled event claims nothing",
+			ev:        DetectionEvent{Confidence: 100, Severity: SeverityCritical},
+			want:      nil,
+			wantKnown: false,
+		},
+		{
+			name: "duplicate known-bad classes are deduplicated",
+			ev: DetectionEvent{
+				SignalClass: SignalIoC,
+				Signals:     []string{SignalIoC, SignalIDS},
+			},
+			want:      []string{SignalIoC, SignalIDS},
+			wantKnown: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.ev.KnownBadSignals()
+			if len(got) != len(tt.want) {
+				t.Fatalf("KnownBadSignals() = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("KnownBadSignals()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+			if gotKnown := tt.ev.HasKnownBadSignal(); gotKnown != tt.wantKnown {
+				t.Errorf("HasKnownBadSignal() = %v, want %v", gotKnown, tt.wantKnown)
+			}
+		})
+	}
+}
+
+func TestSignalClassSerializes(t *testing.T) {
+	ev := DetectionEvent{SignalClass: SignalBeacon}
+	b, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"signal_class":"beacon"`) {
+		t.Errorf("signal_class missing from wire format: %s", b)
+	}
+
+	var empty DetectionEvent
+	b, err = json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "signal_class") {
+		t.Errorf("empty signal_class should be omitted: %s", b)
 	}
 }

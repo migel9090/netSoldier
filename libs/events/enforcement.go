@@ -13,12 +13,19 @@ const (
 )
 
 // Enforcement states.
+//
+// StateFailed is distinct from StateReverted on purpose (step 124): an action
+// whose driver failed to apply is NOT enforced, and one whose driver failed to
+// revert IS still enforced. Collapsing either into "reverted" told the
+// operator the device was free when it was not — the one lie a killswitch
+// must never tell.
 const (
 	StatePending  = "pending"
 	StateApproved = "approved"
 	StateActive   = "active"
 	StateReverted = "reverted"
 	StateRejected = "rejected"
+	StateFailed   = "failed"
 )
 
 // EnforcementAction represents a killswitch enforcement decision and its
@@ -51,4 +58,9 @@ type EnforcementAction struct {
 	// Audit.
 	ApprovedBy string `json:"approved_by,omitempty"`
 	Reason     string `json:"reason,omitempty"`
+
+	// FailureReason explains a StateFailed action: which driver call failed
+	// and why, so the UI can show "approved but not enforced" rather than
+	// leaving the operator to infer it from pod logs.
+	FailureReason string `json:"failure_reason,omitempty"`
 }
