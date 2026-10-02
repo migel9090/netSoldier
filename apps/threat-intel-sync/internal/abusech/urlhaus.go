@@ -104,18 +104,18 @@ func isIPAddress(s string) bool {
 }
 
 type urlhausResponse struct {
-	QueryStatus string          `json:"query_status"`
-	URLs        []urlhausEntry  `json:"urls"`
+	QueryStatus string         `json:"query_status"`
+	URLs        []urlhausEntry `json:"urls"`
 }
 
 type urlhausEntry struct {
-	ID         string   `json:"id"`
-	DateAdded  string   `json:"dateadded"`
-	URL        string   `json:"url"`
-	URLStatus  string   `json:"url_status"`
-	Threat     string   `json:"threat"`
-	Tags       []string `json:"tags"`
-	URLhausLink string  `json:"urlhaus_link"`
-	Host       string   `json:"host"`
-	Reporter   string   `json:"reporter"`
+	ID          string   `json:"id"`
+	DateAdded   string   `json:"dateadded"`
+	URL         string   `json:"url"`
+	URLStatus   string   `json:"url_status"`
+	Threat      string   `json:"threat"`
+	Tags        []string `json:"tags"`
+	URLhausLink string   `json:"urlhaus_link"`
+	Host        string   `json:"host"`
+	Reporter    string   `json:"reporter"`
 }

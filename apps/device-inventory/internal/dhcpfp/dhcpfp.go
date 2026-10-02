@@ -86,68 +86,68 @@ func matchFingerprint(fp string) *Profile {
 // Keys are comma-separated option codes in request order.
 var prlDB = map[string]Profile{
 	// ── Apple iOS / iPadOS ─────────────────────────────────────
-	"1,121,3,6,15,119,252":                                       {OS: "iOS", DeviceType: "phone"},
-	"1,121,3,6,15,119,252,95,44,46":                              {OS: "iOS", DeviceType: "phone"},
-	"1,3,6,15,119,252":                                           {OS: "iOS", DeviceType: "phone"},
-	"1,3,6,15,119,252,67,13":                                     {OS: "iOS", DeviceType: "phone"},
-	"1,121,3,6,15,119,252,95,44,46,67":                           {OS: "iOS", DeviceType: "phone"},
+	"1,121,3,6,15,119,252":             {OS: "iOS", DeviceType: "phone"},
+	"1,121,3,6,15,119,252,95,44,46":    {OS: "iOS", DeviceType: "phone"},
+	"1,3,6,15,119,252":                 {OS: "iOS", DeviceType: "phone"},
+	"1,3,6,15,119,252,67,13":           {OS: "iOS", DeviceType: "phone"},
+	"1,121,3,6,15,119,252,95,44,46,67": {OS: "iOS", DeviceType: "phone"},
 
 	// ── Apple macOS ────────────────────────────────────────────
-	"1,121,3,6,15,119,252,95,44,46,101":                          {OS: "macOS", DeviceType: "laptop"},
-	"1,3,6,15,119,95,252,44,46":                                  {OS: "macOS", DeviceType: "laptop"},
-	"1,3,6,15,119,95,252,44,46,47":                               {OS: "macOS", DeviceType: "laptop"},
-	"1,121,3,6,15,119,252,95,44,46,47":                           {OS: "macOS", DeviceType: "laptop"},
+	"1,121,3,6,15,119,252,95,44,46,101": {OS: "macOS", DeviceType: "laptop"},
+	"1,3,6,15,119,95,252,44,46":         {OS: "macOS", DeviceType: "laptop"},
+	"1,3,6,15,119,95,252,44,46,47":      {OS: "macOS", DeviceType: "laptop"},
+	"1,121,3,6,15,119,252,95,44,46,47":  {OS: "macOS", DeviceType: "laptop"},
 
 	// ── Apple tvOS / HomePod ───────────────────────────────────
-	"1,3,6,15,119,252,95":                                        {OS: "tvOS", DeviceType: "tv"},
+	"1,3,6,15,119,252,95": {OS: "tvOS", DeviceType: "tv"},
 
 	// ── Windows 10/11 ──────────────────────────────────────────
-	"1,3,6,15,31,33,43,44,46,47,119,121,249,252":                 {OS: "Windows", DeviceType: "desktop"},
-	"1,15,3,6,44,46,47,31,33,121,249,252,43":                     {OS: "Windows", DeviceType: "desktop"},
-	"1,15,3,6,44,46,47,31,33,121,249,252":                        {OS: "Windows", DeviceType: "desktop"},
-	"1,3,6,15,31,33,43,44,46,47,119,121,249,252,0":               {OS: "Windows", DeviceType: "desktop"},
+	"1,3,6,15,31,33,43,44,46,47,119,121,249,252":   {OS: "Windows", DeviceType: "desktop"},
+	"1,15,3,6,44,46,47,31,33,121,249,252,43":       {OS: "Windows", DeviceType: "desktop"},
+	"1,15,3,6,44,46,47,31,33,121,249,252":          {OS: "Windows", DeviceType: "desktop"},
+	"1,3,6,15,31,33,43,44,46,47,119,121,249,252,0": {OS: "Windows", DeviceType: "desktop"},
 
 	// ── Windows 7/8 ────────────────────────────────────────────
-	"1,15,3,6,44,46,47,31,33,249,43":                             {OS: "Windows", DeviceType: "desktop"},
-	"1,15,3,6,44,46,47,31,33,249,43,252":                         {OS: "Windows", DeviceType: "desktop"},
+	"1,15,3,6,44,46,47,31,33,249,43":     {OS: "Windows", DeviceType: "desktop"},
+	"1,15,3,6,44,46,47,31,33,249,43,252": {OS: "Windows", DeviceType: "desktop"},
 
 	// ── Android ────────────────────────────────────────────────
-	"1,3,6,15,26,28,51,58,59,43":                                 {OS: "Android", DeviceType: "phone"},
-	"1,33,3,6,15,26,28,51,58,59,43":                              {OS: "Android", DeviceType: "phone"},
-	"1,3,6,15,26,28,51,58,59":                                    {OS: "Android", DeviceType: "phone"},
-	"1,3,6,15,26,28,51,58,59,43,114":                             {OS: "Android", DeviceType: "phone"},
+	"1,3,6,15,26,28,51,58,59,43":     {OS: "Android", DeviceType: "phone"},
+	"1,33,3,6,15,26,28,51,58,59,43":  {OS: "Android", DeviceType: "phone"},
+	"1,3,6,15,26,28,51,58,59":        {OS: "Android", DeviceType: "phone"},
+	"1,3,6,15,26,28,51,58,59,43,114": {OS: "Android", DeviceType: "phone"},
 
 	// ── ChromeOS ───────────────────────────────────────────────
-	"1,121,33,3,6,12,15,26,28,51,54,58,59,119,43":                {OS: "ChromeOS", DeviceType: "laptop"},
+	"1,121,33,3,6,12,15,26,28,51,54,58,59,119,43": {OS: "ChromeOS", DeviceType: "laptop"},
 
 	// ── Linux (dhclient) ───────────────────────────────────────
-	"1,28,2,3,15,6,119,12,44,47,26,121,42":                       {OS: "Linux", DeviceType: "desktop"},
-	"1,28,2,121,15,6,12,40,41,42,26,119,3":                       {OS: "Linux", DeviceType: "desktop"},
-	"1,28,2,3,15,6,12":                                           {OS: "Linux", DeviceType: "desktop"},
+	"1,28,2,3,15,6,119,12,44,47,26,121,42": {OS: "Linux", DeviceType: "desktop"},
+	"1,28,2,121,15,6,12,40,41,42,26,119,3": {OS: "Linux", DeviceType: "desktop"},
+	"1,28,2,3,15,6,12":                     {OS: "Linux", DeviceType: "desktop"},
 
 	// ── Linux (NetworkManager) ─────────────────────────────────
-	"1,28,2,3,15,6,119,12,44,47,26,121":                          {OS: "Linux", DeviceType: "desktop"},
+	"1,28,2,3,15,6,119,12,44,47,26,121": {OS: "Linux", DeviceType: "desktop"},
 
 	// ── Linux (systemd-networkd) ───────────────────────────────
-	"1,2,3,6,12,15,26,28,121,119":                                {OS: "Linux", DeviceType: "desktop"},
+	"1,2,3,6,12,15,26,28,121,119": {OS: "Linux", DeviceType: "desktop"},
 
 	// ── Smart TV / media ───────────────────────────────────────
-	"1,3,6,12,15,28,42,125":                                      {OS: "Tizen", DeviceType: "tv"},
-	"1,3,6,15,28,33":                                             {OS: "webOS", DeviceType: "tv"},
-	"1,3,28,6":                                                   {OS: "Embedded", DeviceType: "tv"},
+	"1,3,6,12,15,28,42,125": {OS: "Tizen", DeviceType: "tv"},
+	"1,3,6,15,28,33":        {OS: "webOS", DeviceType: "tv"},
+	"1,3,28,6":              {OS: "Embedded", DeviceType: "tv"},
 
 	// ── IoT / embedded ─────────────────────────────────────────
-	"1,3,6,15,28":                                                {OS: "Embedded", DeviceType: "iot"},
-	"1,3,6,12,15,28,42":                                          {OS: "Embedded", DeviceType: "iot"},
-	"1,3,6,15":                                                   {OS: "Embedded", DeviceType: "iot"},
-	"1,3,6":                                                      {OS: "Embedded", DeviceType: "iot"},
-	"1,3,6,28":                                                   {OS: "Embedded", DeviceType: "iot"},
+	"1,3,6,15,28":       {OS: "Embedded", DeviceType: "iot"},
+	"1,3,6,12,15,28,42": {OS: "Embedded", DeviceType: "iot"},
+	"1,3,6,15":          {OS: "Embedded", DeviceType: "iot"},
+	"1,3,6":             {OS: "Embedded", DeviceType: "iot"},
+	"1,3,6,28":          {OS: "Embedded", DeviceType: "iot"},
 
 	// ── Printers ───────────────────────────────────────────────
-	"1,3,6,15,44,47,12":                                          {OS: "Embedded", DeviceType: "printer"},
-	"6,3,1,15,66,67,13,44,12":                                    {OS: "Embedded", DeviceType: "printer"},
+	"1,3,6,15,44,47,12":       {OS: "Embedded", DeviceType: "printer"},
+	"6,3,1,15,66,67,13,44,12": {OS: "Embedded", DeviceType: "printer"},
 
 	// ── Network equipment ──────────────────────────────────────
-	"1,66,6,3,15,150":                                            {OS: "IOS", DeviceType: "router"},
-	"1,3,6,15,150,43,125":                                        {OS: "IOS", DeviceType: "router"},
+	"1,66,6,3,15,150":     {OS: "IOS", DeviceType: "router"},
+	"1,3,6,15,150,43,125": {OS: "IOS", DeviceType: "router"},
 }

@@ -83,14 +83,14 @@ func (s *Scanner) sendRequest(fd int, targetIP net.IP) error {
 
 	// ARP header
 	binary.BigEndian.PutUint16(frame[14:16], 1)      // hardware type: Ethernet
-	binary.BigEndian.PutUint16(frame[16:18], 0x0800)  // protocol type: IPv4
-	frame[18] = 6                                      // hardware addr len
-	frame[19] = 4                                      // protocol addr len
-	binary.BigEndian.PutUint16(frame[20:22], 1)       // operation: request
-	copy(frame[22:28], s.iface.HardwareAddr)           // sender MAC
-	copy(frame[28:32], s.localIP.To4())                // sender IP
+	binary.BigEndian.PutUint16(frame[16:18], 0x0800) // protocol type: IPv4
+	frame[18] = 6                                    // hardware addr len
+	frame[19] = 4                                    // protocol addr len
+	binary.BigEndian.PutUint16(frame[20:22], 1)      // operation: request
+	copy(frame[22:28], s.iface.HardwareAddr)         // sender MAC
+	copy(frame[28:32], s.localIP.To4())              // sender IP
 	// frame[32:38] target MAC stays zero
-	copy(frame[38:42], targetIP.To4())                 // target IP
+	copy(frame[38:42], targetIP.To4()) // target IP
 
 	addr := syscall.SockaddrLinklayer{
 		Protocol: htons(ethPARP),
