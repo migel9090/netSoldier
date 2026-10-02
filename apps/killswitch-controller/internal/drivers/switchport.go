@@ -27,9 +27,11 @@ import (
 // The webhook receives a SwitchRequest JSON body and must return 2xx
 // on success or a non-2xx error with a message body.
 type SwitchPortDriver struct {
-	webhookURL    string
+	webhookURL     string
 	quarantineVLAN int
-	http          *http.Client
+	secret         string
+	guard          *TargetGuard
+	http           *http.Client
 }
 
 // SwitchRequest is the JSON body sent to the switch webhook on
@@ -45,10 +47,19 @@ type SwitchRequest struct {
 // NewSwitchPortDriver creates a driver that delegates switch operations
 // to a webhook. quarantineVLAN is the VLAN ID used for quarantine
 // (0 = disable port instead of VLAN reassignment).
-func NewSwitchPortDriver(webhookURL string, quarantineVLAN int) *SwitchPortDriver {
+//
+// secret signs each request body with HMAC-SHA256 so the webhook handler can
+// verify the instruction came from this controller. Disabling a switch port
+// is the most destructive action in the system; sending it unauthenticated
+// meant anyone able to reach the webhook URL could cut off any device, and
+// the handler had no way to tell a genuine request from a forged one.
+func NewSwitchPortDriver(webhookURL string, quarantineVLAN int, secret string,
+	guard *TargetGuard) *SwitchPortDriver {
 	return &SwitchPortDriver{
 		webhookURL:     webhookURL,
 		quarantineVLAN: quarantineVLAN,
+		secret:         secret,
+		guard:          guard,
 		http:           &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -58,6 +69,10 @@ func (d *SwitchPortDriver) Name() string { return "switch_acl" }
 // Apply calls the switch webhook to disable the port or move the
 // device to the quarantine VLAN.
 func (d *SwitchPortDriver) Apply(ctx context.Context, action *events.EnforcementAction) error {
+	if err := d.guard.Check(action.TargetMAC, action.TargetIP); err != nil {
+		return err
+	}
+
 	op := "disable_port"
 	if d.quarantineVLAN > 0 {
 		op = "quarantine_vlan"
@@ -114,6 +129,9 @@ func (d *SwitchPortDriver) call(ctx context.Context, sr SwitchRequest) error {
 		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if d.secret != "" {
+		req.Header.Set(events.SignatureHeader, events.SignPayload(d.secret, body))
+	}
 
 	resp, err := d.http.Do(req)
 	if err != nil {
