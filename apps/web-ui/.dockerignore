@@ -1,0 +1,8 @@
+# The web-ui image builds from apps/web-ui as its own context.
+node_modules
+.svelte-kit
+build
+.env
+.env.*
+!.env.example
+*.log
