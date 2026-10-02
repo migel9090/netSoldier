@@ -27,6 +27,21 @@ jobs:
         uses: bridgecrewio/checkov-action@6772af193d58e46738c9401a4ca9c1f39de0fec8 # v12.3104.0
         with:
           directory: .
+          # The repo carries ~680 pre-existing Checkov findings, almost all
+          # of a handful of endemic classes (CKV_K8S_21 appears over 120
+          # times, and no workload in the tree sets an image digest or
+          # imagePullPolicy). soft_fail keeps the job green, but the SARIF
+          # upload still raises a code-scanning alert per finding, so any PR
+          # touching a kustomization went red on debt it did not introduce.
+          #
+          # The baseline records that known set. Checkov reports only what is
+          # not in it, so a genuinely new misconfiguration still surfaces --
+          # verified by planting a privileged hostNetwork Deployment, which
+          # produced 20 findings with the baseline in place.
+          #
+          # Regenerate after deliberately paying debt down:
+          #   checkov -d . --create-baseline --soft-fail
+          baseline: .checkov.baseline
           soft_fail: true
           output_format: sarif
           output_file_path: checkov.sarif
