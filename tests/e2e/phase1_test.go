@@ -40,7 +40,7 @@ func TestPhase1E2E(t *testing.T) {
 
 	entryTime := time.Now().Add(time.Minute)
 	ag := startMockAdGuard(t, entryTime)
-	wh := startWebhookReceiver(t)
+	wh := startWebhookReceiver(t, e2eWebhookSecret, e2eAPIKey)
 
 	detAddr := freeAddr(t)
 	stopDet := startProc(t, detBin, map[string]string{
@@ -51,7 +51,8 @@ func TestPhase1E2E(t *testing.T) {
 		"THREATLIST_PATH":             tlFile,
 		"POLL_INTERVAL":               "1s",
 		"WEBHOOK_URL":                 wh.url,
-		"WEBHOOK_SECRET":              "e2e-secret",
+		"WEBHOOK_SECRET":              e2eWebhookSecret,
+		"WEBHOOK_TOKEN":               e2eAPIKey,
 		"OTEL_EXPORTER_OTLP_ENDPOINT": "localhost:1",
 	})
 	t.Cleanup(stopDet)
@@ -69,6 +70,14 @@ func TestPhase1E2E(t *testing.T) {
 		"ADGUARD_URL":      ag.url,
 		"ADGUARD_USER":     "admin",
 		"ADGUARD_PASSWORD": "test",
+		// Run with authentication and an allowlist configured — the
+		// production posture. Every earlier e2e run left both unset, so the
+		// authenticated path was never exercised and auto-block was never
+		// tested against the empty-allowlist guard.
+		"KILLSWITCH_API_KEY": e2eAPIKey,
+		"WEBHOOK_SECRET":     e2eWebhookSecret,
+		"ALLOWLIST_IPS":      "192.168.1.1",
+		"ALLOWLIST_MACS":     "aa:bb:cc:00:00:01",
 	})
 	t.Cleanup(stopKs)
 
@@ -222,7 +231,10 @@ func TestPhase1E2E(t *testing.T) {
 
 	// ── Killswitch: auto-block ──────────────────────────────────────
 
-	t.Log("evaluating critical-severity detection → auto-block")
+	// signal_class is load-bearing: auto-block requires an externally
+	// attested known-bad indicator (a feed match or an IDS signature), not
+	// just high confidence. See the heuristics case below.
+	t.Log("evaluating critical-severity known-bad detection → auto-block")
 	var autoResult evalResp
 	httpPostJSON(t, "http://"+ksAddr+"/evaluate", map[string]any{
 		"schema_version": "1.0",
@@ -236,6 +248,7 @@ func TestPhase1E2E(t *testing.T) {
 		"confidence":     95,
 		"source":         "e2e-test",
 		"threat":         "c2-beacon",
+		"signal_class":   events.SignalIoC,
 	}, &autoResult)
 	assertEq(t, "auto.decision", "auto_block", autoResult.Decision.Action)
 	if autoResult.Action == nil {

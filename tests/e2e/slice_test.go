@@ -36,7 +36,7 @@ func TestVerticalSlice(t *testing.T) {
 
 	entryTime := time.Now().Add(time.Minute)
 	ag := startMockAdGuard(t, entryTime)
-	wh := startWebhookReceiver(t)
+	wh := startWebhookReceiver(t, e2eWebhookSecret, e2eAPIKey)
 
 	detAddr := freeAddr(t)
 	stopDet := startProc(t, detBin, map[string]string{
@@ -47,7 +47,8 @@ func TestVerticalSlice(t *testing.T) {
 		"THREATLIST_PATH":             tlFile,
 		"POLL_INTERVAL":               "1s",
 		"WEBHOOK_URL":                 wh.url,
-		"WEBHOOK_SECRET":              "e2e-secret",
+		"WEBHOOK_SECRET":              e2eWebhookSecret,
+		"WEBHOOK_TOKEN":               e2eAPIKey,
 		"OTEL_EXPORTER_OTLP_ENDPOINT": "localhost:1",
 	})
 	t.Cleanup(stopDet)

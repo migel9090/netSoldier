@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/migel9090/netSoldier/libs/events"
 )
 
 func repoRoot(t *testing.T) string {
@@ -132,13 +134,38 @@ func assertEq(t *testing.T, field, want, got string) {
 	}
 }
 
+// httpPostJSON posts to an authenticated endpoint. The token is sent
+// unconditionally because the services now run with auth enabled in e2e —
+// the production posture, which no earlier run exercised.
 func httpPostJSON(t *testing.T, url string, body any, dst any) {
+	t.Helper()
+	postAuthedJSON(t, url, e2eAPIKey, body, dst)
+}
+
+// postAuthedJSON posts a JSON body with a bearer token and, when the target
+// requires it, an HMAC signature over the exact bytes sent.
+func postAuthedJSON(t *testing.T, url, token string, body any, dst any) {
 	t.Helper()
 	data, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	resp, err := http.Post(url, "application/json", bytes.NewReader(data))
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	// Only /evaluate carries a signed detection payload; operator actions
+	// are authenticated by the bearer token alone.
+	if strings.HasSuffix(url, "/evaluate") {
+		req.Header.Set(events.SignatureHeader, events.SignPayload(e2eWebhookSecret, data))
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
@@ -153,6 +180,17 @@ func httpPostJSON(t *testing.T, url string, body any, dst any) {
 		}
 	}
 }
+
+// listActions fetches the killswitch actions in a given state.
+func listActions(t *testing.T, ksAddr, state string) []events.EnforcementAction {
+	t.Helper()
+	var out []events.EnforcementAction
+	httpGetJSON(t, "http://"+ksAddr+"/actions/"+state, &out)
+	return out
+}
+
+// bytesReader is a tiny alias so request bodies read clearly in tests.
+func bytesReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
 
 type mockAdGuard struct {
 	url   string
@@ -218,14 +256,59 @@ type webhookRx struct {
 	got chan struct{}
 	mu  sync.Mutex
 	buf []json.RawMessage
+	// Counters for the authenticated path, so a test can assert that
+	// deliveries were accepted BECAUSE they were correctly signed rather
+	// than because nothing was checked.
+	verified     int
+	badSignature int
+	unauthorized int
 }
 
-func startWebhookReceiver(t *testing.T) *webhookRx {
+// startWebhookReceiver starts a receiver that records deliveries.
+//
+// When secret/token are non-empty it VERIFIES them the way the killswitch
+// does and records the result. The previous receiver accepted anything, so
+// no test ever exercised the authenticated path — which is exactly how the
+// detection-engine ended up sending X-Webhook-Secret while the killswitch
+// required Authorization: Bearer, a mismatch that would have 401'd every
+// enforcement request the moment an API key was configured.
+func startWebhookReceiver(t *testing.T, creds ...string) *webhookRx {
 	t.Helper()
+	var secret, token string
+	if len(creds) > 0 {
+		secret = creds[0]
+	}
+	if len(creds) > 1 {
+		token = creds[1]
+	}
+
 	rx := &webhookRx{got: make(chan struct{}, 1)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+
+		if token != "" {
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				rx.mu.Lock()
+				rx.unauthorized++
+				rx.mu.Unlock()
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+		}
+		if secret != "" {
+			if err := events.VerifyPayload(secret, r.Header.Get(events.SignatureHeader), body); err != nil {
+				rx.mu.Lock()
+				rx.badSignature++
+				rx.mu.Unlock()
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			rx.mu.Lock()
+			rx.verified++
+			rx.mu.Unlock()
+		}
+
 		rx.mu.Lock()
 		rx.buf = append(rx.buf, json.RawMessage(body))
 		rx.mu.Unlock()
@@ -249,4 +332,11 @@ func (rx *webhookRx) received() []json.RawMessage {
 	out := make([]json.RawMessage, len(rx.buf))
 	copy(out, rx.buf)
 	return out
+}
+
+// stats reports how deliveries were authenticated.
+func (rx *webhookRx) stats() (verified, badSignature, unauthorized int) {
+	rx.mu.Lock()
+	defer rx.mu.Unlock()
+	return rx.verified, rx.badSignature, rx.unauthorized
 }
