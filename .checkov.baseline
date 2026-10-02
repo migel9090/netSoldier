@@ -1,0 +1,2182 @@
+{
+    "failed_checks": [
+        {
+            "file": "/apps/detection-engine/Dockerfile",
+            "findings": [
+                {
+                    "resource": "/apps/detection-engine/Dockerfile.",
+                    "check_ids": [
+                        "CKV_DOCKER_2"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/apps/device-inventory/Dockerfile",
+            "findings": [
+                {
+                    "resource": "/apps/device-inventory/Dockerfile.",
+                    "check_ids": [
+                        "CKV_DOCKER_2"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/apps/killswitch-controller/Dockerfile",
+            "findings": [
+                {
+                    "resource": "/apps/killswitch-controller/Dockerfile.",
+                    "check_ids": [
+                        "CKV_DOCKER_2"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/apps/ml-anomaly/Dockerfile",
+            "findings": [
+                {
+                    "resource": "/apps/ml-anomaly/Dockerfile.",
+                    "check_ids": [
+                        "CKV_DOCKER_2"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/apps/threat-intel-sync/Dockerfile",
+            "findings": [
+                {
+                    "resource": "/apps/threat-intel-sync/Dockerfile.",
+                    "check_ids": [
+                        "CKV_DOCKER_2"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/apps/web-ui/Dockerfile",
+            "findings": [
+                {
+                    "resource": "/apps/web-ui/Dockerfile.",
+                    "check_ids": [
+                        "CKV_DOCKER_2"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/adguard/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:StatefulSet.dns.adguard-home",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_15",
+                        "CKV_K8S_23",
+                        "CKV_K8S_25",
+                        "CKV_K8S_26",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/adguard/statefulset.yaml",
+            "findings": [
+                {
+                    "resource": "StatefulSet.dns.adguard-home",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_15",
+                        "CKV_K8S_23",
+                        "CKV_K8S_25",
+                        "CKV_K8S_26",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/argocd/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:ClusterRole.default.argocd-application-controller",
+                    "check_ids": [
+                        "CKV_K8S_155",
+                        "CKV_K8S_156",
+                        "CKV_K8S_157",
+                        "CKV_K8S_158",
+                        "CKV_K8S_49"
+                    ]
+                },
+                {
+                    "resource": "base:ClusterRole.default.argocd-server",
+                    "check_ids": [
+                        "CKV_K8S_155",
+                        "CKV_K8S_49"
+                    ]
+                },
+                {
+                    "resource": "base:Deployment.argocd.argocd-applicationset-controller",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_29",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                },
+                {
+                    "resource": "base:Deployment.argocd.argocd-dex-server",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_29",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                },
+                {
+                    "resource": "base:Deployment.argocd.argocd-notifications-controller",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_9"
+                    ]
+                },
+                {
+                    "resource": "base:Deployment.argocd.argocd-redis",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_15",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                },
+                {
+                    "resource": "base:Deployment.argocd.argocd-repo-server",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_15",
+                        "CKV_K8S_20",
+                        "CKV_K8S_22",
+                        "CKV_K8S_28",
+                        "CKV_K8S_29",
+                        "CKV_K8S_30",
+                        "CKV_K8S_35",
+                        "CKV_K8S_37",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:Deployment.argocd.argocd-server",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_29",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:StatefulSet.argocd.argocd-application-controller",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_29",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/argocd/patches/argocd-cm-ksops.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.argocd-cm",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/argocd/patches/repo-server-ksops.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.argocd-repo-server",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_14",
+                        "CKV_K8S_15",
+                        "CKV_K8S_20",
+                        "CKV_K8S_21",
+                        "CKV_K8S_22",
+                        "CKV_K8S_23",
+                        "CKV_K8S_28",
+                        "CKV_K8S_29",
+                        "CKV_K8S_30",
+                        "CKV_K8S_31",
+                        "CKV_K8S_37",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/argocd/patches/server-cmd-params.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.argocd-cmd-params-cm",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/docker/zeek/Dockerfile",
+            "findings": [
+                {
+                    "resource": "/deploy/docker/zeek/Dockerfile.",
+                    "check_ids": [
+                        "CKV_DOCKER_2"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/helm/netsoldier/charts/detection-engine/templates/deployment.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.release-name-detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_21",
+                        "CKV_K8S_38",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "Pod.default.release-name-detection-engine.app.kubernetes.io/name-detection-engine.app.kubernetes.io/instance-release-name",
+                    "check_ids": [
+                        "CKV2_K8S_6"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/helm/netsoldier/charts/detection-engine/templates/service.yaml",
+            "findings": [
+                {
+                    "resource": "Service.default.release-name-detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_21",
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/helm/netsoldier/charts/detection-engine/templates/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.release-name-detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_21",
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/backup/configmap.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.backup-scripts",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/backup/cronjob-clickhouse.yaml",
+            "findings": [
+                {
+                    "resource": "CronJob.default.backup-clickhouse",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/backup/cronjob-state.yaml",
+            "findings": [
+                {
+                    "resource": "CronJob.default.backup-state",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/backup/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:CronJob.netsoldier.backup-clickhouse",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:CronJob.netsoldier.backup-state",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/backup/rbac.yaml",
+            "findings": [
+                {
+                    "resource": "Role.default.backup-reader",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "RoleBinding.default.backup-reader",
+                    "check_ids": [
+                        "CKV2_K8S_5",
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/backup/secret.example.yaml",
+            "findings": [
+                {
+                    "resource": "Secret.default.backup-age",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "Secret.default.backup-s3",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/backup/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.backup",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/clickhouse/cold-export-cm.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.clickhouse-cold-export",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/clickhouse/cold-export-cronjob.yaml",
+            "findings": [
+                {
+                    "resource": "CronJob.default.clickhouse-cold-export",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/clickhouse/cold-export-secret.example.yaml",
+            "findings": [
+                {
+                    "resource": "Secret.default.clickhouse-cold-export-s3",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/clickhouse/configmap.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.clickhouse-config",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "ConfigMap.default.clickhouse-init",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/clickhouse/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:CronJob.netsoldier.clickhouse-cold-export",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:StatefulSet.netsoldier.clickhouse",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/clickhouse/secret.example.yaml",
+            "findings": [
+                {
+                    "resource": "Secret.default.clickhouse-credentials",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/clickhouse/service.yaml",
+            "findings": [
+                {
+                    "resource": "Service.default.clickhouse",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/clickhouse/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.clickhouse",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/clickhouse/statefulset.yaml",
+            "findings": [
+                {
+                    "resource": "StatefulSet.default.clickhouse",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/detection-engine/api-secret.example.yaml",
+            "findings": [
+                {
+                    "resource": "Secret.default.detection-engine-credentials",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "c2cc15ed78e9510c5f270ac5f256d938e4f582df",
+                    "check_ids": [
+                        "CKV_SECRET_6"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/detection-engine/configmap.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.detection-engine-threatlist",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/detection-engine/deployment.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/detection-engine/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:ConfigMap.default.detection-engine-threatlist",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "base:Deployment.default.detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:Service.default.detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "base:ServiceAccount.default.detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/detection-engine/secret.example.yaml",
+            "findings": [
+                {
+                    "resource": "3209653617da52651168f034d0d6b0c147b0ef37",
+                    "check_ids": [
+                        "CKV_SECRET_6"
+                    ]
+                },
+                {
+                    "resource": "Secret.default.adguard-credentials",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/detection-engine/service.yaml",
+            "findings": [
+                {
+                    "resource": "Service.default.detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/detection-engine/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/device-inventory/deployment.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.device-inventory",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_19",
+                        "CKV_K8S_21",
+                        "CKV_K8S_25",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/device-inventory/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:Deployment.default.device-inventory",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_19",
+                        "CKV_K8S_21",
+                        "CKV_K8S_25",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:Service.default.device-inventory",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "base:ServiceAccount.default.device-inventory",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/device-inventory/service.yaml",
+            "findings": [
+                {
+                    "resource": "Service.default.device-inventory",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/device-inventory/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.device-inventory",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/fluent-bit/configmap.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.fluent-bit-config",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/fluent-bit/daemonset.yaml",
+            "findings": [
+                {
+                    "resource": "DaemonSet.default.fluent-bit",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/fluent-bit/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:ConfigMap.default.fluent-bit-config",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "base:DaemonSet.default.fluent-bit",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:ServiceAccount.default.fluent-bit",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/fluent-bit/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.fluent-bit",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/garage/bucket-init-job.yaml",
+            "findings": [
+                {
+                    "resource": "Job.default.garage-bucket-init",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/garage/configmap.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.garage-config",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/garage/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:Job.storage.garage-bucket-init",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:StatefulSet.storage.garage",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/garage/service.yaml",
+            "findings": [
+                {
+                    "resource": "Service.default.garage",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "Service.default.garage-admin",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/garage/statefulset.yaml",
+            "findings": [
+                {
+                    "resource": "StatefulSet.default.garage",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/killswitch-controller/allowlist-configmap.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.killswitch-allowlist",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/killswitch-controller/deployment.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.killswitch-controller",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/killswitch-controller/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:ConfigMap.default.killswitch-allowlist",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "base:Deployment.default.killswitch-controller",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:Service.default.killswitch-controller",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "base:ServiceAccount.default.killswitch-controller",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/killswitch-controller/secret.example.yaml",
+            "findings": [
+                {
+                    "resource": "5f635e0589850c57fe7cbe66aaf5fb94b236bc6b",
+                    "check_ids": [
+                        "CKV_SECRET_6"
+                    ]
+                },
+                {
+                    "resource": "Secret.default.killswitch-credentials",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "c2cc15ed78e9510c5f270ac5f256d938e4f582df",
+                    "check_ids": [
+                        "CKV_SECRET_6"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/killswitch-controller/service.yaml",
+            "findings": [
+                {
+                    "resource": "Service.default.killswitch-controller",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/killswitch-controller/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.killswitch-controller",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "overlay:base:CronJob.netsoldier.backup-clickhouse",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "overlay:base:CronJob.netsoldier.backup-state",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "overlay:base:Deployment.netsoldier.detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "overlay:base:Deployment.netsoldier.device-inventory",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_19",
+                        "CKV_K8S_25",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "overlay:base:Deployment.netsoldier.web-ui",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/misp/configmap.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.misp-config",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/misp/mariadb.yaml",
+            "findings": [
+                {
+                    "resource": "Service.default.misp-mariadb",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "StatefulSet.default.misp-mariadb",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/misp/misp.yaml",
+            "findings": [
+                {
+                    "resource": "Service.default.misp",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "StatefulSet.default.misp",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/misp/redis.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.misp-redis",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "Service.default.misp-redis",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/misp/secret.sops.example.yaml",
+            "findings": [
+                {
+                    "resource": "Secret.default.misp-secrets",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/misp/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.misp",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/ml-anomaly/deployment.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.ml-anomaly",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/ml-anomaly/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:Deployment.netsoldier.ml-anomaly",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/ml-anomaly/service.yaml",
+            "findings": [
+                {
+                    "resource": "Service.default.ml-anomaly",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/ml-anomaly/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.ml-anomaly",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/ntopng/configmap.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.ntopng-config",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/ntopng/deployment.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.ntopng",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_19",
+                        "CKV_K8S_21",
+                        "CKV_K8S_23",
+                        "CKV_K8S_25",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/ntopng/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:Deployment.netsoldier.ntopng",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_19",
+                        "CKV_K8S_23",
+                        "CKV_K8S_25",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/ntopng/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.ntopng",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/observability/grafana-beaconing-anomalies-cm.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.netsoldier-beaconing-anomalies",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/observability/grafana-dashboard-cm.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.netsoldier-system-health",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/observability/grafana-dns-threat-intel-cm.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.netsoldier-dns-threat-intel",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/observability/grafana-dpi-protocols-cm.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.netsoldier-dpi-protocols",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/observability/grafana-killswitch-audit-cm.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.netsoldier-killswitch-audit",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/observability/grafana-network-overview-cm.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.netsoldier-network-overview",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/observability/grafana-tls-anomalies-cm.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.netsoldier-tls-anomalies",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/observability/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:ConfigMap.default.netsoldier-beaconing-anomalies",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "base:ConfigMap.default.netsoldier-dns-threat-intel",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "base:ConfigMap.default.netsoldier-dpi-protocols",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "base:ConfigMap.default.netsoldier-killswitch-audit",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "base:ConfigMap.default.netsoldier-network-overview",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "base:ConfigMap.default.netsoldier-system-health",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "base:ConfigMap.default.netsoldier-tls-anomalies",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/rita/configmap.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.rita-config",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/rita/cronjob.yaml",
+            "findings": [
+                {
+                    "resource": "CronJob.default.rita-import",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/rita/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:CronJob.netsoldier.rita-import",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/rita/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.rita",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/suricata/configmap.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.suricata-config",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "ConfigMap.default.suricata-vector-config",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/suricata/deployment.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.suricata",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_19",
+                        "CKV_K8S_21",
+                        "CKV_K8S_25",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/suricata/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:Deployment.netsoldier.suricata",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_19",
+                        "CKV_K8S_25",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/suricata/local-rules-cm.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.suricata-local-rules",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/suricata/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.suricata",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/suricata/updater-cm.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.suricata-updater-script",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/threat-intel-sync/deployment.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.threat-intel-sync",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/threat-intel-sync/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:Deployment.default.threat-intel-sync",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:Service.default.threat-intel-sync",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "base:ServiceAccount.default.threat-intel-sync",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/threat-intel-sync/service.yaml",
+            "findings": [
+                {
+                    "resource": "Service.default.threat-intel-sync",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/threat-intel-sync/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.threat-intel-sync",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/web-ui/deployment.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.web-ui",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/web-ui/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:Deployment.default.web-ui",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:Service.default.web-ui",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                },
+                {
+                    "resource": "base:ServiceAccount.default.web-ui",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/web-ui/service.yaml",
+            "findings": [
+                {
+                    "resource": "Service.default.web-ui",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/web-ui/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.web-ui",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/zeek/configmap.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.zeek-config",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/zeek/deployment.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.zeek",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_19",
+                        "CKV_K8S_21",
+                        "CKV_K8S_25",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/zeek/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:Deployment.netsoldier.zeek",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_19",
+                        "CKV_K8S_25",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/zeek/serviceaccount.yaml",
+            "findings": [
+                {
+                    "resource": "ServiceAccount.default.zeek",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/base/zeek/vector-cm.yaml",
+            "findings": [
+                {
+                    "resource": "ConfigMap.default.zeek-vector-config",
+                    "check_ids": [
+                        "CKV_K8S_21"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/overlays/pi-edge/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "overlay:pi-edge:DaemonSet.netsoldier.fluent-bit",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "overlay:pi-edge:Deployment.netsoldier.detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "overlay:pi-edge:Deployment.netsoldier.device-inventory",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_19",
+                        "CKV_K8S_25",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "overlay:pi-edge:StatefulSet.dns.adguard-home",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_15",
+                        "CKV_K8S_23",
+                        "CKV_K8S_25",
+                        "CKV_K8S_26",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/overlays/pi-edge/netsoldier/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "overlay:netsoldier:DaemonSet.netsoldier.fluent-bit",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "overlay:netsoldier:Deployment.netsoldier.detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "overlay:netsoldier:Deployment.netsoldier.device-inventory",
+                    "check_ids": [
+                        "CKV_K8S_15",
+                        "CKV_K8S_19",
+                        "CKV_K8S_25",
+                        "CKV_K8S_38",
+                        "CKV_K8S_43"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/overlays/pi-edge/netsoldier/patches/detection-engine-env.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_14",
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_22",
+                        "CKV_K8S_23",
+                        "CKV_K8S_28",
+                        "CKV_K8S_29",
+                        "CKV_K8S_31",
+                        "CKV_K8S_35",
+                        "CKV_K8S_37",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/overlays/pi-edge/netsoldier/patches/detection-engine-resources.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_14",
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_29",
+                        "CKV_K8S_31",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/overlays/pi-edge/netsoldier/patches/device-inventory-resources.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.device-inventory",
+                    "check_ids": [
+                        "CKV_K8S_14",
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_25",
+                        "CKV_K8S_29",
+                        "CKV_K8S_31",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/overlays/pi-edge/netsoldier/patches/fluent-bit-resources.yaml",
+            "findings": [
+                {
+                    "resource": "DaemonSet.default.fluent-bit",
+                    "check_ids": [
+                        "CKV_K8S_14",
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_22",
+                        "CKV_K8S_23",
+                        "CKV_K8S_28",
+                        "CKV_K8S_29",
+                        "CKV_K8S_31",
+                        "CKV_K8S_37",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/overlays/proxmox-soc/patches/detection-engine-resources.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.detection-engine",
+                    "check_ids": [
+                        "CKV_K8S_14",
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_25",
+                        "CKV_K8S_29",
+                        "CKV_K8S_31",
+                        "CKV_K8S_35",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/overlays/proxmox-soc/patches/device-inventory-resources.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.device-inventory",
+                    "check_ids": [
+                        "CKV_K8S_14",
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_25",
+                        "CKV_K8S_29",
+                        "CKV_K8S_31",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/overlays/proxmox-soc/patches/killswitch-controller-resources.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.killswitch-controller",
+                    "check_ids": [
+                        "CKV_K8S_14",
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_22",
+                        "CKV_K8S_23",
+                        "CKV_K8S_28",
+                        "CKV_K8S_29",
+                        "CKV_K8S_31",
+                        "CKV_K8S_37",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/overlays/proxmox-soc/patches/threat-intel-sync-resources.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.threat-intel-sync",
+                    "check_ids": [
+                        "CKV_K8S_14",
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_22",
+                        "CKV_K8S_23",
+                        "CKV_K8S_28",
+                        "CKV_K8S_29",
+                        "CKV_K8S_31",
+                        "CKV_K8S_37",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kustomize/overlays/proxmox-soc/patches/web-ui-resources.yaml",
+            "findings": [
+                {
+                    "resource": "Deployment.default.web-ui",
+                    "check_ids": [
+                        "CKV_K8S_14",
+                        "CKV_K8S_15",
+                        "CKV_K8S_21",
+                        "CKV_K8S_29",
+                        "CKV_K8S_31",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/deploy/kyverno/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:ClusterRole.default.kyverno:admission-controller:core",
+                    "check_ids": [
+                        "CKV_K8S_155"
+                    ]
+                },
+                {
+                    "resource": "base:ClusterRole.default.kyverno:cleanup-controller:core",
+                    "check_ids": [
+                        "CKV_K8S_155"
+                    ]
+                },
+                {
+                    "resource": "base:CronJob.kyverno.kyverno-cleanup-admission-reports",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_15",
+                        "CKV_K8S_29",
+                        "CKV_K8S_31",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:CronJob.kyverno.kyverno-cleanup-cluster-admission-reports",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_15",
+                        "CKV_K8S_29",
+                        "CKV_K8S_31",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:CronJob.kyverno.kyverno-cleanup-cluster-ephemeral-reports",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_15",
+                        "CKV_K8S_29",
+                        "CKV_K8S_31",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:CronJob.kyverno.kyverno-cleanup-ephemeral-reports",
+                    "check_ids": [
+                        "CKV_K8S_10",
+                        "CKV_K8S_11",
+                        "CKV_K8S_12",
+                        "CKV_K8S_13",
+                        "CKV_K8S_15",
+                        "CKV_K8S_29",
+                        "CKV_K8S_31",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:Deployment.kyverno.kyverno-admission-controller",
+                    "check_ids": [
+                        "CKV_K8S_11",
+                        "CKV_K8S_15",
+                        "CKV_K8S_29",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:Deployment.kyverno.kyverno-background-controller",
+                    "check_ids": [
+                        "CKV_K8S_11",
+                        "CKV_K8S_15",
+                        "CKV_K8S_29",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                },
+                {
+                    "resource": "base:Deployment.kyverno.kyverno-cleanup-controller",
+                    "check_ids": [
+                        "CKV_K8S_11",
+                        "CKV_K8S_15",
+                        "CKV_K8S_29",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43"
+                    ]
+                },
+                {
+                    "resource": "base:Deployment.kyverno.kyverno-reports-controller",
+                    "check_ids": [
+                        "CKV_K8S_11",
+                        "CKV_K8S_15",
+                        "CKV_K8S_29",
+                        "CKV_K8S_38",
+                        "CKV_K8S_40",
+                        "CKV_K8S_43",
+                        "CKV_K8S_8",
+                        "CKV_K8S_9"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/work/deploy/argocd/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:RoleBinding.argocd.argocd-dex-server",
+                    "check_ids": [
+                        "CKV2_K8S_5"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/work/deploy/kustomize/base/backup/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "base:RoleBinding.netsoldier.backup-reader",
+                    "check_ids": [
+                        "CKV2_K8S_5"
+                    ]
+                }
+            ]
+        },
+        {
+            "file": "/work/deploy/kustomize/base/kustomization.yaml",
+            "findings": [
+                {
+                    "resource": "overlay:base:RoleBinding.netsoldier.backup-reader",
+                    "check_ids": [
+                        "CKV2_K8S_5"
+                    ]
+                }
+            ]
+        }
+    ]
+}

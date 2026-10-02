@@ -12,7 +12,8 @@ terraform {
     path = "terraform.tfstate"
   }
 
-  # To migrate state to MinIO, uncomment the block below and run:
+  # To migrate state to S3-compatible object storage, uncomment the block
+  # below and run:
   #   terraform init -migrate-state
   #
   # backend "s3" {
@@ -21,7 +22,7 @@ terraform {
   #   region = "us-east-1"
   #
   #   endpoints = {
-  #     s3 = "http://minio.local:9000"
+  #     s3 = "http://garage.local:3900"
   #   }
   #
   #   skip_credentials_validation = true

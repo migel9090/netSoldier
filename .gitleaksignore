@@ -1,0 +1,33 @@
+# Fingerprints gitleaks must not re-report, as <commit>:<path>:<rule>:<line>.
+#
+# Scope note: these only matter to the scheduled full-history scan. On push
+# and pull_request gitleaks diffs the new commits, where neither line is
+# touched, which is why those runs were already green while the nightly one
+# was not.
+#
+# Entries are pinned to one commit, file, rule and line each. That is
+# deliberate: editing either line changes its fingerprint and the finding
+# comes back for review, rather than a path or rule allowlist silently
+# covering whatever lands there later.
+
+# A planted FAKE AWS key, quoted in the audit write-up that records gitleaks
+# correctly blocking it (docs/audits/audit-01.md, "1. Planted secret blocked
+# by gitleaks"). The key never belonged to an account: it was invented for
+# that test, the PR carrying it was closed without merge, and the quote was
+# redacted out of the working tree in 8b6d685 and 0cd30ca. Only this
+# historical commit still contains it, so there is nothing to rotate and
+# nothing a reader can abuse.
+b7a0a1a999f13d64b662e34a71b0350e1b0f17d4:docs/audits/audit-01.md:aws-access-token:9
+
+# Not a credential: the prefix of a deduplication key that ZeekIntel.Parse
+# derives from a TLS fingerprint, asserted on in a unit test. It trips the
+# generic-api-key rule purely on entropy -- it is base64-ish and 14
+# characters long. Rewriting the assertion to dodge the heuristic would make
+# the test say less than it does now.
+04c28bc08dbe8b745f5c730ba8db0d468f888c14:apps/detection-engine/internal/ingest/ingest_test.go:generic-api-key:73
+
+# Same test assertion again, in the path-only fingerprint form gitleaks uses
+# when scanning a working tree rather than history (`--no-git`). CI always
+# scans history, but this keeps a local run quiet too. The audit-01 entry
+# above needs no counterpart: that quote is no longer in the working tree.
+apps/detection-engine/internal/ingest/ingest_test.go:generic-api-key:73

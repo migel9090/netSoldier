@@ -1,0 +1,28 @@
+# Garage server config. Secrets are deliberately absent: `rpc_secret` and
+# `admin.admin_token` are supplied as GARAGE_RPC_SECRET / GARAGE_ADMIN_TOKEN
+# from the `garage-secrets` Secret, so this ConfigMap stays safe to commit.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: garage-config
+data:
+  garage.toml: |
+    metadata_dir = "/var/lib/garage/meta"
+    data_dir = "/var/lib/garage/data"
+    db_engine = "sqlite"
+
+    # Single node: one copy of every block. Raising this needs more nodes
+    # in the layout, not just a bigger number here.
+    replication_factor = 1
+
+    rpc_bind_addr = "[::]:3901"
+
+    [s3_api]
+    # ClickHouse signs S3 requests for us-east-1 unless a region is set on
+    # the disk, and Garage rejects a SigV4 signature scoped to any other
+    # region. Keep these two in agreement.
+    s3_region = "us-east-1"
+    api_bind_addr = "[::]:3900"
+
+    [admin]
+    api_bind_addr = "[::]:3903"

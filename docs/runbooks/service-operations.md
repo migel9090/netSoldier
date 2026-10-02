@@ -274,7 +274,7 @@ kubectl create job backup-clickhouse-manual --from=cronjob/backup-clickhouse -n 
 kubectl create job backup-state-manual --from=cronjob/backup-state -n netsoldier
 ```
 
-**ClickHouse backup fails:** Check S3/MinIO connectivity. If `backup-s3`
+**ClickHouse backup fails:** Check S3/Garage connectivity. If `backup-s3`
 secret is missing, the job skips gracefully (exit 0).
 
 **State backup fails:** Check that the `backup-state` PVC is not full

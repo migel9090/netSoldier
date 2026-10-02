@@ -4,7 +4,7 @@ kind: Kustomization
 namespace: netsoldier
 
 resources:
-  - namespace.yaml
+  - namespace/
   - detection-engine/
   - device-inventory/
   - web-ui/

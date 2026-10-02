@@ -32,8 +32,14 @@ jobs:
         # whether the build fails.
         continue-on-error: true
         with:
+          # --config is load-bearing: osv-scanner only auto-discovers an
+          # osv-scanner.toml sitting next to each manifest it scans, so the
+          # repo-root config holding the documented exceptions is silently
+          # ignored unless it is named here.
           scan-args: |-
             --recursive
+            --config
+            osv-scanner.toml
             --format
             sarif
             --output

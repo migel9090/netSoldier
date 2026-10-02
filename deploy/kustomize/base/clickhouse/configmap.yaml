@@ -14,16 +14,16 @@ data:
     <clickhouse>
         <storage_configuration>
             <disks>
-                <!-- Cold tier on in-cluster MinIO (step 119). Credentials
+                <!-- Cold tier on in-cluster Garage (step 119). Credentials
                      come from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY env
                      vars (clickhouse-cold-export-s3 secret, optional).
-                     skip_access_check lets the server boot when MinIO is
+                     skip_access_check lets the server boot when Garage is
                      down or the secret is absent: inserts always land on
                      the hot volume first, only background TTL moves fail
                      (and retry) until the cold disk is reachable. -->
                 <s3_cold>
                     <type>s3</type>
-                    <endpoint>http://minio.storage.svc:9000/netsoldier-cold/native/</endpoint>
+                    <endpoint>http://garage.storage.svc:3900/netsoldier-cold/native/</endpoint>
                     <use_environment_credentials>true</use_environment_credentials>
                     <skip_access_check>true</skip_access_check>
                     <metadata_path>/var/lib/clickhouse/disks/s3_cold/</metadata_path>
@@ -43,7 +43,7 @@ data:
                             <disk>s3_cold</disk>
                             <!-- Never write parts straight to S3 on insert,
                                  even when their move-TTL is already expired
-                                 (e.g. backfilled data): an unreachable MinIO
+                                 (e.g. backfilled data): an unreachable Garage
                                  must not block ingest. Background moves pick
                                  the parts up later. -->
                             <perform_ttl_move_on_insert>false</perform_ttl_move_on_insert>
@@ -121,7 +121,7 @@ data:
                  access_management. Dropping access_management and
                  named_collection_control is the point: they granted the
                  ability to create users and read the named collections that
-                 hold the MinIO credentials. -->
+                 hold the Garage S3 credentials. -->
             <rita>
                 <password_sha256_hex>__RITA_PASSWORD_SHA256__</password_sha256_hex>
                 <profile>rita</profile>
@@ -512,7 +512,7 @@ data:
     ORDER BY (matched_ioc, client_ip, timestamp)
     TTL timestamp + INTERVAL 365 DAY;
   018_cold_tier.sql: |
-    -- Cold tier (step 119): move aged parts to the MinIO-backed `cold`
+    -- Cold tier (step 119): move aged parts to the Garage-backed `cold`
     -- volume (storage.xml `tiered` policy) and extend total retention.
     -- Append-only time-series tables only; ReplacingMergeTree state
     -- tables (ml_beacons, ml_anomalies, detection_feedback) stay

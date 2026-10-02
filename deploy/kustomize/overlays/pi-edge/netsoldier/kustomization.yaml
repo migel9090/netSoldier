@@ -1,0 +1,30 @@
+# The netsoldier-namespaced half of the pi-edge profile.
+#
+# This exists as its own layer so `namespace: netsoldier` applies only to
+# these resources. AdGuard (pulled in by the parent kustomization) ships
+# its own `dns` Namespace, and a single overlay-wide namespace transformer
+# rewrote that to `netsoldier` too — which both put AdGuard in the wrong
+# namespace and made the two Namespace objects collide, so `kustomize
+# build` failed outright for this profile.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: netsoldier
+
+resources:
+  - ../../../base/namespace/
+  - ../../../base/detection-engine/
+  - ../../../base/device-inventory/
+  - ../../../base/fluent-bit/
+  # The Pi profile deployed NO NetworkPolicies, so the default-deny baseline
+  # and every per-service rule were absent on the profile most likely to sit
+  # directly on the household LAN. The policies for workloads this profile
+  # does not run are inert (they select pods that do not exist), so including
+  # the whole directory is safe and keeps the two profiles from drifting.
+  - ../../../base/network-policies/
+
+patches:
+  - path: patches/detection-engine-resources.yaml
+  - path: patches/device-inventory-resources.yaml
+  - path: patches/detection-engine-env.yaml
+  - path: patches/fluent-bit-resources.yaml

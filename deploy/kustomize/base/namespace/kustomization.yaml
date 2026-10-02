@@ -1,0 +1,9 @@
+# The namespace is its own component so overlays can pull it in as a
+# directory. Referencing the bare ../../base/namespace.yaml file from an
+# overlay trips kustomize's load restrictor ("file is not in or below" the
+# kustomization root), which is what broke `kustomize build` for pi-edge.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml

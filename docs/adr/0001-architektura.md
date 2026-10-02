@@ -44,7 +44,7 @@ and deliberate divergences from raw research recommendations.
 13. Enforcement drivers, out-of-band: **AdGuard DNS-sinkhole → ARP-isolation → managed-switch ACL/port/VLAN**.
 
 **Platform & data**
-14. Storage: **ClickHouse** (hot, default 30-day retention; optional cold MinIO/S3). Edge buffers via **Fluent Bit → Vector** (server) pipeline; SQLite cache for edge inventory.
+14. Storage: **ClickHouse** (hot, default 30-day retention; optional cold Garage/S3). Edge buffers via **Fluent Bit → Vector** (server) pipeline; SQLite cache for edge inventory.
 15. Languages: **Go** for services, **Python (FastAPI)** for ML; UI = **Grafana** (dashboards-as-code) + **SvelteKit** frontend (device map, approvals); alerts via **generic webhook**.
 16. Orchestration: **k3s + ArgoCD** (server, GitOps app-of-apps + ApplicationSet) / **Podman Quadlets** (Pi) — same multi-arch images (amd64+arm64), profiles `proxmox-soc` & `pi-edge` via Kustomize overlays.
 17. IaC: **Terraform (`bpg/proxmox`) + Ansible + cloud-init**; CI on **GitHub Actions** (self-hosted arm64 runner); secrets **SOPS + age**; **monorepo**; admission control **Kyverno** (cosign verifyImages, non-root, RO-FS, limits).

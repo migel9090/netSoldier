@@ -40,13 +40,13 @@ spec:
       ports:
         - port: 8081
           protocol: TCP
-    # S3 / MinIO (storage namespace)
+    # S3 / Garage (storage namespace)
     - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: storage
       ports:
-        - port: 9000
+        - port: 3900
           protocol: TCP
     # Kubernetes API server (secrets + configmaps export)
     - ports:

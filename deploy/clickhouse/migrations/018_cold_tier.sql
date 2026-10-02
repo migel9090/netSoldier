@@ -1,6 +1,6 @@
 -- Cold tier (step 119). storage.xml defines the `tiered` policy: volume
 -- `default` = local hot disk, volume `cold` = S3 disk backed by in-cluster
--- MinIO (bucket netsoldier-cold, prefix native/). Aged parts move to the
+-- Garage (bucket netsoldier-cold, prefix native/). Aged parts move to the
 -- cold volume at each table's previous delete horizon, and total retention
 -- is extended now that history no longer competes for the 20Gi hot PVC.
 -- Historical queries stay transparent: the table reads both volumes.

@@ -4,7 +4,7 @@
 
 Since step 119 the append-only time-series tables are tiered (storage
 policy `tiered`): parts stay on the local hot disk for the "Hot" window,
-then move to the S3 `cold` volume (in-cluster MinIO, bucket
+then move to the S3 `cold` volume (in-cluster Garage, bucket
 `netsoldier-cold`, prefix `native/`), and are deleted at the "Delete"
 horizon. Queries read both tiers transparently.
 
@@ -38,7 +38,7 @@ migration to an existing deployment.
 
 ClickHouse enforces TTL automatically during merges and background moves.
 No manual cleanup is needed under normal operation. Inserts never touch
-S3 (`perform_ttl_move_on_insert=false`): if MinIO is down, ingest
+S3 (`perform_ttl_move_on_insert=false`): if Garage is down, ingest
 continues hot-only and moves catch up later.
 
 ---
@@ -154,8 +154,10 @@ task backup:test-restore
 ### Manual check — ClickHouse backup in S3
 
 ```bash
-# List today's backup objects (via MinIO client)
-mc ls minio/netsoldier-backup/clickhouse/$(date +%Y-%m-%d)/
+# List today's backup objects. Garage speaks plain S3, so any S3 client
+# works; the mc/MinIO client the previous revision used is gone.
+aws --endpoint-url http://garage.storage.svc:3900 \
+  s3 ls s3://netsoldier-backup/clickhouse/$(date +%Y-%m-%d)/
 
 # Expected output: schema.csv + one .native.zst file per non-empty table
 ```
@@ -181,7 +183,7 @@ kubectl exec -n netsoldier <pod> -- ls -la /backup/state/$(date +%Y-%m-%d)/
 # 1. Download schema from S3
 clickhouse-client --host <ch-host> --query \
   "SELECT create_table_query FROM s3(
-    'http://minio:9000/netsoldier-backup/clickhouse/<date>/schema.csv',
+    'http://garage.storage.svc:3900/netsoldier-backup/clickhouse/<date>/schema.csv',
     '<key>', '<secret>', 'CSVWithNames'
   ) FORMAT TabSeparatedRaw" > schema.sql
 
@@ -198,7 +200,7 @@ for TABLE in $TABLES; do
   clickhouse-client --host <ch-host> --query \
     "INSERT INTO netsoldier.${TABLE}
      SELECT * FROM s3(
-       'http://minio:9000/netsoldier-backup/clickhouse/<date>/${TABLE}.native.zst',
+       'http://garage.storage.svc:3900/netsoldier-backup/clickhouse/<date>/${TABLE}.native.zst',
        '<key>', '<secret>', 'Native'
      )" 2>/dev/null && echo "  OK" || echo "  SKIP (no backup file)"
 done
@@ -248,7 +250,7 @@ shred -u secrets-decrypted.json
 
 ## DM-9: Cold tier verification
 
-There are two cold paths (step 119), both landing in the MinIO bucket
+There are two cold paths (step 119), both landing in the Garage bucket
 `netsoldier-cold` (namespace `storage`):
 
 1. **Native tiering** (`native/` prefix): the `tiered` storage policy moves
@@ -267,7 +269,7 @@ kubectl exec -n netsoldier clickhouse-0 -- clickhouse-client --query \
    GROUP BY table, disk_name
    ORDER BY table FORMAT PrettyCompact"
 
-# Failed background moves surface here (e.g. MinIO down / missing creds)
+# Failed background moves surface here (e.g. Garage down / missing creds)
 kubectl logs -n netsoldier clickhouse-0 | grep -i "MergeTreePartsMover\|s3_cold" | tail
 
 # Historical query smoke test (reads from the cold volume once data ages out)
@@ -281,11 +283,12 @@ kubectl get jobs -n netsoldier -l app.kubernetes.io/component=cold-export \
 
 # Verify yesterday's export exists
 YESTERDAY=$(date -d yesterday +%Y-%m-%d)
-mc ls minio/netsoldier-cold/cold/network_flows/year=${YESTERDAY:0:4}/month=${YESTERDAY:5:2}/day=${YESTERDAY:8:2}/
+aws --endpoint-url http://garage.storage.svc:3900 \
+  s3 ls s3://netsoldier-cold/cold/network_flows/year=${YESTERDAY:0:4}/month=${YESTERDAY:5:2}/day=${YESTERDAY:8:2}/
 
 # Query the Parquet archive directly (works even without ClickHouse state)
 kubectl exec -n netsoldier clickhouse-0 -- clickhouse-client --query \
-  "SELECT count() FROM s3('http://minio.storage.svc:9000/netsoldier-cold/cold/network_flows/year=*/month=*/day=*/network_flows.parquet',
+  "SELECT count() FROM s3('http://garage.storage.svc:3900/netsoldier-cold/cold/network_flows/year=*/month=*/day=*/network_flows.parquet',
    '<S3_ACCESS_KEY>', '<S3_SECRET_KEY>', 'Parquet')"
 ```
 
