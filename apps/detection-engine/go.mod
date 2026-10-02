@@ -1,6 +1,6 @@
 module github.com/migel9090/netSoldier/apps/detection-engine
 
-go 1.25.0
+go 1.25.14
 
 require (
 	github.com/gopacket/gopacket v1.6.1

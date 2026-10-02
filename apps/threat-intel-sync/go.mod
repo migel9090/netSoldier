@@ -1,6 +1,6 @@
 module github.com/migel9090/netSoldier/apps/threat-intel-sync
 
-go 1.25.0
+go 1.25.14
 
 require github.com/prometheus/client_golang v1.24.1
 
