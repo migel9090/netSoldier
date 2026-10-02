@@ -20,6 +20,84 @@ spec:
         fsGroup: 101
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        # Renders users-override.xml from the ConfigMap template plus the
+        # SOPS-encrypted Secret, so no credential or hash is ever committed.
+        # Substitution happens here rather than in the image so the
+        # placeholders stay visible and reviewable in git.
+        - name: render-users
+          image: busybox:1.37
+          command:
+            - sh
+            - -ec
+            - |
+              for var in DEFAULT_PASSWORD_SHA256 WRITER_PASSWORD_SHA256 \
+                         READER_PASSWORD_SHA256 RITA_PASSWORD_SHA256 POD_CIDR; do
+                eval "value=\$$var"
+                if [ -z "$value" ]; then
+                  echo "FATAL: $var is empty — refusing to start ClickHouse with a" \
+                       "blank credential. Populate the clickhouse-credentials Secret." >&2
+                  exit 1
+                fi
+              done
+              sed \
+                -e "s|__DEFAULT_PASSWORD_SHA256__|$DEFAULT_PASSWORD_SHA256|g" \
+                -e "s|__WRITER_PASSWORD_SHA256__|$WRITER_PASSWORD_SHA256|g" \
+                -e "s|__READER_PASSWORD_SHA256__|$READER_PASSWORD_SHA256|g" \
+                -e "s|__RITA_PASSWORD_SHA256__|$RITA_PASSWORD_SHA256|g" \
+                -e "s|__POD_CIDR__|$POD_CIDR|g" \
+                /template/users-override.xml > /rendered/users-override.xml
+              # Fail closed if any placeholder survived.
+              if grep -q '__[A-Z_]*__' /rendered/users-override.xml; then
+                echo "FATAL: unsubstituted placeholder in users-override.xml" >&2
+                exit 1
+              fi
+          env:
+            - name: DEFAULT_PASSWORD_SHA256
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: default-password-sha256
+            - name: WRITER_PASSWORD_SHA256
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: writer-password-sha256
+            - name: READER_PASSWORD_SHA256
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: reader-password-sha256
+            - name: RITA_PASSWORD_SHA256
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: rita-password-sha256
+            - name: POD_CIDR
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: pod-cidr
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+          volumeMounts:
+            - name: users-override
+              mountPath: /template
+            - name: users-rendered
+              mountPath: /rendered
       containers:
         - name: clickhouse
           image: clickhouse/clickhouse-server:24.3-alpine
@@ -85,7 +163,7 @@ spec:
             - name: storage-config
               mountPath: /etc/clickhouse-server/config.d/storage.xml
               subPath: storage.xml
-            - name: users-override
+            - name: users-rendered
               mountPath: /etc/clickhouse-server/users.d/users-override.xml
               subPath: users-override.xml
             - name: init-sql
@@ -113,6 +191,10 @@ spec:
             items:
               - key: users-override.xml
                 path: users-override.xml
+        # Holds the rendered users file. A ConfigMap mount is read-only, so
+        # the placeholder substitution has to land somewhere writable.
+        - name: users-rendered
+          emptyDir: {}
         - name: init-sql
           configMap:
             name: clickhouse-init

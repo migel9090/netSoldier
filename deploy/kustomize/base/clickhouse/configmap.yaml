@@ -70,15 +70,67 @@ data:
             </rita>
         </profiles>
         <users>
-            <!-- Dedicated user for the RITA importer; manages only its own
-                 netsoldier_rita / metadatabase databases. Reachable only
-                 from the rita pod via NetworkPolicy. -->
+            <!-- Accounts are defined here with placeholders and their real
+                 password hashes are substituted from the SOPS-encrypted
+                 clickhouse-credentials Secret by the init container (see
+                 statefulset.yaml). Nothing in this repo carries a usable
+                 credential.
+
+                 Every account below previously did not exist, or existed
+                 with an EMPTY password: `default` was passwordless by
+                 ClickHouse's own default and `rita` was a passwordless
+                 account open to ::/0 with access_management, i.e. full
+                 administrative control of the database that holds the
+                 enforcement audit log and the S3 credentials in named
+                 collections. The only thing standing in front of it was a
+                 NetworkPolicy — and the pi-edge profile deploys none. -->
+
+            <!-- default: no longer passwordless, and not reachable off-pod.
+                 Nothing should use it; it exists because ClickHouse expects
+                 it to. -->
+            <default>
+                <password_sha256_hex>__DEFAULT_PASSWORD_SHA256__</password_sha256_hex>
+                <networks><ip>127.0.0.1</ip><ip>::1</ip></networks>
+                <profile>default</profile>
+            </default>
+
+            <!-- writer: the services' ingest account. INSERT and SELECT on
+                 the netsoldier database, nothing else. No DDL, no DROP, so a
+                 compromised service pod cannot erase the audit trail. -->
+            <writer>
+                <password_sha256_hex>__WRITER_PASSWORD_SHA256__</password_sha256_hex>
+                <profile>default</profile>
+                <networks><ip>__POD_CIDR__</ip></networks>
+                <grants>
+                    <query>GRANT INSERT, SELECT ON netsoldier.*</query>
+                </grants>
+            </writer>
+
+            <!-- reader: dashboards and the UI. SELECT only. -->
+            <reader>
+                <password_sha256_hex>__READER_PASSWORD_SHA256__</password_sha256_hex>
+                <profile>default</profile>
+                <networks><ip>__POD_CIDR__</ip></networks>
+                <grants>
+                    <query>GRANT SELECT ON netsoldier.*</query>
+                </grants>
+            </reader>
+
+            <!-- rita: the RITA importer owns its own databases and needs DDL
+                 there, but has no business touching netsoldier.* and no
+                 access_management. Dropping access_management and
+                 named_collection_control is the point: they granted the
+                 ability to create users and read the named collections that
+                 hold the MinIO credentials. -->
             <rita>
-                <password></password>
+                <password_sha256_hex>__RITA_PASSWORD_SHA256__</password_sha256_hex>
                 <profile>rita</profile>
-                <networks><ip>::/0</ip></networks>
-                <access_management>1</access_management>
-                <named_collection_control>1</named_collection_control>
+                <networks><ip>__POD_CIDR__</ip></networks>
+                <grants>
+                    <query>GRANT ALL ON netsoldier_rita.*</query>
+                    <query>GRANT ALL ON metadatabase.*</query>
+                    <query>GRANT CREATE DATABASE ON *.*</query>
+                </grants>
             </rita>
         </users>
     </clickhouse>
