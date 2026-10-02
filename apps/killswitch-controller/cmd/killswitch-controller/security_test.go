@@ -39,22 +39,22 @@ var _ drivers.Driver = (*recordingDriver)(nil)
 func newAuthTestEnv(t *testing.T, apiKey string) (*httptest.Server, *actions.Store) {
 	t.Helper()
 	pol := policy.DefaultPolicy()
-	store := actions.NewStore(actions.NopAuditWriter{})
-	resolve := func(string) drivers.Driver { return nopDriver{} }
+	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
+	resolve := func(string) (drivers.Driver, error) { return nopDriver{}, nil }
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("GET /policy", handleGetPolicy(pol))
+	mux.HandleFunc("GET /policy", handleGetPolicy(pol, true))
 	mux.HandleFunc("GET /allowlist", handleGetAllowlist(pol))
 	mux.HandleFunc("GET /actions/pending", handleListByState(store, events.StatePending))
 	mux.HandleFunc("GET /actions/active", handleListByState(store, events.StateActive))
 	mux.HandleFunc("GET /actions/{id}", handleGetAction(store))
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true))
 	mux.HandleFunc("POST /actions/{id}/approve", handleApprove(store, resolve))
 	mux.HandleFunc("POST /actions/{id}/reject", handleReject(store))
 	mux.HandleFunc("POST /actions/{id}/revert", handleRevert(store, resolve))
 
-	srv := httptest.NewServer(authMiddleware(apiKey, mux))
+	srv := httptest.NewServer(authMiddleware(apiKey, "", mux))
 	t.Cleanup(srv.Close)
 	return srv, store
 }
@@ -122,11 +122,11 @@ func TestSecAllowlistNoDriverApplied(t *testing.T) {
 	pol := policy.DefaultPolicy()
 	pol.Allowlist.AddMAC("aa:bb:cc:dd:ee:ff")
 
-	store := actions.NewStore(actions.NopAuditWriter{})
-	resolve := func(string) drivers.Driver { return drv }
+	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
+	resolve := func(string) (drivers.Driver, error) { return drv, nil }
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -166,11 +166,11 @@ func TestSecAllowlistConcurrentEvaluations(t *testing.T) {
 	pol := policy.DefaultPolicy()
 	pol.Allowlist.AddMAC("aa:bb:cc:dd:ee:ff")
 
-	store := actions.NewStore(actions.NopAuditWriter{})
-	resolve := func(string) drivers.Driver { return drv }
+	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
+	resolve := func(string) (drivers.Driver, error) { return drv, nil }
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -292,7 +292,7 @@ func TestSecAuthGETPassthrough(t *testing.T) {
 // --- Auto-revert: TTL-expired actions are reverted automatically ---
 
 func TestSecTTLExpiryDetected(t *testing.T) {
-	store := actions.NewStore(actions.NopAuditWriter{})
+	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
 
 	a := store.Create("DET-TTL-1", "aa:bb:cc:dd:ee:ff", "192.168.1.10",
 		events.ActionDNSSinkhole, "test", 1, true, "evil.com")
@@ -312,7 +312,7 @@ func TestSecTTLExpiryDetected(t *testing.T) {
 }
 
 func TestSecTTLOnlyActiveActionsExpire(t *testing.T) {
-	store := actions.NewStore(actions.NopAuditWriter{})
+	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
 
 	store.Create("DET-TTL-2", "aa:bb:cc:dd:ee:ff", "192.168.1.10",
 		events.ActionDNSSinkhole, "test", 1, false, "evil.com")
@@ -328,7 +328,7 @@ func TestSecTTLOnlyActiveActionsExpire(t *testing.T) {
 }
 
 func TestSecTTLNoExpiryWithoutTTL(t *testing.T) {
-	store := actions.NewStore(actions.NopAuditWriter{})
+	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
 
 	a := store.Create("DET-TTL-4", "aa:bb:cc:dd:ee:ff", "192.168.1.10",
 		events.ActionDNSSinkhole, "test", 0, true, "evil.com")
@@ -345,7 +345,7 @@ func TestSecTTLNoExpiryWithoutTTL(t *testing.T) {
 
 func TestSecAutoRevertLifecycle(t *testing.T) {
 	drv := &recordingDriver{}
-	store := actions.NewStore(actions.NopAuditWriter{})
+	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
 
 	a := store.Create("DET-TTL-5", "aa:bb:cc:dd:ee:ff", "192.168.1.10",
 		events.ActionDNSSinkhole, "auto: critical+100", 1, true, "evil.com")
@@ -382,7 +382,7 @@ func TestSecAutoRevertLifecycle(t *testing.T) {
 }
 
 func TestSecAutoRevertDoesNotAffectOtherActions(t *testing.T) {
-	store := actions.NewStore(actions.NopAuditWriter{})
+	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
 
 	short := store.Create("DET-TTL-6", "aa:bb:cc:dd:ee:ff", "192.168.1.10",
 		events.ActionDNSSinkhole, "test", 1, true, "evil.com")

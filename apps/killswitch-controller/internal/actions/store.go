@@ -9,9 +9,24 @@ import (
 	"time"
 
 	"github.com/migel9090/netSoldier/libs/events"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 var actionCounter atomic.Int64
+
+// StoreOptions configures retention and identity.
+type StoreOptions struct {
+	// MaxActions bounds the in-memory map. Every /evaluate call creates an
+	// action and nothing used to evict them, so a noisy detector (or an
+	// unauthenticated caller) grew the map until the pod hit its limit.
+	// Oldest terminal actions are dropped first; pending and active ones
+	// are never evicted because they still describe live enforcement.
+	MaxActions int
+	// IDPrefix namespaces action IDs per process. A plain global counter
+	// restarted at 1 on every boot, so "ACT-1" in the ClickHouse audit log
+	// could mean several different actions over a service's lifetime.
+	IDPrefix string
+}
 
 // Store manages enforcement actions through their lifecycle.
 // Thread-safe for concurrent API and TTL-revert access.
@@ -19,7 +34,9 @@ var actionCounter atomic.Int64
 type Store struct {
 	mu      sync.RWMutex
 	actions map[string]*events.EnforcementAction
+	order   []string // insertion order, for bounded eviction
 	audit   AuditWriter
+	opts    StoreOptions
 }
 
 // AuditWriter records every state transition for accountability.
@@ -41,17 +58,31 @@ type AuditEntry struct {
 	ActionType  string `json:"action_type"`
 }
 
-func NewStore(audit AuditWriter) *Store {
+func NewStore(audit AuditWriter, opts StoreOptions) *Store {
+	if opts.MaxActions <= 0 {
+		opts.MaxActions = 10000
+	}
+	if opts.IDPrefix == "" {
+		opts.IDPrefix = "ACT"
+	}
 	return &Store{
 		actions: make(map[string]*events.EnforcementAction),
 		audit:   audit,
+		opts:    opts,
 	}
+}
+
+// terminalStates are safe to evict: they no longer describe live enforcement.
+var terminalStates = map[string]struct{}{
+	events.StateReverted: {},
+	events.StateRejected: {},
+	events.StateFailed:   {},
 }
 
 // Create inserts a new enforcement action. For auto-approved actions,
 // state starts at Approved; otherwise Pending.
 func (s *Store) Create(detectionID, targetMAC, targetIP, actionType, policyRule string, ttl int, autoApproved bool, domain string) *events.EnforcementAction {
-	id := fmt.Sprintf("ACT-%d", actionCounter.Add(1))
+	id := fmt.Sprintf("%s-%d", s.opts.IDPrefix, actionCounter.Add(1))
 	now := time.Now()
 
 	state := events.StatePending
@@ -86,6 +117,8 @@ func (s *Store) Create(detectionID, targetMAC, targetIP, actionType, policyRule 
 
 	s.mu.Lock()
 	s.actions[id] = action
+	s.order = append(s.order, id)
+	s.evictLocked()
 	s.mu.Unlock()
 
 	s.writeAudit("", state, "system", "created", action)
@@ -124,7 +157,7 @@ func (s *Store) Revert(id, reason string) error {
 		s.mu.Unlock()
 		return nil
 	}
-	if a.State != events.StateActive {
+	if a.State != events.StateActive && a.State != events.StateFailed {
 		s.mu.Unlock()
 		return fmt.Errorf("action %s is %s, cannot revert", id, a.State)
 	}
@@ -137,6 +170,55 @@ func (s *Store) Revert(id, reason string) error {
 	s.writeAudit(from, events.StateReverted, "system", reason, a)
 	slog.Info("action reverted", "id", id, "reason", reason)
 	return nil
+}
+
+// RecordFailure marks an action as failed and records why. It exists so a
+// driver error is visible in the API and the audit log instead of only in the
+// pod's stderr: "approved but never enforced" and "actively enforced" must
+// not look the same to whoever is reading the queue.
+func (s *Store) RecordFailure(id, reason string) {
+	s.mu.Lock()
+	a, ok := s.actions[id]
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	from := a.State
+	a.State = events.StateFailed
+	a.FailureReason = reason
+	s.mu.Unlock()
+
+	s.writeAudit(from, events.StateFailed, "system", reason, a)
+	slog.Error("action failed", "id", id, "from", from, "reason", reason)
+}
+
+// evictLocked drops the oldest terminal actions once the map exceeds
+// MaxActions. Caller must hold the write lock.
+func (s *Store) evictLocked() {
+	if len(s.actions) <= s.opts.MaxActions {
+		return
+	}
+	kept := s.order[:0:0]
+	removed := 0
+	target := len(s.actions) - s.opts.MaxActions
+	for _, id := range s.order {
+		a, ok := s.actions[id]
+		if !ok {
+			continue
+		}
+		if removed < target {
+			if _, terminal := terminalStates[a.State]; terminal {
+				delete(s.actions, id)
+				removed++
+				continue
+			}
+		}
+		kept = append(kept, id)
+	}
+	s.order = kept
+	if removed > 0 {
+		slog.Debug("evicted terminal actions", "count", removed, "remaining", len(s.actions))
+	}
 }
 
 // transition is the generic idempotent state changer.
@@ -218,7 +300,10 @@ func (s *Store) writeAudit(from, to, actor, reason string, a *events.Enforcement
 		return
 	}
 	entry := AuditEntry{
-		Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05"),
+		// Millisecond precision: two transitions on the same action within
+		// one second were previously indistinguishable and unorderable in
+		// the audit log.
+		Timestamp:   time.Now().UTC().Format("2006-01-02 15:04:05.000"),
 		ActionID:    a.ID,
 		FromState:   from,
 		ToState:     to,
@@ -232,6 +317,21 @@ func (s *Store) writeAudit(from, to, actor, reason string, a *events.Enforcement
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := s.audit.Write(ctx, entry); err != nil {
-		slog.Warn("audit write failed", "action_id", a.ID, "error", err)
+		auditWriteFailures.Inc()
+		// An enforcement action with no audit record is an accountability
+		// gap, not a log line to shrug at — surface it as a metric so it
+		// can be alerted on.
+		slog.Error("audit write FAILED — enforcement action has no audit record",
+			"action_id", a.ID, "from", from, "to", to, "error", err)
 	}
+}
+
+var auditWriteFailures = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "killswitch",
+	Name:      "audit_write_failures_total",
+	Help:      "Audit records that could not be persisted (accountability gap).",
+})
+
+func init() {
+	prometheus.MustRegister(auditWriteFailures)
 }

@@ -17,7 +17,7 @@ import (
 
 type nopDriver struct{}
 
-func (nopDriver) Apply(_ context.Context, _ *events.EnforcementAction) error { return nil }
+func (nopDriver) Apply(_ context.Context, _ *events.EnforcementAction) error  { return nil }
 func (nopDriver) Revert(_ context.Context, _ *events.EnforcementAction) error { return nil }
 func (nopDriver) Name() string                                                { return "nop" }
 
@@ -32,13 +32,13 @@ type testEnv struct {
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	pol := policy.DefaultPolicy()
-	store := actions.NewStore(actions.NopAuditWriter{})
-	resolve := func(string) drivers.Driver { return nopDriver{} }
+	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
+	resolve := func(string) (drivers.Driver, error) { return nopDriver{}, nil }
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("GET /policy", handleGetPolicy(pol))
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve))
+	mux.HandleFunc("GET /policy", handleGetPolicy(pol, true))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true))
 	mux.HandleFunc("GET /allowlist", handleGetAllowlist(pol))
 	mux.HandleFunc("GET /actions/pending", handleListByState(store, events.StatePending))
 	mux.HandleFunc("GET /actions/active", handleListByState(store, events.StateActive))
@@ -133,15 +133,16 @@ func TestEvaluateAutoBlock(t *testing.T) {
 	env := newTestEnv(t)
 
 	resp := env.post(t, "/evaluate", events.DetectionEvent{
-		ID:         "DET-1",
-		Severity:   events.SeverityCritical,
-		Confidence: 95,
-		ClientIP:   "192.168.1.100",
-		ClientMAC:  "aa:bb:cc:dd:ee:ff",
-		Domain:     "evil.com",
-		MatchedIoC: "evil.com",
-		IoCType:    "domain",
-		Source:     "test",
+		ID:          "DET-1",
+		Severity:    events.SeverityCritical,
+		Confidence:  95,
+		ClientIP:    "192.168.1.100",
+		ClientMAC:   "aa:bb:cc:dd:ee:ff",
+		Domain:      "evil.com",
+		MatchedIoC:  "evil.com",
+		IoCType:     "domain",
+		Source:      "test",
+		SignalClass: events.SignalIoC,
 	})
 	if resp.StatusCode != 200 {
 		t.Fatalf("evaluate: %d", resp.StatusCode)
@@ -344,14 +345,14 @@ func TestListPendingEmpty(t *testing.T) {
 
 func TestAuthMiddleware(t *testing.T) {
 	pol := policy.DefaultPolicy()
-	store := actions.NewStore(actions.NopAuditWriter{})
-	resolve := func(string) drivers.Driver { return nopDriver{} }
+	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
+	resolve := func(string) (drivers.Driver, error) { return nopDriver{}, nil }
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true))
 
-	handler := authMiddleware("test-secret", mux)
+	handler := authMiddleware("test-secret", "", mux)
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
