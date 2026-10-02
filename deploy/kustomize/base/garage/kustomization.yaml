@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: storage
+
+commonLabels:
+  app.kubernetes.io/name: garage
+  app.kubernetes.io/part-of: netsoldier
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - statefulset.yaml
+  - service.yaml
+  - bucket-init-job.yaml
+  - network-policy.yaml
+
+# bootstrap.py is mounted into the bucket-init Job through this generator
+# rather than being embedded in the Job YAML. disableNameSuffixHash keeps
+# the name stable: the Job is immutable and ArgoCD replaces it on change,
+# so a content-hashed ConfigMap name would leave orphans behind on every
+# edit.
+configMapGenerator:
+  - name: garage-bootstrap
+    files:
+      - bootstrap.py
+    options:
+      disableNameSuffixHash: true

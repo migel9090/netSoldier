@@ -8,7 +8,7 @@ resources:
   # without log forwarding while the audit recorded it as configured.
   - ../../base/fluent-bit
   - ../../base/clickhouse
-  - ../../base/minio
+  - ../../base/garage
   - ../../base/misp
   - ../../base/killswitch-controller
   - ../../base/threat-intel-sync

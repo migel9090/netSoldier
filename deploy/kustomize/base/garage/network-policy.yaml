@@ -1,4 +1,4 @@
-# The storage namespace mirrors the netsoldier default-deny posture: MinIO
+# The storage namespace mirrors the netsoldier default-deny posture: Garage
 # accepts S3 traffic only from the workloads that ship data to it.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -13,11 +13,11 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-minio
+  name: allow-garage
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: minio
+      app.kubernetes.io/name: garage
       app.kubernetes.io/component: server
   policyTypes:
     - Ingress
@@ -29,25 +29,25 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: netsoldier
       ports:
-        - port: 9000
+        - port: 3900
           protocol: TCP
-    # Same-namespace bucket bootstrap Job.
+    # Same-namespace bootstrap Job, which drives the admin API.
     - from:
         - podSelector:
             matchLabels:
               app.kubernetes.io/component: bucket-init
       ports:
-        - port: 9000
+        - port: 3903
           protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-minio-bucket-init
+  name: allow-garage-bucket-init
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: minio
+      app.kubernetes.io/name: garage
       app.kubernetes.io/component: bucket-init
   policyTypes:
     - Egress
@@ -57,7 +57,7 @@ spec:
             matchLabels:
               app.kubernetes.io/component: server
       ports:
-        - port: 9000
+        - port: 3903
           protocol: TCP
     - to:
         - namespaceSelector:

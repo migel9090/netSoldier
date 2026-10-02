@@ -27,7 +27,7 @@ func startClickHouse(t *testing.T) string {
 // startClickHouseContainer starts clickhouse-server with the cold-tier
 // storage policy mounted: migration 018 requires the `tiered` policy to
 // exist. customize lets the cold-tier test attach the container to a Docker
-// network with a live MinIO; without it the s3_cold disk points at an
+// network with a live Garage; without it the s3_cold disk points at an
 // unreachable endpoint, which skip_access_check tolerates — parts simply
 // stay on the hot volume.
 func startClickHouseContainer(t *testing.T, customize func(*testcontainers.ContainerRequest)) string {

@@ -1,0 +1,35 @@
+# S3 endpoint for ClickHouse (cold tier + Parquet export) and the backup
+# CronJob. Readiness-gated: traffic only reaches a node whose cluster
+# layout is applied and healthy.
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage
+spec:
+  selector:
+    app.kubernetes.io/name: garage
+    app.kubernetes.io/component: server
+  ports:
+    - name: s3
+      port: 3900
+      targetPort: s3
+      protocol: TCP
+---
+# Admin API, used only by the bootstrap Job. It needs publishNotReadyAddresses
+# because a fresh node reports unhealthy until a layout is applied — and
+# applying that layout is exactly what the Job connects here to do. Gating
+# this on readiness would deadlock the bootstrap.
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage-admin
+spec:
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: garage
+    app.kubernetes.io/component: server
+  ports:
+    - name: admin
+      port: 3903
+      targetPort: admin
+      protocol: TCP

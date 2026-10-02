@@ -4,10 +4,14 @@ package e2e
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 
@@ -17,14 +21,77 @@ import (
 )
 
 const (
-	minioRootUser     = "netsoldier-test"
-	minioRootPassword = "netsoldier-test-secret"
-	coldBucket        = "netsoldier-cold"
+	// Garage replaces MinIO here: MinIO withdrew its public `minio/minio`
+	// and `minio/mc` images, so neither could be pulled any more and this
+	// test could not start its S3 backend at all.
+	garageImage = "dxflrs/garage:v2.4.1"
+
+	garageKeyName = "netsoldier"
+
+	coldBucket = "netsoldier-cold"
 )
+
+// garageCreds is the S3 key pair the test imports into Garage. Garage mints
+// keys at runtime, but ClickHouse needs credentials in its environment
+// before the bucket exists, so `garage key import` pins a known pair up
+// front. They are generated per run rather than hardcoded: a fixed 64-char
+// hex literal in the tree is indistinguishable from a real leaked key, both
+// to a reader and to the secret scanner.
+type garageCreds struct {
+	accessKey string
+	secretKey string
+}
+
+// newGarageCreds builds a key pair in the shape Garage expects: an access
+// key id of "GK" plus 24 hex characters, and a 64 hex character secret.
+func newGarageCreds(t *testing.T) garageCreds {
+	t.Helper()
+	return garageCreds{
+		accessKey: "GK" + randomHex(t, 12),
+		secretKey: randomHex(t, 32),
+	}
+}
+
+func randomHex(t *testing.T, n int) string {
+	t.Helper()
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatalf("generate random credential: %v", err)
+	}
+	return hex.EncodeToString(b)
+}
+
+// writeGarageConfig renders the single-node Garage config. s3_region is
+// pinned to us-east-1 because ClickHouse signs S3 requests for that region
+// by default and Garage rejects a SigV4 signature scoped to anything else.
+func writeGarageConfig(t *testing.T) string {
+	t.Helper()
+	cfg := `metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+rpc_secret = "0000000000000000000000000000000000000000000000000000000000000001"
+
+[s3_api]
+s3_region = "us-east-1"
+api_bind_addr = "[::]:3900"
+
+[admin]
+api_bind_addr = "[::]:3903"
+admin_token = "netsoldier-test-admin"
+`
+	path := filepath.Join(t.TempDir(), "garage.toml")
+	if err := os.WriteFile(path, []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write garage.toml: %v", err)
+	}
+	return path
+}
 
 // writeStorageXML mirrors the production storage.xml from
 // deploy/kustomize/base/clickhouse/configmap.yaml, with the endpoint
-// pointed at the `minio` network alias instead of minio.storage.svc.
+// pointed at the `garage` network alias instead of garage.storage.svc.
 func writeStorageXML(t *testing.T) string {
 	t.Helper()
 	xml := `<clickhouse>
@@ -32,7 +99,7 @@ func writeStorageXML(t *testing.T) string {
         <disks>
             <s3_cold>
                 <type>s3</type>
-                <endpoint>http://minio:9000/netsoldier-cold/native/</endpoint>
+                <endpoint>http://garage:3900/netsoldier-cold/native/</endpoint>
                 <use_environment_credentials>true</use_environment_credentials>
                 <skip_access_check>true</skip_access_check>
                 <metadata_path>/var/lib/clickhouse/disks/s3_cold/</metadata_path>
@@ -61,67 +128,86 @@ func writeStorageXML(t *testing.T) string {
 	return path
 }
 
-func startMinIO(t *testing.T, networkName string) {
+// startGarage brings up the S3 backend and bootstraps it: a fresh Garage
+// node holds no cluster layout and serves no S3 traffic until one is
+// applied, so the layout, the access key and the bucket are all created
+// here. Mirrors the production bootstrap in
+// deploy/kustomize/base/garage/bucket-init-job.yaml.
+func startGarage(t *testing.T, networkName string) garageCreds {
 	t.Helper()
 	ctx := context.Background()
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image: "minio/minio:RELEASE.2025-09-07T16-13-09Z",
-			Cmd:   []string{"server", "/data", "--address", ":9000"},
-			Env: map[string]string{
-				"MINIO_ROOT_USER":     minioRootUser,
-				"MINIO_ROOT_PASSWORD": minioRootPassword,
-			},
-			ExposedPorts:   []string{"9000/tcp"},
+			Image: garageImage,
+			Files: []testcontainers.ContainerFile{{
+				HostFilePath:      writeGarageConfig(t),
+				ContainerFilePath: "/etc/garage.toml",
+				FileMode:          0o644,
+			}},
+			ExposedPorts:   []string{"3900/tcp"},
 			Networks:       []string{networkName},
-			NetworkAliases: map[string][]string{networkName: {"minio"}},
-			WaitingFor:     wait.ForHTTP("/minio/health/live").WithPort("9000/tcp"),
+			NetworkAliases: map[string][]string{networkName: {"garage"}},
+			WaitingFor:     wait.ForLog("S3 API server listening"),
 		},
 		Started: true,
 	})
 	if err != nil {
-		t.Fatalf("start minio container: %v", err)
+		t.Fatalf("start garage container: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := container.Terminate(context.Background()); err != nil {
-			t.Logf("terminate minio: %v", err)
+			t.Logf("terminate garage: %v", err)
 		}
 	})
+
+	// The image is built FROM scratch and has no shell, so each step runs
+	// the static binary directly rather than through `sh -c`.
+	garage := func(args ...string) string {
+		t.Helper()
+		code, reader, err := container.Exec(ctx, append([]string{"/garage"}, args...))
+		out := ""
+		if reader != nil {
+			b, _ := io.ReadAll(reader)
+			out = string(b)
+		}
+		if err != nil {
+			t.Fatalf("garage %v: %v", args, err)
+		}
+		if code != 0 {
+			t.Fatalf("garage %v: exit %d: %s", args, code, out)
+		}
+		return out
+	}
+
+	// `node id -q` still prefixes the id with docker-exec framing bytes;
+	// pull the 64-char hex key out rather than trusting the raw output.
+	nodeID := parseNodeID(t, garage("node", "id", "-q"))
+
+	creds := newGarageCreds(t)
+
+	garage("layout", "assign", "-z", "dc1", "-c", "20G", nodeID)
+	garage("layout", "apply", "--version", "1")
+	garage("key", "import", "--yes", creds.accessKey, creds.secretKey, "-n", garageKeyName)
+	garage("bucket", "create", coldBucket)
+	garage("bucket", "allow", "--read", "--write", "--owner", coldBucket, "--key", garageKeyName)
+
+	return creds
 }
 
-// createColdBucket runs a one-shot `mc mb`, matching the production
-// minio-bucket-init Job. A failure surfaces later as NoSuchBucket in the
-// move/export subtests.
-func createColdBucket(t *testing.T, networkName string) {
+// parseNodeID extracts the hex node id from `garage node id -q` output.
+func parseNodeID(t *testing.T, out string) string {
 	t.Helper()
-	ctx := context.Background()
-
-	script := fmt.Sprintf(
-		"mc alias set local http://minio:9000 %s %s && mc mb --ignore-existing local/%s",
-		minioRootUser, minioRootPassword, coldBucket)
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:      "minio/mc:RELEASE.2025-08-13T08-35-41Z",
-			Entrypoint: []string{"/bin/sh", "-c"},
-			Cmd:        []string{script},
-			Networks:   []string{networkName},
-			WaitingFor: wait.ForExit().WithExitTimeout(60 * time.Second),
-		},
-		Started: true,
-	})
-	if err != nil {
-		t.Fatalf("run mc bucket init: %v", err)
+	re := regexp.MustCompile(`[0-9a-f]{64}`)
+	id := re.FindString(out)
+	if id == "" {
+		t.Fatalf("no node id in garage output: %q", out)
 	}
-	t.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			t.Logf("terminate mc: %v", err)
-		}
-	})
+	return id
 }
 
-// TestClickHouseColdTier verifies step 119 end to end against real MinIO:
+// TestClickHouseColdTier verifies step 119 end to end against a real S3
+// backend (Garage):
 // migration 018 switches tables to the tiered policy, aged parts move to
 // the S3 cold volume, historical queries transparently read them back, and
 // the Parquet cold-export path (export.sh) round-trips through s3().
@@ -141,13 +227,12 @@ func TestClickHouseColdTier(t *testing.T) {
 		}
 	})
 
-	startMinIO(t, net.Name)
-	createColdBucket(t, net.Name)
+	creds := startGarage(t, net.Name)
 
 	chURL := startClickHouseContainer(t, func(req *testcontainers.ContainerRequest) {
 		req.Networks = []string{net.Name}
-		req.Env["AWS_ACCESS_KEY_ID"] = minioRootUser
-		req.Env["AWS_SECRET_ACCESS_KEY"] = minioRootPassword
+		req.Env["AWS_ACCESS_KEY_ID"] = creds.accessKey
+		req.Env["AWS_SECRET_ACCESS_KEY"] = creds.secretKey
 	})
 	runMigrations(t, chURL)
 
@@ -282,13 +367,13 @@ func TestClickHouseColdTier(t *testing.T) {
 
 	t.Run("ParquetArchiveRoundtrip", func(t *testing.T) {
 		day := oldTS.Format("2006-01-02")
-		dest := fmt.Sprintf("http://minio:9000/%s/cold/network_flows/year=%s/month=%s/day=%s/network_flows.parquet",
+		dest := fmt.Sprintf("http://garage:3900/%s/cold/network_flows/year=%s/month=%s/day=%s/network_flows.parquet",
 			coldBucket, oldTS.Format("2006"), oldTS.Format("01"), oldTS.Format("02"))
 
 		// Same query shape as export.sh in cold-export-cm.yaml.
 		if err := chExec(chURL, fmt.Sprintf(
 			"INSERT INTO FUNCTION s3('%s', '%s', '%s', 'Parquet') SELECT * FROM netsoldier.network_flows WHERE toDate(timestamp) = '%s'",
-			dest, minioRootUser, minioRootPassword, day)); err != nil {
+			dest, creds.accessKey, creds.secretKey, day)); err != nil {
 			t.Fatalf("parquet export: %v", err)
 		}
 
@@ -298,7 +383,7 @@ func TestClickHouseColdTier(t *testing.T) {
 		var counts []countRow
 		if err := chQueryRows(chURL, "netsoldier", fmt.Sprintf(
 			"SELECT count() AS c FROM s3('%s', '%s', '%s', 'Parquet')",
-			dest, minioRootUser, minioRootPassword), &counts); err != nil {
+			dest, creds.accessKey, creds.secretKey), &counts); err != nil {
 			t.Fatalf("parquet read-back: %v", err)
 		}
 		assertEq(t, "parquet archive rows", "3", counts[0].Count.String())
