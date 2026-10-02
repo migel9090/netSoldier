@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/migel9090/netSoldier/libs/events"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -28,15 +29,26 @@ func init() {
 type Sender struct {
 	url     string
 	secret  string
+	token   string
 	retries int
 	http    *http.Client
 	ch      chan any
 }
 
-func NewSender(url, secret string, retries int) *Sender {
+// NewSender builds a webhook sender.
+//
+// secret signs the body with HMAC-SHA256 (events.SignatureHeader) so the
+// receiver can prove the payload was not altered in transit. token is the
+// bearer credential the receiver authenticates the CALLER with — the
+// killswitch's authMiddleware requires it on every POST, so omitting it is
+// how enforcement silently stopped working the moment auth was enabled.
+// They answer different questions ("is this really from the engine?" vs.
+// "is this request allowed?") and are both needed.
+func NewSender(url, secret, token string, retries int) *Sender {
 	return &Sender{
 		url:     url,
 		secret:  secret,
+		token:   token,
 		retries: retries,
 		http:    &http.Client{Timeout: 10 * time.Second},
 		ch:      make(chan any, 64),
@@ -95,7 +107,10 @@ func (s *Sender) deliver(ctx context.Context, payload any) {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		if s.secret != "" {
-			req.Header.Set("X-Webhook-Secret", s.secret)
+			req.Header.Set(events.SignatureHeader, events.SignPayload(s.secret, body))
+		}
+		if s.token != "" {
+			req.Header.Set("Authorization", "Bearer "+s.token)
 		}
 
 		resp, err := s.http.Do(req)
@@ -113,6 +128,18 @@ func (s *Sender) deliver(ctx context.Context, payload any) {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
 		lastErr = fmt.Errorf("status %d: %s", resp.StatusCode, string(errBody))
+
+		// Rejected credentials are a deployment bug, not a transient fault.
+		// Retrying cannot fix it and a generic "delivery failed" buries it,
+		// so give it its own metric label and an unambiguous message: an
+		// unauthenticated sender means NOTHING gets enforced.
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			deliveriesTotal.WithLabelValues("unauthorized").Inc()
+			slog.Error("webhook rejected our credentials — enforcement is NOT running; "+
+				"check WEBHOOK_TOKEN against the receiver's API key",
+				"url", s.url, "status", resp.StatusCode, "has_token", s.token != "")
+			return
+		}
 
 		// 4xx = client error, retrying won't help
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {

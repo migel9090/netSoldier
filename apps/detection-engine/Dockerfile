@@ -8,8 +8,6 @@ FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
 ARG TARGETOS
 ARG TARGETARCH
 
-RUN apk add --no-cache ca-certificates
-
 WORKDIR /src
 
 # Module graph first so dependency download caches independently of sources.

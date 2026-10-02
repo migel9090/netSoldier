@@ -21,6 +21,11 @@ var validIoCTypes = map[string]struct{}{
 // AlertToEvent maps an internal Alert to the shared contract, coercing the
 // ioc_type to a schema-valid value (beacon/flow-window signals carry
 // descriptive types that aren't in the enum → normalized to "ip").
+//
+// SignalClass is carried through deliberately (step 124): the killswitch
+// gates auto-enforcement on whether a detection is backed by an externally
+// attested known-bad indicator, and it can only tell that from the signal
+// class. Dropping the field here silently promotes heuristics to known-bad.
 func AlertToEvent(a detection.Alert) events.DetectionEvent {
 	iocType := a.IoCType
 	if _, ok := validIoCTypes[iocType]; !ok {
@@ -39,6 +44,7 @@ func AlertToEvent(a detection.Alert) events.DetectionEvent {
 		IoCType:       iocType,
 		ClientIP:      a.ClientIP,
 		ClientMAC:     a.ClientMAC,
+		ClientName:    a.ClientName,
 		Severity:      sev,
 		Confidence:    a.Confidence,
 		Source:        a.Source,
@@ -47,6 +53,7 @@ func AlertToEvent(a detection.Alert) events.DetectionEvent {
 		MitreName:     a.MitreName,
 		QueryType:     a.QueryType,
 		Tags:          a.Tags,
+		SignalClass:   a.SignalClass,
 		Signals:       a.Signals,
 		SignalCount:   a.SignalCount,
 	}

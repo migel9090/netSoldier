@@ -129,3 +129,123 @@ func TestAnchorIsHighestConfidenceSignal(t *testing.T) {
 		t.Errorf("anchor threat = %q, want cobalt-strike (the stronger signal)", got.Threat)
 	}
 }
+
+// TestWeakRepeatDoesNotExtendStrongSignal: a steady trickle of weak signals
+// used to refresh the stored strong signal's timestamp, so the 15-minute
+// window stopped bounding how stale the confidence driving enforcement could
+// be. A signal's recency must describe when that observation was made.
+func TestWeakRepeatDoesNotExtendStrongSignal(t *testing.T) {
+	now := time.Now()
+	var emitted []detection.Alert
+	c := New(10*time.Minute, func(a detection.Alert) { emitted = append(emitted, a) })
+	c.now = func() time.Time { return now }
+
+	// A strong beacon at t=0.
+	c.Observe(detection.Alert{
+		ClientMAC: "aa:bb:cc:dd:ee:ff", ClientIP: "192.168.1.10",
+		SignalClass: detection.SignalBeacon, Confidence: 75,
+	})
+
+	// Weak beacon repeats every few minutes for half an hour.
+	for i := 1; i <= 6; i++ {
+		now = now.Add(5 * time.Minute)
+		c.Observe(detection.Alert{
+			ClientMAC: "aa:bb:cc:dd:ee:ff", ClientIP: "192.168.1.10",
+			SignalClass: detection.SignalBeacon, Confidence: 10,
+		})
+	}
+
+	// A second class arrives 30 minutes after the strong beacon. The strong
+	// observation is long past the window, so it must not corroborate.
+	c.Observe(detection.Alert{
+		ClientMAC: "aa:bb:cc:dd:ee:ff", ClientIP: "192.168.1.10",
+		SignalClass: detection.SignalVolumetric, Confidence: 70,
+	})
+
+	for _, a := range emitted {
+		if a.Confidence >= 90 {
+			t.Fatalf("a 30-minute-old signal must not corroborate into %d confidence "+
+				"inside a 10-minute window", a.Confidence)
+		}
+	}
+}
+
+// TestCorrelationKeyedByMAC: keying on IP alone merged signals from two
+// different devices when a DHCP lease moved inside the window.
+func TestCorrelationKeyedByMAC(t *testing.T) {
+	var emitted []detection.Alert
+	c := New(15*time.Minute, func(a detection.Alert) { emitted = append(emitted, a) })
+
+	// Device A, then device B reusing the same IP after a lease change.
+	c.Observe(detection.Alert{
+		ClientMAC: "aa:bb:cc:dd:ee:01", ClientIP: "192.168.1.50",
+		SignalClass: detection.SignalBeacon, Confidence: 75,
+	})
+	c.Observe(detection.Alert{
+		ClientMAC: "aa:bb:cc:dd:ee:02", ClientIP: "192.168.1.50",
+		SignalClass: detection.SignalVolumetric, Confidence: 70,
+	})
+
+	if len(emitted) != 0 {
+		t.Fatalf("signals from two different MACs must not combine, got %d composite(s) "+
+			"(confidence %d)", len(emitted), emitted[0].Confidence)
+	}
+}
+
+func TestCompositeCarriesTriggerIdentity(t *testing.T) {
+	var emitted []detection.Alert
+	c := New(15*time.Minute, func(a detection.Alert) { emitted = append(emitted, a) })
+
+	c.Observe(detection.Alert{
+		ClientMAC: "aa:bb:cc:dd:ee:01", ClientIP: "192.168.1.50",
+		SignalClass: detection.SignalIoC, Confidence: 90, Domain: "evil.example",
+		MatchedIoC: "evil.example",
+	})
+	c.Observe(detection.Alert{
+		ClientMAC: "aa:bb:cc:dd:ee:01", ClientIP: "192.168.1.50", ClientName: "laptop",
+		SignalClass: detection.SignalBeacon, Confidence: 70,
+	})
+
+	if len(emitted) != 1 {
+		t.Fatalf("expected one composite, got %d", len(emitted))
+	}
+	comp := emitted[0]
+	if comp.ClientMAC != "aa:bb:cc:dd:ee:01" {
+		t.Errorf("ClientMAC = %q, want the triggering device", comp.ClientMAC)
+	}
+	if comp.ClientIP != "192.168.1.50" {
+		t.Errorf("ClientIP = %q", comp.ClientIP)
+	}
+	if comp.SignalCount != 2 {
+		t.Errorf("SignalCount = %d, want 2", comp.SignalCount)
+	}
+	// The composite must advertise its contributing classes so the policy can
+	// tell known-bad from heuristic.
+	if len(comp.Signals) != 2 {
+		t.Errorf("Signals = %v, want two classes", comp.Signals)
+	}
+}
+
+// TestHeuristicPairConfidence documents the exact number the killswitch gate
+// has to defend against: two capped heuristics reach critical severity.
+func TestHeuristicPairConfidence(t *testing.T) {
+	if got := combine([]int{75, 70}); got != 93 {
+		t.Fatalf("combine([75,70]) = %d, want 93 — the policy's known-bad gate is "+
+			"calibrated against this value", got)
+	}
+	if got := detection.SeverityForConfidence(93); got != detection.SeverityCritical {
+		t.Fatalf("SeverityForConfidence(93) = %q, want critical", got)
+	}
+}
+
+func TestCorrelationKeyFallsBackToIP(t *testing.T) {
+	if got := correlationKey(detection.Alert{ClientIP: "10.0.0.1"}); got != "ip:10.0.0.1" {
+		t.Errorf("key without MAC = %q", got)
+	}
+	if got := correlationKey(detection.Alert{ClientMAC: "AA:BB:CC:DD:EE:FF"}); got != "mac:aa:bb:cc:dd:ee:ff" {
+		t.Errorf("MAC key should be lowercased, got %q", got)
+	}
+	if got := correlationKey(detection.Alert{}); got != "" {
+		t.Errorf("an alert with no identity should not correlate, got %q", got)
+	}
+}

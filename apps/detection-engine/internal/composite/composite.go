@@ -16,11 +16,21 @@
 // monotonic (more corroboration never lowers confidence) and saturating
 // (never reaches 100 on heuristics alone), and it deliberately does not
 // let three weak heuristics fabricate certainty — see combine().
+//
+// Note what noisy-OR does NOT give you, and why the killswitch has a second
+// gate (step 124): a beacon capped at 75 plus a volumetric anomaly capped at
+// 70 combine to 93, which maps to severity "critical". Two purely local
+// heuristics therefore DO clear a 90/critical auto-block bar on confidence
+// alone. Escalating confidence is the correct job for this package; deciding
+// that heuristics are not sufficient grounds to cut a device off without a
+// human is the policy's job, and it keys off signal CLASS (see
+// events.IsKnownBadSignal), not the combined number.
 package composite
 
 import (
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -89,12 +99,29 @@ func New(window time.Duration, emit func(detection.Alert)) *Correlator {
 	}
 }
 
+// correlationKey identifies the device a signal belongs to.
+//
+// MAC first, IP only as a fallback. Keying on IP alone meant that when a DHCP
+// lease moved within the correlation window, signals from two different
+// devices merged into one composite — which then inherited whichever device's
+// MAC came from the strongest signal and drove enforcement against it. On a
+// home network with short leases that is a realistic mis-attribution.
+func correlationKey(a detection.Alert) string {
+	if a.ClientMAC != "" {
+		return "mac:" + strings.ToLower(a.ClientMAC)
+	}
+	if a.ClientIP != "" {
+		return "ip:" + a.ClientIP
+	}
+	return ""
+}
+
 // Observe records one per-signal alert. Alerts with no client or no signal
 // class cannot be correlated and are ignored (they still flowed through the
 // normal alert path already). Returns the composite it emitted, if any —
 // handy for tests.
 func (c *Correlator) Observe(a detection.Alert) *detection.Alert {
-	client := a.ClientIP
+	client := correlationKey(a)
 	if client == "" || a.SignalClass == "" || a.SignalClass == detection.SignalComposite {
 		return nil
 	}
@@ -118,7 +145,7 @@ func (c *Correlator) Observe(a detection.Alert) *detection.Alert {
 		return nil
 	}
 
-	comp := c.build(client, sigs, classes, now)
+	comp := c.build(a, sigs, classes, now)
 	if comp.Confidence < minEmitConfidence {
 		return nil
 	}
@@ -137,7 +164,7 @@ func (c *Correlator) Observe(a detection.Alert) *detection.Alert {
 
 // build assembles the composite alert from the highest-confidence signal in
 // each distinct class.
-func (c *Correlator) build(client string, sigs []signal, classes []string, now time.Time) detection.Alert {
+func (c *Correlator) build(trigger detection.Alert, sigs []signal, classes []string, now time.Time) detection.Alert {
 	best := bestPerClass(sigs)
 	confs := make([]int, 0, len(classes))
 	for _, cl := range classes {
@@ -158,11 +185,24 @@ func (c *Correlator) build(client string, sigs []signal, classes []string, now t
 		tags = append(tags, "signal:"+cl)
 	}
 
+	// Identity comes from the triggering alert, not from the anchor: the
+	// anchor is only chosen for the richest THREAT context, and mixing the
+	// two is how a composite ends up pointing at the wrong device.
+	clientIP := trigger.ClientIP
+	if clientIP == "" {
+		clientIP = anchor.ClientIP
+	}
+	clientMAC := trigger.ClientMAC
+	if clientMAC == "" {
+		clientMAC = anchor.ClientMAC
+	}
+
 	return detection.Alert{
 		Timestamp:   now,
 		Domain:      anchor.Domain,
-		ClientIP:    client,
-		ClientMAC:   anchor.ClientMAC,
+		ClientIP:    clientIP,
+		ClientMAC:   clientMAC,
+		ClientName:  trigger.ClientName,
 		MatchedIoC:  anchor.MatchedIoC,
 		IoCType:     anchor.IoCType,
 		Severity:    detection.SeverityForConfidence(combined),
@@ -245,13 +285,17 @@ func (c *Correlator) evict(now time.Time) {
 
 // upsert replaces the existing signal of the same class if the new one is
 // at least as confident, so each class keeps its strongest observation.
+//
+// A weaker repeat does NOT refresh the stored signal's timestamp. It used to:
+// that meant a client emitting a steady trickle of weak signals kept a single
+// strong observation alive indefinitely, so the window stopped bounding how
+// stale the confidence value driving enforcement could be. A signal's
+// recency has to describe when THAT observation was made.
 func upsert(sigs []signal, s signal) []signal {
 	for i := range sigs {
 		if sigs[i].class == s.class {
 			if s.confidence >= sigs[i].confidence {
 				sigs[i] = s
-			} else {
-				sigs[i].seen = s.seen // refresh recency even if weaker
 			}
 			return sigs
 		}

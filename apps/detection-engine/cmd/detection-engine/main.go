@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -56,8 +57,13 @@ func main() {
 	if staticIoCs, err := iocmatch.LoadDomainsFromFile(tlPath); err != nil {
 		slog.Warn("static threatlist not loaded", "path", tlPath, "error", err)
 	} else {
-		matcher.Add(staticIoCs)
-		slog.Info("static threatlist loaded", "path", tlPath, "domains", len(staticIoCs))
+		added, rejected := matcher.Add(staticIoCs)
+		if rejected > 0 {
+			slog.Warn("static threatlist had unsafe entries that were dropped",
+				"path", tlPath, "rejected", rejected)
+		}
+		slog.Info("static threatlist loaded", "path", tlPath,
+			"domains", added, "rejected", rejected)
 	}
 
 	if tiURL := os.Getenv("THREAT_INTEL_URL"); tiURL != "" {
@@ -84,18 +90,24 @@ func main() {
 	if chURL != "" {
 		feedbackSink = feedback.NewCHSink(chURL, chDB)
 	}
-	feedbackStore := feedback.New(feedbackSink)
+	feedbackStore := feedback.NewWithOptions(feedbackSink, feedback.Options{
+		TTL:             parseDuration(envOr("FEEDBACK_SUPPRESSION_TTL", "720h"), feedback.DefaultSuppressionTTL),
+		MaxSuppressions: 0, // default cap
+	})
 
 	// forward delivers a detection to the killswitch (or any generic
 	// webhook receiver) as the shared events.DetectionEvent contract.
 	var forward func(detection.Alert)
 	if webhookURL := os.Getenv("WEBHOOK_URL"); webhookURL != "" {
-		sender := webhook.NewSender(webhookURL, envOr("WEBHOOK_SECRET", ""), 3)
+		sender := webhook.NewSender(webhookURL,
+			envOr("WEBHOOK_SECRET", ""), envOr("WEBHOOK_TOKEN", ""), 3)
 		go sender.Run(ctx)
 		forward = func(a detection.Alert) {
 			sender.Send(eventmap.AlertToEvent(a))
 		}
-		slog.Info("webhook enabled", "url", webhookURL)
+		slog.Info("webhook enabled", "url", webhookURL,
+			"signed", os.Getenv("WEBHOOK_SECRET") != "",
+			"authenticated", os.Getenv("WEBHOOK_TOKEN") != "")
 	}
 
 	// Composite-confidence correlator (step 116): combines corroborating
@@ -195,10 +207,18 @@ func main() {
 	mux.HandleFunc("GET /feedback", feedbackStore.HandleList)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
+	apiKey := os.Getenv("DETECTION_API_KEY")
+	if apiKey == "" {
+		slog.Error("no DETECTION_API_KEY set — POST /feedback is UNAUTHENTICATED. " +
+			"A false-positive verdict suppresses detections before they reach the " +
+			"killswitch, so an unauthenticated caller can disable enforcement for " +
+			"any indicator.")
+	}
+
 	addr := envOr("LISTEN_ADDR", ":8080")
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      otelhttp.NewHandler(mux, "detection-engine"),
+		Handler:      otelhttp.NewHandler(authMiddleware(apiKey, mux), "detection-engine"),
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -221,6 +241,32 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
 	}
+}
+
+// authMiddleware protects mutating endpoints with a bearer token.
+//
+// GET endpoints stay open for the UI and Prometheus, but note that /alerts
+// discloses which domains each device resolved — NetworkPolicy is what keeps
+// that private, so it has to be in place.
+func authMiddleware(apiKey string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || apiKey == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if !strings.HasPrefix(auth, prefix) ||
+			subtle.ConstantTimeCompare([]byte(auth[len(prefix):]), []byte(apiKey)) != 1 {
+			slog.Warn("rejected unauthenticated request",
+				"path", r.URL.Path, "method", r.Method, "remote", r.RemoteAddr)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {

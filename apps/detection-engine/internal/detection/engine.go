@@ -13,17 +13,25 @@ import (
 
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/adguard"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/iocmatch"
+	"github.com/migel9090/netSoldier/libs/events"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-const maxAlerts = 1000
+const (
+	maxAlerts = 1000
+	// queryLogBatch is how many querylog entries one poll pulls. Entries
+	// older than the batch are dropped by AdGuard's ring buffer before the
+	// next poll, so a saturated batch means missed detections — tracked by
+	// pollBatchSaturated and alerted on.
+	queryLogBatch = 300
+)
 
 // Severity vocabulary shared with libs/events and the killswitch policy.
 const (
-	SeverityCritical = "critical"
-	SeverityHigh     = "high"
-	SeverityMedium   = "medium"
-	SeverityLow      = "low"
+	SeverityCritical = events.SeverityCritical
+	SeverityHigh     = events.SeverityHigh
+	SeverityMedium   = events.SeverityMedium
+	SeverityLow      = events.SeverityLow
 )
 
 // SeverityForConfidence maps a 0-100 confidence to the severity vocabulary,
@@ -45,13 +53,17 @@ func SeverityForConfidence(confidence int) string {
 // Signal classes label where a detection came from, so composite-confidence
 // (step 116) can tell corroborating signals apart from repeats of the same
 // kind. Only distinct classes corroborate each other.
+//
+// These alias the shared contract in libs/events: the killswitch policy gates
+// auto-enforcement on signal KIND (feed/signature vs. heuristic), so producer
+// and consumer must not keep independent copies of these strings.
 const (
-	SignalIoC        = "ioc"           // domain/IP/hash match from a feed
-	SignalIDS        = "ids-signature" // Suricata rule hit
-	SignalTLS        = "tls"           // TLS fingerprint/SNI heuristic
-	SignalBeacon     = "beacon"        // RITA beaconing
-	SignalVolumetric = "volumetric"    // Isolation Forest flow anomaly
-	SignalComposite  = "composite"     // combined output
+	SignalIoC        = events.SignalIoC
+	SignalIDS        = events.SignalIDS
+	SignalTLS        = events.SignalTLS
+	SignalBeacon     = events.SignalBeacon
+	SignalVolumetric = events.SignalVolumetric
+	SignalComposite  = events.SignalComposite
 )
 
 var (
@@ -75,12 +87,28 @@ var (
 		Name:      "poll_errors_total",
 		Help:      "Total AdGuard querylog poll errors.",
 	})
+	// A poll that fills its batch means the querylog produced at least as
+	// many entries as we asked for, so older unseen entries were left
+	// behind and are gone by the next poll. Silent detection loss is the
+	// worst failure mode a monitor has: make it a number someone can alert
+	// on (step 124).
+	pollBatchSaturated = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "detection_engine",
+		Name:      "poll_batch_saturated_total",
+		Help:      "Polls that returned a full batch, meaning querylog entries were likely missed.",
+	})
+	macResolutionFailures = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "detection_engine",
+		Name:      "mac_resolution_failures_total",
+		Help:      "Detections emitted without a client MAC (allowlist can only match on IP).",
+	})
 
 	alertCounter atomic.Int64
 )
 
 func init() {
-	prometheus.MustRegister(queriesChecked, alertsGenerated, threatlistDomains, pollErrors)
+	prometheus.MustRegister(queriesChecked, alertsGenerated, threatlistDomains, pollErrors,
+		pollBatchSaturated, macResolutionFailures)
 }
 
 type Alert struct {
@@ -89,6 +117,7 @@ type Alert struct {
 	Domain      string    `json:"domain"`
 	ClientIP    string    `json:"client_ip"`
 	ClientMAC   string    `json:"client_mac,omitempty"`
+	ClientName  string    `json:"client_name,omitempty"`
 	QueryType   string    `json:"query_type"`
 	MatchedIoC  string    `json:"matched_ioc"`
 	IoCType     string    `json:"ioc_type,omitempty"`
@@ -113,6 +142,13 @@ type Engine struct {
 	lastSeen    time.Time
 	OnAlert     func(Alert)
 	OnDNSAnswer func(ip, domain string, ttl int)
+
+	// ResolveClient maps a client IP to its MAC and friendly name. The
+	// killswitch allowlist checks MAC first and home DHCP leases move, so a
+	// detection without a MAC can only ever be protected by its current IP
+	// — which is how an allowlisted router ends up quarantined. Optional:
+	// nil leaves ClientMAC empty and increments a counter.
+	ResolveClient func(ip string) (mac, name string)
 
 	mu     sync.RWMutex
 	alerts []Alert
@@ -145,11 +181,17 @@ func (e *Engine) Run(ctx context.Context) {
 }
 
 func (e *Engine) poll(ctx context.Context) {
-	entries, err := e.adguard.QueryLog(ctx, 300)
+	entries, err := e.adguard.QueryLog(ctx, queryLogBatch)
 	if err != nil {
 		pollErrors.Inc()
 		slog.Warn("adguard poll failed", "error", err)
 		return
+	}
+
+	if len(entries) >= queryLogBatch {
+		pollBatchSaturated.Inc()
+		slog.Warn("querylog batch saturated, entries may have been missed",
+			"batch", queryLogBatch, "interval", e.interval)
 	}
 
 	// Entries arrive newest-first; stop at the first already-seen timestamp
@@ -206,6 +248,7 @@ func (e *Engine) emitAlert(entry adguard.QueryLogEntry, domain string, ioc iocma
 		Tags:        ioc.Tags,
 		SignalClass: SignalIoC,
 	}
+	alert.ClientMAC, alert.ClientName = e.resolveClient(entry.Client)
 	if alert.IoCType == "" {
 		alert.IoCType = "domain"
 	}
@@ -235,12 +278,30 @@ func (e *Engine) Ingest(a Alert) {
 	if a.Severity == "" {
 		a.Severity = "medium"
 	}
+	if a.ClientMAC == "" {
+		a.ClientMAC, a.ClientName = e.resolveClient(a.ClientIP)
+	}
 	e.addAlert(a)
 	alertsGenerated.WithLabelValues(a.Severity).Inc()
 	slog.Warn("sensor threat detected",
 		"id", a.ID, "matched_ioc", a.MatchedIoC, "client", a.ClientIP,
 		"severity", a.Severity, "source", a.Source,
 	)
+}
+
+// resolveClient enriches a detection with the device identity the killswitch
+// allowlist needs. Failure is counted, never fatal: enforcement still has the
+// IP, and a missing MAC must not stop a detection from being reported.
+func (e *Engine) resolveClient(ip string) (mac, name string) {
+	if e.ResolveClient == nil || ip == "" {
+		macResolutionFailures.Inc()
+		return "", ""
+	}
+	mac, name = e.ResolveClient(ip)
+	if mac == "" {
+		macResolutionFailures.Inc()
+	}
+	return mac, name
 }
 
 func (e *Engine) addAlert(a Alert) {
