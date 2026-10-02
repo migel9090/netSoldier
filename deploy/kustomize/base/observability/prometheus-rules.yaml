@@ -7,7 +7,7 @@ spec:
     - name: netsoldier.rules
       rules:
         - alert: NetSoldierServiceDown
-          expr: up{job=~"detection-engine|device-inventory"} == 0
+          expr: up{job=~"detection-engine|device-inventory|killswitch-controller|threat-intel-sync|ml-anomaly|web-ui"} == 0
           for: 2m
           labels:
             severity: critical
@@ -85,3 +85,202 @@ spec:
               {{ $value }} enforcement action(s) are pending operator
               approval for over 2 minutes. Review and approve/reject
               in the netSoldier UI.
+
+    # ── Silent-failure alerts (step 124) ──────────────────────────────────
+    #
+    # Each of these covers a failure mode the audit found running in
+    # production with nothing to surface it. They are grouped separately
+    # because they share a theme: the system looks healthy while a control
+    # is not working.
+    - name: netsoldier.silent-failures
+      rules:
+        - alert: KillswitchAutoBlockDisabled
+          expr: killswitch_auto_block_enabled == 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Killswitch auto-block is disabled"
+            description: >-
+              The killswitch is queueing every action for human approval
+              because its allowlist is empty. Nothing is protected from
+              enforcement — including the router — so automatic blocking has
+              been refused by design. Populate ALLOWLIST_MACS/ALLOWLIST_IPS
+              (killswitch-allowlist ConfigMap) to re-enable it.
+
+        - alert: KillswitchAllowlistEmpty
+          expr: killswitch_allowlist_entries == 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Killswitch allowlist is empty"
+            description: >-
+              No device is protected from quarantine. The project's threat
+              model notes that blocking the router takes the whole network
+              offline; this is the control that prevents it.
+
+        - alert: KillswitchDriverFailures
+          expr: increase(killswitch_driver_failures_total[10m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Killswitch driver {{ $labels.operation }} is failing"
+            description: >-
+              An enforcement driver failed to {{ $labels.operation }}. A failed
+              apply means a device believed to be blocked is not; a failed
+              revert means a device believed to be free is still blocked.
+              Check the Enforcement Failures table in the UI.
+
+        - alert: KillswitchAuditWriteFailing
+          expr: increase(killswitch_audit_write_failures_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Killswitch audit records are not being persisted"
+            description: >-
+              Enforcement actions are being taken without an audit trail.
+              The audit log is the accountability control for the killswitch;
+              losing it breaks non-repudiation.
+
+        - alert: KillswitchRequestsRejected
+          expr: increase(killswitch_rejected_requests_total[10m]) > 5
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Killswitch is rejecting requests ({{ $labels.reason }})"
+            description: >-
+              Repeated rejections. reason=bad_signature or bad_token usually
+              means a credential mismatch between detection-engine and the
+              killswitch, which stops enforcement entirely; it can also mean
+              someone is probing the API.
+
+        - alert: WebhookUnauthorized
+          expr: increase(detection_engine_webhook_deliveries_total{result="unauthorized"}[10m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Detection-engine webhook credentials are rejected"
+            description: >-
+              The killswitch is refusing the detection-engine's credentials,
+              so NOTHING is being enforced. Check WEBHOOK_TOKEN against the
+              killswitch's KILLSWITCH_API_KEY.
+
+        - alert: IoCSyncStale
+          expr: >-
+            time() - detection_engine_ioc_sync_last_success_timestamp_seconds > 7200
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Threat intel has not synced for over 2 hours"
+            description: >-
+              detection-engine is matching against stale indicators. This
+              exact failure ran unnoticed because the configured
+              THREAT_INTEL_URL produced a 404 and nothing measured success —
+              the engine fell back to the static domains.txt while every feed
+              was disconnected.
+
+        - alert: IoCSyncFailing
+          expr: increase(detection_engine_ioc_sync_failures_total[15m]) > 3
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "IoC sync failing ({{ $labels.reason }})"
+            description: >-
+              Repeated IoC sync failures. reason=invalid_indicator means a
+              feed is returning indicators too broad to use (a bare TLD would
+              match every domain under it) and they are being dropped.
+
+        - alert: ThreatIntelSourceStale
+          expr: >-
+            time() - threat_intel_source_last_success_timestamp_seconds > 86400
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Threat intel source {{ $labels.source }} is stale"
+            description: >-
+              {{ $labels.source }} has not returned data for over 24 hours.
+
+        - alert: DetectionQueryLogSaturated
+          expr: increase(detection_engine_poll_batch_saturated_total[15m]) > 3
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "AdGuard querylog polling is saturating"
+            description: >-
+              Polls are returning a full batch, so querylog entries are
+              ageing out before they are read and DNS detections are being
+              missed. Shorten POLL_INTERVAL or raise the batch size.
+
+        - alert: SensorIngestErrors
+          expr: increase(detection_engine_sensor_ingest_errors_total[15m]) > 10
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Sensor ingest errors from {{ $labels.source }}"
+            description: >-
+              detection-engine is failing to read or parse rows from
+              {{ $labels.source }}. Suricata/Zeek/ML detections are not
+              reaching the alert path.
+
+        - alert: DetectionSuppressionsHigh
+          expr: detection_engine_active_suppressions > 100
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Unusually many detection suppressions active"
+            description: >-
+              {{ $value }} indicators are currently suppressed. Suppressions
+              stop detections before they reach the killswitch, so a large or
+              growing number is worth reviewing — whether it is over-eager
+              tuning or someone installing them deliberately.
+
+        - alert: DetectionMACResolutionFailing
+          expr: >-
+            increase(detection_engine_mac_resolution_failures_total[30m]) > 50
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Detections are missing client MAC addresses"
+            description: >-
+              The killswitch allowlist checks MAC first and home DHCP leases
+              move, so detections without a MAC can only be protected by
+              their current IP. Check device-inventory reachability.
+
+        - alert: ClickHouseDiskFilling
+          expr: >-
+            (1 - (
+              kubelet_volume_stats_available_bytes{persistentvolumeclaim=~"data-clickhouse.*"}
+              / kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~"data-clickhouse.*"}
+            )) > 0.85
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ClickHouse volume is {{ $value | humanizePercentage }} full"
+            description: >-
+              Storage exhaustion halts the detection pipeline (threat model
+              D-02). Check TTL enforcement and the cold-tier export.
+
+        - alert: DeviceEventsDropped
+          expr: increase(device_inventory_events_dropped_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "device-inventory is dropping events"
+            description: >-
+              The ClickHouse write queue is full, so device sightings are
+              being discarded. Discovery runs on spoofable LAN protocols, so
+              a sustained rate may be a flood rather than real traffic.
