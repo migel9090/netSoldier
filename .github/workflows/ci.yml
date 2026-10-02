@@ -52,12 +52,24 @@ jobs:
       # missing fluent-bit, pi-edge shipped no NetworkPolicies at all, and
       # manifests referenced images that had no Dockerfile. Rendering both
       # overlays and validating the result catches that class of mistake.
+      # base/misp generates its Secret with ksops, which decrypts a
+      # SOPS-encrypted file during `kustomize build`. CI has no ksops binary,
+      # no key, and the encrypted payload is deliberately uncommitted, so the
+      # build died on the proxmox-soc overlay and this step never once
+      # passed. The stub stands in for the plugin with a placeholder Secret
+      # so everything around it still renders and gets schema-checked;
+      # ArgoCD's repo-server does the real decryption at deploy time.
+      - name: Install ksops stub for build-time validation
+        run: |
+          install -m 0755 scripts/ci/ksops-stub.py /usr/local/bin/ksops
+
       - name: Build and validate kustomize overlays
         run: |
           for overlay in deploy/kustomize/overlays/*/; do
             name=$(basename "$overlay")
             echo "::group::kustomize build $name"
-            kustomize build "$overlay" > "/tmp/$name.yaml"
+            kustomize build --enable-alpha-plugins --enable-exec \
+              "$overlay" > "/tmp/$name.yaml"
             kubeconform -strict -summary -ignore-missing-schemas "/tmp/$name.yaml"
             echo "::endgroup::"
           done

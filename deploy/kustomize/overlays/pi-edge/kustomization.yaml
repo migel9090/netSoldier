@@ -1,26 +1,12 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: netsoldier
-
 commonLabels:
   app.kubernetes.io/instance: pi-edge
 
 resources:
-  - ../../base/namespace.yaml
-  - ../../base/detection-engine/
-  - ../../base/device-inventory/
-  - ../../base/fluent-bit/
-  # The Pi profile deployed NO NetworkPolicies, so the default-deny baseline
-  # and every per-service rule were absent on the profile most likely to sit
-  # directly on the household LAN. The policies for workloads this profile
-  # does not run are inert (they select pods that do not exist), so including
-  # the whole directory is safe and keeps the two profiles from drifting.
-  - ../../base/network-policies/
+  # Everything that belongs in the netsoldier namespace. Kept in a nested
+  # kustomization so its namespace transformer cannot reach AdGuard.
+  - netsoldier/
+  # AdGuard owns the `dns` namespace and must keep it.
   - ../../../adguard/
-
-patches:
-  - path: patches/detection-engine-resources.yaml
-  - path: patches/device-inventory-resources.yaml
-  - path: patches/detection-engine-env.yaml
-  - path: patches/fluent-bit-resources.yaml
