@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Superseded runs are pointless spend and delay the useful one.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -15,6 +20,7 @@ env:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
         with:
@@ -29,8 +35,38 @@ jobs:
       - name: Validate deploy configs
         run: pip install --quiet pyyaml jsonschema && python scripts/validate-configs.py
 
+      - name: Install kustomize and kubeconform
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh \
+            | bash -s 5.4.3 /usr/local/bin
+          curl -sSfL -o /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+
+      # The YAML/schema check only ever parsed individual files, so
+      # structural problems were invisible: the proxmox-soc overlay was
+      # missing fluent-bit, pi-edge shipped no NetworkPolicies at all, and
+      # manifests referenced images that had no Dockerfile. Rendering both
+      # overlays and validating the result catches that class of mistake.
+      - name: Build and validate kustomize overlays
+        run: |
+          for overlay in deploy/kustomize/overlays/*/; do
+            name=$(basename "$overlay")
+            echo "::group::kustomize build $name"
+            kustomize build "$overlay" > "/tmp/$name.yaml"
+            kubeconform -strict -summary -ignore-missing-schemas "/tmp/$name.yaml"
+            echo "::endgroup::"
+          done
+
+      # Every first-party image a manifest references must have a Dockerfile
+      # and a build job, or the workload cannot start — and Kyverno's
+      # verifyImages policy rejects it outright for being unsigned.
+      - name: Check every referenced first-party image is built
+        run: python scripts/check-images.py
+
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
         with:
@@ -43,15 +79,33 @@ jobs:
           go-version-file: apps/detection-engine/go.mod
           cache-dependency-path: apps/*/go.sum
 
+      # gofmt was never gated, so nine files had drifted out of format on
+      # main while `task fmt` sat unused.
+      - name: Go format check
+        run: |
+          unformatted=$(gofmt -l apps libs tests)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-formatted. Run 'task fmt'."
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # libs/ and tests/ were excluded by the apps/*/ glob, so the shared
+      # event contract was never vetted or tested in CI at all.
       - name: Go vet
         run: |
-          for dir in apps/*/; do
+          for dir in apps/*/ libs/*/; do
             if find "$dir" -name '*.go' -print -quit | grep -q .; then
               echo "::group::vet $dir"
               (cd "$dir" && go vet ./...)
               echo "::endgroup::"
             fi
           done
+          # tests/e2e is entirely behind build tags, so a plain vet matches
+          # no packages and silently passes.
+          echo "::group::vet tests/e2e"
+          (cd tests/e2e && go vet -tags=e2e ./... && go vet -tags=integration ./...)
+          echo "::endgroup::"
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
@@ -60,8 +114,49 @@ jobs:
       - name: Ruff lint
         run: pip install --quiet ruff && ruff check apps/ml-anomaly/
 
+  web-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/web-ui/package-lock.json
+
+      - name: Install
+        working-directory: apps/web-ui
+        run: npm ci --no-audit --no-fund
+
+      # The UI was outside every CI gate, which is how it accumulated 17
+      # type errors and a `lint` script calling an eslint that was never
+      # installed. It is the killswitch approval surface — it needs the same
+      # gates as the services.
+      - name: Format check
+        working-directory: apps/web-ui
+        run: npx prettier --check .
+
+      - name: Typecheck
+        working-directory: apps/web-ui
+        run: npx svelte-kit sync && npx svelte-check --tsconfig ./tsconfig.json --threshold error
+
+      - name: Unit tests
+        working-directory: apps/web-ui
+        run: npx vitest run
+
+      - name: Build
+        working-directory: apps/web-ui
+        run: npm run build
+
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
         with:
@@ -76,7 +171,7 @@ jobs:
 
       - name: Go test with coverage
         run: |
-          for dir in apps/*/; do
+          for dir in apps/*/ libs/*/; do
             if find "$dir" -name '*_test.go' -print -quit | grep -q .; then
               echo "::group::test $dir"
               (cd "$dir" && go test -race -count=1 -coverprofile=coverage.out ./...)
@@ -88,18 +183,45 @@ jobs:
             fi
           done
 
-      - name: Go coverage gate (≥70% critical packages)
+      # Per-package floors.
+      #
+      # The enforcement drivers, the feedback suppression store and the
+      # shared event contract are all load-bearing for safety and had no
+      # coverage floor at all — the drivers had no tests whatsoever, which is
+      # how a swallowed sendto() error and an AdGuard rule-injection path
+      # survived to step 123.
+      #
+      # drivers sits at 45 rather than 70 on purpose and not as a
+      # concession: arpisolate.go is raw AF_PACKET socket code that needs
+      # CAP_NET_RAW and a real interface, so it cannot be unit-tested in CI.
+      # The parts that CAN be tested are each above 70 on their own
+      # (sinkhole.go ~74%, switchport.go ~73%, guard.go ~82%); the ARP
+      # driver's logic is covered by targeted tests for target validation and
+      # the gateway refusal. Raising this number would mean deleting the
+      # untestable file from the measurement, not testing more of it.
+      - name: Go coverage gate
         run: |
           fail=0
-          for pkg in \
-            apps/detection-engine/internal/iocmatch \
-            apps/killswitch-controller/internal/policy \
-            apps/killswitch-controller/internal/actions \
-            apps/threat-intel-sync/internal/ioc; do
-            cover=$(cd "$(echo "$pkg" | cut -d/ -f1-2)" && go test -cover "./$(echo "$pkg" | cut -d/ -f3-)/" 2>&1 | grep -oP '\d+\.\d+(?=%)' || echo "0")
-            echo "$pkg: ${cover}%"
-            if [ "$(echo "$cover < 70" | bc)" -eq 1 ]; then
-              echo "::error::Coverage for $pkg is ${cover}% (minimum 70%)"
+          for entry in \
+            apps/detection-engine/internal/iocmatch:70 \
+            apps/detection-engine/internal/feedback:70 \
+            apps/detection-engine/internal/composite:70 \
+            apps/killswitch-controller/internal/policy:80 \
+            apps/killswitch-controller/internal/actions:70 \
+            apps/killswitch-controller/internal/drivers:45 \
+            apps/device-inventory/internal/store:70 \
+            apps/threat-intel-sync/internal/ioc:70 \
+            libs/events:90; do
+            pkg="${entry%:*}"
+            floor="${entry##*:}"
+            module="$(echo "$pkg" | cut -d/ -f1-2)"
+            rel="$(echo "$pkg" | cut -d/ -f3-)"
+            if [ -z "$rel" ]; then target="./..."; else target="./$rel/"; fi
+            cover=$(cd "$module" && go test -cover "$target" 2>&1 | grep -oP '\d+\.\d+(?=%)' | head -n1)
+            cover=${cover:-0}
+            echo "$pkg: ${cover}% (floor ${floor}%)"
+            if [ "$(echo "$cover < $floor" | bc)" -eq 1 ]; then
+              echo "::error::Coverage for $pkg is ${cover}% (minimum ${floor}%)"
               fail=1
             fi
           done
@@ -117,6 +239,7 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [lint, test]
     steps:
       - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
@@ -140,6 +263,7 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [lint]
     steps:
       - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
@@ -163,6 +287,7 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [lint, test]
     permissions:
       contents: read
@@ -220,7 +345,7 @@ jobs:
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         if: github.event_name == 'push'
         with:
-          image: ghcr.io/${{ github.repository_owner }}/detection-engine:main
+          image: ghcr.io/${{ github.repository_owner }}/detection-engine@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
           artifact-name: sbom-detection-engine
           output-file: detection-engine.cdx.json
@@ -232,7 +357,7 @@ jobs:
       actions: read
       id-token: write
       packages: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
     with:
       image: ghcr.io/${{ github.repository_owner }}/detection-engine
       digest: ${{ needs.build.outputs.digest }}
@@ -242,6 +367,7 @@ jobs:
 
   build-ml-anomaly:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [lint, test]
     permissions:
       contents: read
@@ -295,7 +421,7 @@ jobs:
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         if: github.event_name == 'push'
         with:
-          image: ghcr.io/${{ github.repository_owner }}/ml-anomaly:main
+          image: ghcr.io/${{ github.repository_owner }}/ml-anomaly@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
           artifact-name: sbom-ml-anomaly
           output-file: ml-anomaly.cdx.json
@@ -307,7 +433,7 @@ jobs:
       actions: read
       id-token: write
       packages: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
     with:
       image: ghcr.io/${{ github.repository_owner }}/ml-anomaly
       digest: ${{ needs.build-ml-anomaly.outputs.digest }}
@@ -317,6 +443,7 @@ jobs:
 
   build-zeek:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [lint, test]
     permissions:
       contents: read
@@ -377,7 +504,7 @@ jobs:
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         if: github.event_name == 'push'
         with:
-          image: ghcr.io/${{ github.repository_owner }}/zeek:main
+          image: ghcr.io/${{ github.repository_owner }}/zeek@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
           artifact-name: sbom-zeek
           output-file: zeek.cdx.json
@@ -389,10 +516,330 @@ jobs:
       actions: read
       id-token: write
       packages: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
     with:
       image: ghcr.io/${{ github.repository_owner }}/zeek
       digest: ${{ needs.build-zeek.outputs.digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+  build-device-inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [lint, test]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/device-inventory
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=ref,event=pr
+
+      - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        id: build
+        with:
+          context: .
+          file: apps/device-inventory/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=device-inventory
+          cache-to: type=gha,scope=device-inventory,mode=max
+
+      - name: Sign image
+        if: github.event_name == 'push'
+        run: cosign sign --yes ghcr.io/${{ github.repository_owner }}/device-inventory@${{ steps.build.outputs.digest }}
+
+      # SBOM by DIGEST, not by the :main tag: on a branch or PR build the tag
+      # points at a different image, so a tag-based SBOM described something
+      # other than what was just built and signed.
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        if: github.event_name == 'push'
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/device-inventory@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          artifact-name: sbom-device-inventory
+          output-file: device-inventory.cdx.json
+
+  provenance-device-inventory:
+    if: github.event_name == 'push'
+    needs: build-device-inventory
+    permissions:
+      actions: read
+      id-token: write
+      packages: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
+    with:
+      image: ghcr.io/${{ github.repository_owner }}/device-inventory
+      digest: ${{ needs.build-device-inventory.outputs.digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+  build-killswitch-controller:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [lint, test]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/killswitch-controller
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=ref,event=pr
+
+      - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        id: build
+        with:
+          context: .
+          file: apps/killswitch-controller/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=killswitch-controller
+          cache-to: type=gha,scope=killswitch-controller,mode=max
+
+      - name: Sign image
+        if: github.event_name == 'push'
+        run: cosign sign --yes ghcr.io/${{ github.repository_owner }}/killswitch-controller@${{ steps.build.outputs.digest }}
+
+      # SBOM by DIGEST, not by the :main tag: on a branch or PR build the tag
+      # points at a different image, so a tag-based SBOM described something
+      # other than what was just built and signed.
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        if: github.event_name == 'push'
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/killswitch-controller@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          artifact-name: sbom-killswitch-controller
+          output-file: killswitch-controller.cdx.json
+
+  provenance-killswitch-controller:
+    if: github.event_name == 'push'
+    needs: build-killswitch-controller
+    permissions:
+      actions: read
+      id-token: write
+      packages: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
+    with:
+      image: ghcr.io/${{ github.repository_owner }}/killswitch-controller
+      digest: ${{ needs.build-killswitch-controller.outputs.digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+  build-threat-intel-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [lint, test]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/threat-intel-sync
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=ref,event=pr
+
+      - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        id: build
+        with:
+          context: .
+          file: apps/threat-intel-sync/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=threat-intel-sync
+          cache-to: type=gha,scope=threat-intel-sync,mode=max
+
+      - name: Sign image
+        if: github.event_name == 'push'
+        run: cosign sign --yes ghcr.io/${{ github.repository_owner }}/threat-intel-sync@${{ steps.build.outputs.digest }}
+
+      # SBOM by DIGEST, not by the :main tag: on a branch or PR build the tag
+      # points at a different image, so a tag-based SBOM described something
+      # other than what was just built and signed.
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        if: github.event_name == 'push'
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/threat-intel-sync@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          artifact-name: sbom-threat-intel-sync
+          output-file: threat-intel-sync.cdx.json
+
+  provenance-threat-intel-sync:
+    if: github.event_name == 'push'
+    needs: build-threat-intel-sync
+    permissions:
+      actions: read
+      id-token: write
+      packages: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
+    with:
+      image: ghcr.io/${{ github.repository_owner }}/threat-intel-sync
+      digest: ${{ needs.build-threat-intel-sync.outputs.digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+  build-web-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [lint, test, web-ui]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/web-ui
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=ref,event=pr
+
+      - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        id: build
+        with:
+          context: apps/web-ui
+          file: apps/web-ui/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=web-ui
+          cache-to: type=gha,scope=web-ui,mode=max
+
+      - name: Sign image
+        if: github.event_name == 'push'
+        run: cosign sign --yes ghcr.io/${{ github.repository_owner }}/web-ui@${{ steps.build.outputs.digest }}
+
+      # SBOM by DIGEST, not by the :main tag: on a branch or PR build the tag
+      # points at a different image, so a tag-based SBOM described something
+      # other than what was just built and signed.
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        if: github.event_name == 'push'
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/web-ui@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          artifact-name: sbom-web-ui
+          output-file: web-ui.cdx.json
+
+  provenance-web-ui:
+    if: github.event_name == 'push'
+    needs: build-web-ui
+    permissions:
+      actions: read
+      id-token: write
+      packages: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
+    with:
+      image: ghcr.io/${{ github.repository_owner }}/web-ui
+      digest: ${{ needs.build-web-ui.outputs.digest }}
       registry-username: ${{ github.actor }}
     secrets:
       registry-password: ${{ secrets.GITHUB_TOKEN }}

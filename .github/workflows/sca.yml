@@ -16,6 +16,7 @@ permissions:
 jobs:
   osv-scanner:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
         with:
@@ -25,6 +26,10 @@ jobs:
 
       - name: OSV-Scanner
         uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        id: osv
+        # Do not stop the job here: the SARIF upload below must still run so
+        # findings reach code scanning. The explicit gate after it decides
+        # whether the build fails.
         continue-on-error: true
         with:
           scan-args: |-
@@ -42,8 +47,18 @@ jobs:
           sarif_file: osv.sarif
           category: osv-scanner
 
+      # Gate on the scan result. It previously ran with continue-on-error and
+      # nothing else looked at the outcome, so a known-vulnerable dependency
+      # could merge while the job showed green.
+      - name: Fail on OSV findings
+        if: steps.osv.outcome == 'failure'
+        run: |
+          echo "::error::OSV-Scanner reported vulnerable dependencies — see the code scanning results."
+          exit 1
+
   grype:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
         with:
