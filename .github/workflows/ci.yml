@@ -37,6 +37,10 @@ jobs:
 
       - name: Install kustomize and kubeconform
         run: |
+          # The hosted runner image now ships its own kustomize and the
+          # installer refuses to overwrite it ("exists. Remove it first."),
+          # which failed this job. Drop it so the pinned 5.4.3 is what runs.
+          rm -f /usr/local/bin/kustomize
           curl -sSfL https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh \
             | bash -s 5.4.3 /usr/local/bin
           curl -sSfL -o /tmp/kubeconform.tar.gz \
@@ -76,7 +80,10 @@ jobs:
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
-          go-version-file: apps/detection-engine/go.mod
+          # tests/e2e needs a newer Go than the services (x/crypto, held
+          # past the GO-2026-6354/6355 advisories, requires go 1.26), so
+          # take the version from the module this job actually compiles.
+          go-version-file: tests/e2e/go.mod
           cache-dependency-path: apps/*/go.sum
 
       # gofmt was never gated, so nine files had drifted out of format on
@@ -250,7 +257,10 @@ jobs:
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
-          go-version-file: apps/detection-engine/go.mod
+          # tests/e2e needs a newer Go than the services (x/crypto, held
+          # past the GO-2026-6354/6355 advisories, requires go 1.26), so
+          # take the version from the module this job actually compiles.
+          go-version-file: tests/e2e/go.mod
           cache-dependency-path: |
             tests/e2e/go.sum
             apps/*/go.sum
@@ -274,7 +284,10 @@ jobs:
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
-          go-version-file: apps/detection-engine/go.mod
+          # tests/e2e needs a newer Go than the services (x/crypto, held
+          # past the GO-2026-6354/6355 advisories, requires go 1.26), so
+          # take the version from the module this job actually compiles.
+          go-version-file: tests/e2e/go.mod
           cache-dependency-path: |
             tests/e2e/go.sum
             apps/*/go.sum
@@ -357,7 +370,11 @@ jobs:
       actions: read
       id-token: write
       packages: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
+    # Must be a vX.Y.Z tag, not a commit SHA: the builder resolves and
+    # verifies its own ref and rejects anything else ("Invalid ref ...
+    # Expected ref of the form refs/tags/vX.Y.Z"), which is what was
+    # failing every provenance job. SHA-pinning is unsupported here.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
     with:
       image: ghcr.io/${{ github.repository_owner }}/detection-engine
       digest: ${{ needs.build.outputs.digest }}
@@ -433,7 +450,11 @@ jobs:
       actions: read
       id-token: write
       packages: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
+    # Must be a vX.Y.Z tag, not a commit SHA: the builder resolves and
+    # verifies its own ref and rejects anything else ("Invalid ref ...
+    # Expected ref of the form refs/tags/vX.Y.Z"), which is what was
+    # failing every provenance job. SHA-pinning is unsupported here.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
     with:
       image: ghcr.io/${{ github.repository_owner }}/ml-anomaly
       digest: ${{ needs.build-ml-anomaly.outputs.digest }}
@@ -516,7 +537,11 @@ jobs:
       actions: read
       id-token: write
       packages: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
+    # Must be a vX.Y.Z tag, not a commit SHA: the builder resolves and
+    # verifies its own ref and rejects anything else ("Invalid ref ...
+    # Expected ref of the form refs/tags/vX.Y.Z"), which is what was
+    # failing every provenance job. SHA-pinning is unsupported here.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
     with:
       image: ghcr.io/${{ github.repository_owner }}/zeek
       digest: ${{ needs.build-zeek.outputs.digest }}
@@ -596,7 +621,11 @@ jobs:
       actions: read
       id-token: write
       packages: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
+    # Must be a vX.Y.Z tag, not a commit SHA: the builder resolves and
+    # verifies its own ref and rejects anything else ("Invalid ref ...
+    # Expected ref of the form refs/tags/vX.Y.Z"), which is what was
+    # failing every provenance job. SHA-pinning is unsupported here.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
     with:
       image: ghcr.io/${{ github.repository_owner }}/device-inventory
       digest: ${{ needs.build-device-inventory.outputs.digest }}
@@ -676,7 +705,11 @@ jobs:
       actions: read
       id-token: write
       packages: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
+    # Must be a vX.Y.Z tag, not a commit SHA: the builder resolves and
+    # verifies its own ref and rejects anything else ("Invalid ref ...
+    # Expected ref of the form refs/tags/vX.Y.Z"), which is what was
+    # failing every provenance job. SHA-pinning is unsupported here.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
     with:
       image: ghcr.io/${{ github.repository_owner }}/killswitch-controller
       digest: ${{ needs.build-killswitch-controller.outputs.digest }}
@@ -756,7 +789,11 @@ jobs:
       actions: read
       id-token: write
       packages: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
+    # Must be a vX.Y.Z tag, not a commit SHA: the builder resolves and
+    # verifies its own ref and rejects anything else ("Invalid ref ...
+    # Expected ref of the form refs/tags/vX.Y.Z"), which is what was
+    # failing every provenance job. SHA-pinning is unsupported here.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
     with:
       image: ghcr.io/${{ github.repository_owner }}/threat-intel-sync
       digest: ${{ needs.build-threat-intel-sync.outputs.digest }}
@@ -836,7 +873,11 @@ jobs:
       actions: read
       id-token: write
       packages: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
+    # Must be a vX.Y.Z tag, not a commit SHA: the builder resolves and
+    # verifies its own ref and rejects anything else ("Invalid ref ...
+    # Expected ref of the form refs/tags/vX.Y.Z"), which is what was
+    # failing every provenance job. SHA-pinning is unsupported here.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
     with:
       image: ghcr.io/${{ github.repository_owner }}/web-ui
       digest: ${{ needs.build-web-ui.outputs.digest }}
