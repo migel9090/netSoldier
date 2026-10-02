@@ -8,6 +8,11 @@ then move to the S3 `cold` volume (in-cluster MinIO, bucket
 `netsoldier-cold`, prefix `native/`), and are deleted at the "Delete"
 horizon. Queries read both tiers transparently.
 
+Since step 124 the high-volume tables are partitioned by month
+(`audit_log` by year), so both the tier move and the delete operate on whole
+partitions instead of rewriting parts. See **DM-11** for applying that
+migration to an existing deployment.
+
 | Table | Hot (local) | Delete | Engine | Notes |
 |-------|------------|--------|--------|-------|
 | `devices` | forever | never | ReplacingMergeTree | Persistent device registry; not tiered |
@@ -29,7 +34,7 @@ horizon. Queries read both tiers transparently.
 | `zeek_intel` | 30 days | 365 days | MergeTree | Tiered; Intel framework hits |
 | `ml_beacons` | 30 days | 30 days | ReplacingMergeTree | State table, not tiered (Parquet export only) |
 | `ml_anomalies` | 30 days | 30 days | ReplacingMergeTree | State table, not tiered (Parquet export only) |
-| `detection_feedback` | 365 days | 365 days | ReplacingMergeTree | State table, not tiered |
+| `detection_feedback` | 90 days | 90 days | ReplacingMergeTree | State table, not tiered. Shortened from 365d at step 124: rows carry `client_ip`, and the README/COMPLIANCE.md retention policy is 30 days by default. The *suppressions* these rows produce expire after `FEEDBACK_SUPPRESSION_TTL` (30d) regardless of how long the verdict is kept |
 
 ClickHouse enforces TTL automatically during merges and background moves.
 No manual cleanup is needed under normal operation. Inserts never touch
@@ -323,3 +328,95 @@ MaxRetentionSec=30day
 ```
 
 Apply: `sudo systemctl restart systemd-journald`
+
+---
+
+## DM-11: Apply the partitioning migration (020–022)
+
+**When:** once, during a maintenance window, after upgrading to the step-124
+release. Also read this before adding any new ClickHouse table.
+
+**Why:** no table had a `PARTITION BY`, so every TTL expiry rewrote data parts
+instead of dropping a partition. On the Pi profile that lands on a µSD card
+doing ~5 MB/s random write (`docs/performance-baseline.md`), and the S3
+cold-tier move added in step 119 works per-part too. `020_partitioning.sql`
+adds monthly partitions to the five highest-volume tables,
+`021_ml_beacons_history.sql` stops `ml_beacons` collapsing beacon history,
+and `022_feedback_retention.sql` brings `detection_feedback` back in line with
+the documented retention policy.
+
+**Prerequisites**
+
+- A current backup (DM-5 verifies one exists). These migrations copy and swap
+  tables; a failure mid-way leaves the original intact, but take the backup
+  anyway.
+- Free disk ≥ the size of the largest table being migrated, since the copy
+  coexists with the original. Check first:
+
+```bash
+kubectl -n netsoldier exec sts/clickhouse -- clickhouse-client -q "
+  SELECT table, formatReadableSize(sum(bytes_on_disk)) AS size
+  FROM system.parts WHERE database = 'netsoldier' AND active
+  GROUP BY table ORDER BY sum(bytes_on_disk) DESC"
+```
+
+**Steps**
+
+1. Stop the writers so no rows land between the copy and the swap. The
+   services are fail-open: detection continues in memory and resumes writing
+   afterwards.
+
+   ```bash
+   kubectl -n netsoldier scale deploy/detection-engine deploy/device-inventory --replicas=0
+   ```
+
+   Leave `killswitch-controller` running — it only writes `audit_log`, which
+   is migrated last, and you do not want enforcement unavailable during a
+   maintenance window.
+
+2. Apply the migrations in order, one at a time, checking each:
+
+   ```bash
+   for f in 020_partitioning 021_ml_beacons_history 022_feedback_retention; do
+     echo "== $f"
+     kubectl -n netsoldier exec -i sts/clickhouse -- \
+       clickhouse-client --multiquery < deploy/clickhouse/migrations/$f.sql
+   done
+   ```
+
+3. Verify every table now has a partition key and the row counts survived:
+
+   ```bash
+   kubectl -n netsoldier exec sts/clickhouse -- clickhouse-client -q "
+     SELECT name, partition_key, sorting_key
+     FROM system.tables WHERE database = 'netsoldier' AND engine LIKE '%MergeTree%'
+     ORDER BY name FORMAT PrettyCompact"
+   ```
+
+   Every high-volume table should show `toYYYYMM(timestamp)`; `audit_log`
+   shows `toYYYY(timestamp)`. A table with an empty `partition_key` was not
+   migrated — check the client output from step 2 before continuing.
+
+4. Restart the writers and confirm ingest resumes:
+
+   ```bash
+   kubectl -n netsoldier scale deploy/detection-engine deploy/device-inventory --replicas=1
+   kubectl -n netsoldier logs -l app.kubernetes.io/name=detection-engine --tail=20
+   ```
+
+**Rollback:** the migrations use `EXCHANGE TABLES`, which is atomic. If a
+migration failed before its exchange, the original table is untouched and the
+`*_partitioned` copy can simply be dropped:
+
+```bash
+kubectl -n netsoldier exec sts/clickhouse -- clickhouse-client -q "
+  DROP TABLE IF EXISTS netsoldier.dns_queries_partitioned"
+```
+
+If it failed *after* an exchange, the old table is now the `*_partitioned`
+name and holds the pre-migration data — exchange it back.
+
+**Note on `ml_beacons`:** migration 021 changes the sort key so each beacon
+observation is kept rather than collapsed to the newest per source→destination
+pair. Rows already lost to a previous merge cannot be recovered; the table
+simply stops losing them from here on.
