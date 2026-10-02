@@ -14,24 +14,20 @@
 --
 -- Tables are handled newest-data-first so the most valuable history is
 -- migrated even if the window runs out.
+--
+-- Each replacement repeats the storage policy and the full TTL from
+-- migration 018. A swapped-in table does not inherit them, so stating only
+-- the delete horizon here would silently switch the table back to the local
+-- disk and cut retention (audit_log from 730 days to 180, network_flows from
+-- 365 to 30) the moment this migration ran.
 
 -- ── dns_queries (highest volume) ──────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS netsoldier.dns_queries_partitioned
-(
-    timestamp   DateTime,
-    client_ip   String,
-    client_mac  String DEFAULT '',
-    domain      String,
-    query_type  LowCardinality(String),
-    answer      String DEFAULT '',
-    status      LowCardinality(String) DEFAULT '',
-    response_ms UInt16 DEFAULT 0,
-    blocked     UInt8 DEFAULT 0
-)
+CREATE TABLE IF NOT EXISTS netsoldier.dns_queries_partitioned AS netsoldier.dns_queries
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (timestamp, client_ip, domain)
-TTL timestamp + INTERVAL 30 DAY;
+TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE
+SETTINGS storage_policy = 'tiered';
 
 INSERT INTO netsoldier.dns_queries_partitioned SELECT * FROM netsoldier.dns_queries;
 EXCHANGE TABLES netsoldier.dns_queries AND netsoldier.dns_queries_partitioned;
@@ -42,7 +38,8 @@ CREATE TABLE IF NOT EXISTS netsoldier.connections_partitioned AS netsoldier.conn
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (timestamp, src_mac, dst_ip)
-TTL timestamp + INTERVAL 30 DAY;
+TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE
+SETTINGS storage_policy = 'tiered';
 
 INSERT INTO netsoldier.connections_partitioned SELECT * FROM netsoldier.connections;
 EXCHANGE TABLES netsoldier.connections AND netsoldier.connections_partitioned;
@@ -53,7 +50,8 @@ CREATE TABLE IF NOT EXISTS netsoldier.network_flows_partitioned AS netsoldier.ne
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (timestamp, src_ip, dst_ip)
-TTL timestamp + INTERVAL 30 DAY;
+TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE
+SETTINGS storage_policy = 'tiered';
 
 INSERT INTO netsoldier.network_flows_partitioned SELECT * FROM netsoldier.network_flows;
 EXCHANGE TABLES netsoldier.network_flows AND netsoldier.network_flows_partitioned;
@@ -64,7 +62,8 @@ CREATE TABLE IF NOT EXISTS netsoldier.alerts_partitioned AS netsoldier.alerts
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (timestamp, id)
-TTL timestamp + INTERVAL 90 DAY;
+TTL timestamp + INTERVAL 90 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE
+SETTINGS storage_policy = 'tiered';
 
 INSERT INTO netsoldier.alerts_partitioned SELECT * FROM netsoldier.alerts;
 EXCHANGE TABLES netsoldier.alerts AND netsoldier.alerts_partitioned;
@@ -73,9 +72,10 @@ DROP TABLE IF EXISTS netsoldier.alerts_partitioned;
 -- ── audit_log (180 day TTL; partition by year, it is low volume) ──────────
 CREATE TABLE IF NOT EXISTS netsoldier.audit_log_partitioned AS netsoldier.audit_log
 ENGINE = MergeTree()
-PARTITION BY toYYYY(timestamp)
+PARTITION BY toYear(timestamp)
 ORDER BY (timestamp, action_id)
-TTL timestamp + INTERVAL 180 DAY;
+TTL timestamp + INTERVAL 180 DAY TO VOLUME 'cold', timestamp + INTERVAL 730 DAY DELETE
+SETTINGS storage_policy = 'tiered';
 
 INSERT INTO netsoldier.audit_log_partitioned SELECT * FROM netsoldier.audit_log;
 EXCHANGE TABLES netsoldier.audit_log AND netsoldier.audit_log_partitioned;
