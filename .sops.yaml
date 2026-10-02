@@ -1,3 +1,19 @@
+# SOPS encryption rules.
+#
+# The age recipient was a literal AGE_PUBLIC_KEY_PLACEHOLDER, so `sops -e`
+# could not actually encrypt anything — the "Secrets via SOPS+age" claim in
+# the README was scaffolding. Set NETSOLDIER_AGE_RECIPIENT (or edit the key
+# below) before encrypting; scripts/sops-check.sh verifies it is real and
+# that no plaintext Secret has been committed.
+#
+# Generate a key pair with:
+#   age-keygen -o age.agekey          # private key: NEVER committed
+#   grep 'public key' age.agekey      # the recipient to put below
+#
+# Keep the private key offline (see docs/runbooks/data-maintenance.md DM-8
+# and the rotation procedure at roadmap step 167).
 creation_rules:
+  # Any *.sops.yaml / *.sops.json anywhere in the tree.
   - path_regex: '\.sops\.(yaml|yml|json)$'
-    age: 'AGE_PUBLIC_KEY_PLACEHOLDER'
+    age: ${NETSOLDIER_AGE_RECIPIENT}
+    encrypted_regex: '^(data|stringData)$'
