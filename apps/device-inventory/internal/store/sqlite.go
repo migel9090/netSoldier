@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -61,6 +62,7 @@ func Open(path string) (*Store, error) {
 		device_type  TEXT NOT NULL DEFAULT '',
 		stable_id    TEXT NOT NULL DEFAULT '',
 		labels       TEXT NOT NULL DEFAULT '[]',
+		randomized_mac INTEGER NOT NULL DEFAULT 0,
 		first_seen   TEXT NOT NULL,
 		last_seen    TEXT NOT NULL
 	)`)
@@ -69,17 +71,53 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("create table: %w", err)
 	}
 
+	// Additive migrations for databases created by an earlier version.
+	// Errors are expected when the column already exists; anything else is
+	// logged so a genuine migration failure is not invisible.
 	for _, col := range []string{"vendor", "os", "device_type", "stable_id"} {
-		db.Exec(fmt.Sprintf(`ALTER TABLE devices ADD COLUMN %s TEXT NOT NULL DEFAULT ''`, col))
+		migrate(db, fmt.Sprintf(`ALTER TABLE devices ADD COLUMN %s TEXT NOT NULL DEFAULT ''`, col))
 	}
-	db.Exec(`ALTER TABLE devices ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_stable_id ON devices(stable_id) WHERE stable_id != ''`)
+	migrate(db, `ALTER TABLE devices ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'`)
+	migrate(db, `ALTER TABLE devices ADD COLUMN randomized_mac INTEGER NOT NULL DEFAULT 0`)
+	migrate(db, `CREATE INDEX IF NOT EXISTS idx_stable_id ON devices(stable_id) WHERE stable_id != ''`)
+	migrate(db, `CREATE INDEX IF NOT EXISTS idx_last_seen ON devices(last_seen)`)
+	migrate(db, `CREATE INDEX IF NOT EXISTS idx_ip ON devices(ip) WHERE ip != ''`)
 
 	return &Store{db: db}, nil
 }
 
+// migrate runs an additive DDL statement, tolerating "already exists".
+func migrate(db *sql.DB, stmt string) {
+	if _, err := db.Exec(stmt); err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "duplicate column") || strings.Contains(msg, "already exists") {
+			return
+		}
+		slog.Warn("schema migration failed", "statement", stmt, "error", err)
+	}
+}
+
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// Prune deletes devices not seen within the retention window, keeping any
+// that carry operator labels. Discovery runs on unauthenticated LAN protocols
+// (mDNS/SSDP/LLDP/ARP), so a device spraying forged announcements could grow
+// the inventory without bound — on pi-edge the DB lives in an emptyDir with
+// a 128Mi pod and a shared root filesystem. Returns the number removed.
+func (s *Store) Prune(maxAge time.Duration) (int64, error) {
+	cutoff := time.Now().UTC().Add(-maxAge).Format(time.RFC3339)
+	res, err := s.db.Exec(
+		`DELETE FROM devices WHERE last_seen < ? AND labels IN ('[]', '')`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		slog.Info("pruned stale devices", "removed", n, "older_than", maxAge)
+	}
+	return n, nil
 }
 
 func (s *Store) Upsert(mac, ip, hostname, fingerprint, vendorClass, vendor string) error {
@@ -89,11 +127,26 @@ func (s *Store) Upsert(mac, ip, hostname, fingerprint, vendorClass, vendor strin
 // UpsertFull inserts or updates a device with OS/device_type profiling.
 // For MAC-randomized devices it correlates by vendorClass+hostname to
 // track the same physical device across MAC rotations.
+//
+// The correlation is deliberately narrow. stable_id is derived from DHCP
+// options 60 and 12, which are supplied by the client and trivially forged,
+// and the matching branch rewrites an existing row's MAC. So a malicious
+// device that copied a neighbour's vendor class and hostname could take over
+// that inventory entry — inheriting its labels while the real device vanished
+// from the inventory, creating a blind spot in detection correlation. Two
+// conditions keep that from working:
+//
+//  1. Both MACs must be locally-administered (randomized). A rotation is one
+//     privacy MAC replacing another; a row holding a real OUI-backed address
+//     is a stable device and is never re-pointed by DHCP options alone.
+//  2. vendorClass must be present. Hostname alone is far too weak an
+//     identifier to move a device record on.
 func (s *Store) UpsertFull(mac, ip, hostname, fingerprint, vendorClass, vendor, os, deviceType string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	if IsRandomizedMAC(mac) && (vendorClass != "" || hostname != "") {
+	if IsRandomizedMAC(mac) && vendorClass != "" {
 		sid := StableID(vendorClass, hostname)
+		// Only re-point a record whose current MAC is itself randomized.
 		res, err := s.db.Exec(`
 			UPDATE devices SET
 				mac          = ?,
@@ -105,7 +158,7 @@ func (s *Store) UpsertFull(mac, ip, hostname, fingerprint, vendorClass, vendor, 
 				os           = CASE WHEN ? != '' THEN ? ELSE os END,
 				device_type  = CASE WHEN ? != '' THEN ? ELSE device_type END,
 				last_seen    = ?
-			WHERE stable_id = ?`,
+			WHERE stable_id = ? AND randomized_mac = 1`,
 			mac,
 			ip, ip, hostname, hostname,
 			fingerprint, fingerprint, vendorClass, vendorClass,
@@ -124,9 +177,13 @@ func (s *Store) UpsertFull(mac, ip, hostname, fingerprint, vendorClass, vendor, 
 }
 
 func (s *Store) insertDevice(mac, ip, hostname, fingerprint, vendorClass, vendor, os, deviceType, stableID, now string) error {
+	randomized := 0
+	if IsRandomizedMAC(mac) {
+		randomized = 1
+	}
 	_, err := s.db.Exec(`
-		INSERT INTO devices (mac, ip, hostname, fingerprint, vendor_class, vendor, os, device_type, stable_id, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO devices (mac, ip, hostname, fingerprint, vendor_class, vendor, os, device_type, stable_id, randomized_mac, first_seen, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(mac) DO UPDATE SET
 			ip           = CASE WHEN excluded.ip != '' THEN excluded.ip ELSE devices.ip END,
 			hostname     = CASE WHEN excluded.hostname != '' THEN excluded.hostname ELSE devices.hostname END,
@@ -136,8 +193,9 @@ func (s *Store) insertDevice(mac, ip, hostname, fingerprint, vendorClass, vendor
 			os           = CASE WHEN excluded.os != '' THEN excluded.os ELSE devices.os END,
 			device_type  = CASE WHEN excluded.device_type != '' THEN excluded.device_type ELSE devices.device_type END,
 			stable_id    = CASE WHEN excluded.stable_id != '' THEN excluded.stable_id ELSE devices.stable_id END,
+			randomized_mac = excluded.randomized_mac,
 			last_seen    = excluded.last_seen`,
-		mac, ip, hostname, fingerprint, vendorClass, vendor, os, deviceType, stableID, now, now)
+		mac, ip, hostname, fingerprint, vendorClass, vendor, os, deviceType, stableID, randomized, now, now)
 	return err
 }
 
@@ -185,12 +243,12 @@ func (s *Store) GetDevice(mac string) (*Device, error) {
 // IsRandomizedMAC returns true if the MAC has the locally-administered bit set,
 // indicating a privacy-randomized address (iOS 14+, Android 10+, Windows 10+).
 func IsRandomizedMAC(mac string) bool {
-	mac = strings.ReplaceAll(mac, "-", ":")
-	parts := strings.SplitN(mac, ":", 2)
-	if len(parts) == 0 {
+	mac = strings.ReplaceAll(strings.TrimSpace(mac), "-", ":")
+	first, _, found := strings.Cut(mac, ":")
+	if !found || len(first) != 2 {
 		return false
 	}
-	b, err := strconv.ParseUint(parts[0], 16, 8)
+	b, err := strconv.ParseUint(first, 16, 8)
 	if err != nil {
 		return false
 	}
@@ -204,23 +262,32 @@ func StableID(vendorClass, hostname string) string {
 	return fmt.Sprintf("%x", h[:6])
 }
 
-// EnrichByIP updates hostname for an existing device found by IP address.
-// Only sets hostname if the new value is non-empty; always bumps last_seen.
+// EnrichByIP updates the hostname of an existing device found by IP address.
+//
+// It only fills in a MISSING hostname. mDNS/SSDP are unauthenticated, so any
+// device can claim any IP; allowing an overwrite let one device rename
+// another — including renaming the router — by announcing its address. A
+// first observation is useful enrichment, a silent rewrite is spoofing.
 func (s *Store) EnrichByIP(ip, hostname string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.Exec(`
 		UPDATE devices SET
-			hostname  = CASE WHEN ? != '' THEN ? ELSE hostname END,
+			hostname  = CASE WHEN hostname = '' AND ? != '' THEN ? ELSE hostname END,
 			last_seen = ?
 		WHERE ip = ?`,
 		hostname, hostname, now, ip)
 	return err
 }
 
+// maxListRows bounds the /devices response. Discovery is driven by
+// unauthenticated LAN protocols, so the table size is not fully under our
+// control; an unbounded response would blow up both this service and the UI.
+const maxListRows = 5000
+
 func (s *Store) List() ([]Device, error) {
 	rows, err := s.db.Query(`
 		SELECT mac, ip, hostname, fingerprint, vendor_class, vendor, os, device_type, stable_id, labels, first_seen, last_seen
-		FROM devices ORDER BY last_seen DESC`)
+		FROM devices ORDER BY last_seen DESC LIMIT ?`, maxListRows)
 	if err != nil {
 		return nil, err
 	}

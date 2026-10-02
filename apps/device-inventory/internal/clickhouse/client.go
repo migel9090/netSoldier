@@ -16,15 +16,29 @@ import (
 type Client struct {
 	baseURL  string
 	database string
+	user     string
+	password string
 	http     *http.Client
 }
 
-// NewClient creates a ClickHouse HTTP client.
-func NewClient(baseURL, database string) *Client {
+// NewClient creates a ClickHouse HTTP client. Credentials travel in the
+// X-ClickHouse-User/Key headers rather than the URL so they do not land in
+// ClickHouse's own query_log or any proxy's access log.
+func NewClient(baseURL, database, user, password string) *Client {
 	return &Client{
 		baseURL:  baseURL,
 		database: database,
+		user:     user,
+		password: password,
 		http:     &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// auth attaches credentials when configured.
+func (c *Client) auth(req *http.Request) {
+	if c.user != "" {
+		req.Header.Set("X-ClickHouse-User", c.user)
+		req.Header.Set("X-ClickHouse-Key", c.password)
 	}
 }
 
@@ -35,6 +49,7 @@ func (c *Client) Exec(ctx context.Context, query string) error {
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
+	c.auth(req)
 	return c.do(req)
 }
 
@@ -61,6 +76,7 @@ func (c *Client) Insert(ctx context.Context, table string, records ...any) error
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
+	c.auth(req)
 	return c.do(req)
 }
 
@@ -81,6 +97,7 @@ func (c *Client) Query(ctx context.Context, query string, dest any, params ...ma
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
+	c.auth(req)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
