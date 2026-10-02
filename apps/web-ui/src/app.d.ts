@@ -1,12 +1,9 @@
-// See https://svelte.dev/docs/kit/types#app.d.ts
-
 declare global {
   namespace App {
-    // interface Error {}
-    // interface Locals {}
-    // interface PageData {}
-    // interface PageState {}
-    // interface Platform {}
+    interface Locals {
+      /** Session actor label, set by hooks.server.ts when authenticated. */
+      actor?: string
+    }
   }
 }
 

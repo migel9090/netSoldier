@@ -1,98 +1,105 @@
 export interface Device {
-	mac: string;
-	ip: string;
-	hostname: string;
-	dhcp_fingerprint: string;
-	vendor_class: string;
-	first_seen: string;
-	last_seen: string;
+  mac: string
+  ip: string
+  hostname: string
+  dhcp_fingerprint: string
+  vendor_class: string
+  vendor: string
+  os: string
+  device_type: string
+  stable_id?: string
+  labels: string[]
+  first_seen: string
+  last_seen: string
 }
 
 export interface Alert {
-	id: string;
-	timestamp: string;
-	domain: string;
-	client_ip: string;
-	query_type: string;
-	matched_ioc: string;
-	severity: string;
-	source: string;
-	confidence: number;
-	mitre_id: string;
-	mitre_name: string;
-	threat: string;
+  id: string
+  timestamp: string
+  domain: string
+  client_ip: string
+  query_type: string
+  matched_ioc: string
+  severity: string
+  source: string
+  confidence: number
+  mitre_id: string
+  mitre_name: string
+  threat: string
 }
 
 export interface TopologyNode {
-	id: string;
-	label: string;
-	mac: string;
-	ip: string;
-	device_type: string;
-	vendor: string;
-	is_local: boolean;
-	total_bytes: number;
-	connection_count: number;
+  id: string
+  label: string
+  mac: string
+  ip: string
+  device_type: string
+  vendor: string
+  is_local: boolean
+  total_bytes: number
+  connection_count: number
 }
 
 export interface TopologyEdge {
-	source: string;
-	target: string;
-	total_bytes: number;
-	total_packets: number;
-	flow_count: number;
+  source: string
+  target: string
+  total_bytes: number
+  total_packets: number
+  flow_count: number
 }
 
 export interface TopologyData {
-	nodes: TopologyNode[];
-	edges: TopologyEdge[];
+  nodes: TopologyNode[]
+  edges: TopologyEdge[]
 }
 
 export interface DeviceConnection {
-	timestamp: string;
-	dst_ip: string;
-	dst_domain: string;
-	dst_port: number;
-	protocol: number;
-	bytes_in: number;
-	bytes_out: number;
-	duration_ms: number;
+  timestamp: string
+  dst_ip: string
+  dst_domain: string
+  dst_port: number
+  protocol: number
+  bytes_in: number
+  bytes_out: number
+  duration_ms: number
 }
 
 export interface DeviceDNS {
-	timestamp: string;
-	domain: string;
-	query_type: string;
-	answer: string;
-	status: string;
-	response_ms: number;
-	blocked: number;
+  timestamp: string
+  domain: string
+  query_type: string
+  answer: string
+  status: string
+  response_ms: number
+  blocked: number
 }
 
 export interface DeviceAlert {
-	timestamp: string;
-	id: string;
-	domain: string;
-	query_type: string;
-	matched_ioc: string;
-	severity: string;
-	source: string;
+  timestamp: string
+  id: string
+  domain: string
+  query_type: string
+  matched_ioc: string
+  severity: string
+  source: string
 }
 
 export interface EnforcementAction {
-	id: string;
-	timestamp: string;
-	detection_id: string;
-	action_type: string;
-	state: string;
-	target_mac: string;
-	target_ip: string;
-	blocked_domain: string;
-	policy_rule: string;
-	auto_approved: boolean;
-	ttl_seconds: number;
-	expires_at: string | null;
-	reverted_at: string | null;
-	approved_by: string;
-	reason: string;
+  id: string
+  timestamp: string
+  detection_id: string
+  action_type: string
+  state: string
+  target_mac: string
+  target_ip: string
+  blocked_domain: string
+  policy_rule: string
+  auto_approved: boolean
+  ttl_seconds: number
+  expires_at: string | null
+  reverted_at: string | null
+  approved_by: string
+  reason: string
+  /** Set when a driver failed: the action is NOT enforcing what it says. */
+  failure_reason?: string
 }
