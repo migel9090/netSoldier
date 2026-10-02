@@ -143,3 +143,125 @@ func TestIndicatorMergeSourceDedup(t *testing.T) {
 		t.Fatalf("should not duplicate source, got %q", a.Source)
 	}
 }
+
+// TestUpsertAllRejectsUnsafeIndicators is the ingest-side half of the
+// feed-poisoning guard. The detection-engine walks parent domains when
+// matching, so a bare TLD matches everything under it; dropping it here also
+// keeps it out of every downstream export (Suricata, Zeek, AdGuard, Vector).
+func TestUpsertAllRejectsUnsafeIndicators(t *testing.T) {
+	s := NewStore()
+	accepted, rejected := s.UpsertAll([]Indicator{
+		{Type: TypeDomain, Value: "c2.evil.example", Source: "feed", Confidence: 90},
+		{Type: TypeDomain, Value: "com", Source: "broken", Confidence: 100},
+		{Type: TypeDomain, Value: "co.uk", Source: "broken", Confidence: 100},
+		{Type: TypeIP, Value: "0.0.0.0/0", Source: "broken", Confidence: 100},
+		{Type: TypeIP, Value: "127.0.0.1", Source: "broken", Confidence: 100},
+		{Type: TypeDomain, Value: "", Source: "broken", Confidence: 100},
+		{Type: "mystery", Value: "x", Source: "broken", Confidence: 50},
+	})
+
+	if accepted != 1 {
+		t.Errorf("accepted = %d, want 1", accepted)
+	}
+	if rejected != 6 {
+		t.Errorf("rejected = %d, want 6", rejected)
+	}
+	if s.Len() != 1 {
+		t.Errorf("store should hold only the safe indicator, Len() = %d", s.Len())
+	}
+}
+
+func TestUpsertAllNormalizesValues(t *testing.T) {
+	s := NewStore()
+	s.UpsertAll([]Indicator{
+		{Type: TypeDomain, Value: "  EVIL.Example.  ", Source: "feed", Confidence: 90},
+		{Type: TypeIP, Value: "2001:DB8::1", Source: "feed", Confidence: 90},
+		{Type: TypeIP, Value: "192.0.2.5:8080", Source: "feed", Confidence: 90},
+	})
+
+	values := map[string]bool{}
+	for _, ind := range s.All() {
+		values[ind.Value] = true
+	}
+	for _, want := range []string{"evil.example", "2001:db8::1", "192.0.2.5"} {
+		if !values[want] {
+			t.Errorf("expected normalized value %q in store, got %v", want, values)
+		}
+	}
+}
+
+// TestPruneBefore covers the other half of the "indicators never expire"
+// problem: a domain a feed has withdrawn (false positive, or a lapsed
+// registration taken over by a legitimate owner) used to keep matching
+// forever because the store only ever grew.
+func TestPruneBefore(t *testing.T) {
+	s := NewStore()
+	now := time.Now().UTC()
+
+	s.UpsertAll([]Indicator{
+		{Type: TypeDomain, Value: "fresh.example", Source: "feed", Confidence: 90, LastSeen: now},
+		{Type: TypeDomain, Value: "stale.example", Source: "feed", Confidence: 90,
+			LastSeen: now.Add(-60 * 24 * time.Hour)},
+		{Type: TypeDomain, Value: "undated.example", Source: "feed", Confidence: 90},
+	})
+
+	removed := s.PruneBefore(now.Add(-30 * 24 * time.Hour))
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+
+	remaining := map[string]bool{}
+	for _, ind := range s.All() {
+		remaining[ind.Value] = true
+	}
+	if !remaining["fresh.example"] {
+		t.Error("a recently seen indicator must survive pruning")
+	}
+	if remaining["stale.example"] {
+		t.Error("the stale indicator should have been pruned")
+	}
+	if !remaining["undated.example"] {
+		t.Error("an undated indicator should be kept rather than guessed at")
+	}
+}
+
+func TestValidateIndicatorTypes(t *testing.T) {
+	ok := []Indicator{
+		{Type: TypeDomain, Value: "evil.example"},
+		{Type: TypeIP, Value: "192.0.2.1"},
+		{Type: TypeIP, Value: "192.0.2.0/24"},
+		{Type: TypeURL, Value: "http://evil.example/payload"},
+		{Type: TypeMD5, Value: "D41D8CD98F00B204E9800998ECF8427E"},
+		{Type: TypeSHA256, Value: "abc123"},
+		{Type: TypeTLSFP, Value: "t13d1516h2_8daaf6152771_b186095e22b6"},
+	}
+	for _, i := range ok {
+		if _, err := Validate(i); err != nil {
+			t.Errorf("Validate(%s=%q) should pass: %v", i.Type, i.Value, err)
+		}
+	}
+
+	bad := []Indicator{
+		{Type: TypeDomain, Value: "com"},
+		{Type: TypeIP, Value: "not-an-ip"},
+		{Type: TypeIP, Value: "0.0.0.0"},
+		{Type: "nope", Value: "x"},
+		{Type: TypeDomain, Value: "evil.example", Confidence: 101},
+		{Type: TypeDomain, Value: "evil.example", Confidence: -1},
+	}
+	for _, i := range bad {
+		if _, err := Validate(i); err == nil {
+			t.Errorf("Validate(%s=%q, conf=%d) should fail", i.Type, i.Value, i.Confidence)
+		}
+	}
+}
+
+func TestValidateLowercasesFingerprints(t *testing.T) {
+	v, err := Validate(Indicator{Type: TypeMD5, Value: "D41D8CD98F00B204E9800998ECF8427E"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Value != "d41d8cd98f00b204e9800998ecf8427e" {
+		t.Errorf("fingerprint should be lowercased, got %q", v.Value)
+	}
+}

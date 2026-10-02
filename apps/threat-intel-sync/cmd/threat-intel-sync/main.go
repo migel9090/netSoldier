@@ -17,11 +17,60 @@ import (
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/ioc"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/misp"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/spamhaus"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type source struct {
 	name  string
 	fetch func(context.Context) ([]ioc.Indicator, error)
+}
+
+var (
+	// This service had no /metrics endpoint at all, which meant feed health
+	// was unobservable: a sync that had been failing for weeks looked
+	// exactly like a quiet network. Stale threat intel is a silent
+	// detection gap, so it needs to be a number someone can alert on.
+	syncLastSuccess = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "threat_intel",
+		Name:      "source_last_success_timestamp_seconds",
+		Help:      "Unix timestamp of the last successful fetch per source.",
+	}, []string{"source"})
+	syncFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "threat_intel",
+		Name:      "source_failures_total",
+		Help:      "Feed fetch failures per source.",
+	}, []string{"source"})
+	indicatorsFetched = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "threat_intel",
+		Name:      "source_indicators",
+		Help:      "Indicators accepted from the most recent successful fetch per source.",
+	}, []string{"source"})
+	indicatorsRejected = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "threat_intel",
+		Name:      "source_indicators_rejected_total",
+		Help:      "Indicators dropped as unsafe or malformed per source.",
+	}, []string{"source"})
+	storeSize = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "threat_intel",
+		Name:      "store_indicators",
+		Help:      "Total unique indicators currently in the store.",
+	})
+	indicatorsPruned = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "threat_intel",
+		Name:      "indicators_pruned_total",
+		Help:      "Indicators removed because no feed has re-asserted them.",
+	})
+	cycleLastComplete = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "threat_intel",
+		Name:      "sync_cycle_last_complete_timestamp_seconds",
+		Help:      "Unix timestamp of the last completed sync cycle.",
+	})
+)
+
+func init() {
+	prometheus.MustRegister(syncLastSuccess, syncFailures, indicatorsFetched,
+		indicatorsRejected, storeSize, indicatorsPruned, cycleLastComplete)
 }
 
 func main() {
@@ -34,7 +83,11 @@ func main() {
 	sources := configureSources()
 
 	syncInterval := parseDuration(envOr("SYNC_INTERVAL", "6h"), 6*time.Hour)
-	go runSyncLoop(ctx, store, sources, syncInterval)
+	// Indicators a feed has stopped asserting age out. Default 30 days,
+	// comfortably more than several sync intervals, so a transient feed
+	// outage never drops live intel.
+	indicatorTTL := parseDuration(envOr("INDICATOR_TTL", "720h"), 30*24*time.Hour)
+	go runSyncLoop(ctx, store, sources, syncInterval, indicatorTTL)
 
 	addr := envOr("LISTEN_ADDR", ":8083")
 	mux := http.NewServeMux()
@@ -49,6 +102,7 @@ func main() {
 	mux.HandleFunc("GET /export/zeek/intel.dat", export.HandleZeekIntel(store))
 	mux.HandleFunc("GET /export/json", export.HandleJSON(store))
 	mux.HandleFunc("GET /export/csv", export.HandleCSV(store, ioc.TypeDomain, ioc.TypeIP))
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	srv := &http.Server{
 		Addr:         addr,
@@ -161,9 +215,11 @@ func configureSources() []source {
 	return sources
 }
 
-func runSyncLoop(ctx context.Context, store *ioc.Store, sources []source, interval time.Duration) {
-	slog.Info("sync loop started", "interval", interval, "sources", len(sources))
-	syncOnce(ctx, store, sources)
+func runSyncLoop(ctx context.Context, store *ioc.Store, sources []source,
+	interval, indicatorTTL time.Duration) {
+	slog.Info("sync loop started", "interval", interval, "sources", len(sources),
+		"indicator_ttl", indicatorTTL)
+	syncOnce(ctx, store, sources, indicatorTTL)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -172,23 +228,49 @@ func runSyncLoop(ctx context.Context, store *ioc.Store, sources []source, interv
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			syncOnce(ctx, store, sources)
+			syncOnce(ctx, store, sources, indicatorTTL)
 		}
 	}
 }
 
-func syncOnce(ctx context.Context, store *ioc.Store, sources []source) {
+func syncOnce(ctx context.Context, store *ioc.Store, sources []source, indicatorTTL time.Duration) {
 	slog.Info("sync cycle starting")
+	anySucceeded := false
+
 	for _, src := range sources {
 		indicators, err := src.fetch(ctx)
 		if err != nil {
+			syncFailures.WithLabelValues(src.name).Inc()
 			slog.Error("source failed", "source", src.name, "error", err)
 			continue
 		}
-		store.UpsertAll(indicators)
-		slog.Info("source synced", "source", src.name, "fetched", len(indicators), "store_total", store.Len())
+
+		accepted, rejected := store.UpsertAll(indicators)
+		anySucceeded = true
+		syncLastSuccess.WithLabelValues(src.name).SetToCurrentTime()
+		indicatorsFetched.WithLabelValues(src.name).Set(float64(accepted))
+		if rejected > 0 {
+			indicatorsRejected.WithLabelValues(src.name).Add(float64(rejected))
+			slog.Warn("source returned unusable indicators",
+				"source", src.name, "rejected", rejected, "accepted", accepted)
+		}
+		slog.Info("source synced", "source", src.name, "fetched", len(indicators),
+			"accepted", accepted, "rejected", rejected, "store_total", store.Len())
 	}
-	slog.Info("sync cycle complete", "store_total", store.Len())
+
+	// Only expire indicators after at least one feed answered. Pruning on a
+	// cycle where everything failed would quietly empty the store during an
+	// outage — exactly when detection coverage matters most.
+	if anySucceeded && indicatorTTL > 0 {
+		if n := store.PruneBefore(time.Now().UTC().Add(-indicatorTTL)); n > 0 {
+			indicatorsPruned.Add(float64(n))
+			slog.Info("pruned stale indicators", "removed", n, "ttl", indicatorTTL)
+		}
+	}
+
+	storeSize.Set(float64(store.Len()))
+	cycleLastComplete.SetToCurrentTime()
+	slog.Info("sync cycle complete", "store_total", store.Len(), "any_source_succeeded", anySucceeded)
 }
 
 func mispToIndicators(attrs []misp.Attribute) []ioc.Indicator {
