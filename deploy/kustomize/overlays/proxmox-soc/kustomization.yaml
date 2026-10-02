@@ -3,6 +3,10 @@ kind: Kustomization
 
 resources:
   - ../../base
+  # fluent-bit lives in base/ but was referenced by neither
+  # base/kustomization.yaml nor this overlay, so the server profile shipped
+  # without log forwarding while the audit recorded it as configured.
+  - ../../base/fluent-bit
   - ../../base/clickhouse
   - ../../base/minio
   - ../../base/misp

@@ -17,10 +17,17 @@ spec:
       ports:
         - port: 8080
           protocol: TCP
+    # Metrics scrape only. This used to admit the entire observability
+    # namespace, which also reached POST /feedback — the suppression
+    # endpoint. Narrowed to the Prometheus pod; the endpoint is authenticated
+    # now, but the blast radius should not depend on that alone.
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
       ports:
         - port: 8080
           protocol: TCP
@@ -66,6 +73,18 @@ spec:
               app.kubernetes.io/name: threat-intel-sync
       ports:
         - port: 8083
+          protocol: TCP
+    # Enforcement webhook → killswitch /evaluate. This rule was missing, and
+    # with the namespace-wide default-deny on Egress that silently dropped
+    # every detection on its way to the killswitch: the controller's ingress
+    # allowed detection-engine, but NetworkPolicy needs both halves. The
+    # detection → response path was severed in the shipped manifests.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: killswitch-controller
+      ports:
+        - port: 8084
           protocol: TCP
     - to:
         - namespaceSelector:

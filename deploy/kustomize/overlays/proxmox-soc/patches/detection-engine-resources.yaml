@@ -36,14 +36,52 @@ spec:
               value: "http://clickhouse.netsoldier.svc:8123"
             - name: CLICKHOUSE_DATABASE
               value: "netsoldier"
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: writer-username
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: writer-password
             - name: DEVICE_INVENTORY_URL
               value: "http://device-inventory:8081"
+            # Base URL only: iocmatch.SyncLoop appends /export/json. This
+            # previously carried the full path, so the request went to
+            # /export/json/export/json and 404'd — the live IoC feeds were
+            # disconnected while the engine quietly matched only the static
+            # domains.txt. Matches the form suricata/deployment.yaml uses.
             - name: THREAT_INTEL_URL
-              value: "http://threat-intel-sync:8083/export/json"
+              value: "http://threat-intel-sync.netsoldier.svc:8083"
             - name: IOC_SYNC_INTERVAL
               value: "5m"
             - name: WEBHOOK_URL
               value: "http://killswitch-controller:8084/evaluate"
+            # WEBHOOK_SECRET signs the body (HMAC-SHA256) so the killswitch
+            # can prove the event was not altered in transit. WEBHOOK_TOKEN
+            # is the bearer credential its authMiddleware requires on POSTs —
+            # without it every delivery would 401 and enforcement would stop
+            # silently the moment the API key was configured.
+            - name: WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: killswitch-credentials
+                  key: webhook-secret
+            - name: WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: killswitch-credentials
+                  key: api-key
+            # Authenticates POST /feedback. A false-positive verdict
+            # suppresses detections before they reach the killswitch, so this
+            # endpoint can disable enforcement for any indicator.
+            - name: DETECTION_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: detection-engine-credentials
+                  key: api-key
             # Step 116: window over which per-client signals corroborate
             # into a composite. C2 beacon + its volumetric burst can be
             # minutes apart, so keep it generous but bounded.

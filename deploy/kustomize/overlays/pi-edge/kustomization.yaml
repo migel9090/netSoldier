@@ -11,6 +11,12 @@ resources:
   - ../../base/detection-engine/
   - ../../base/device-inventory/
   - ../../base/fluent-bit/
+  # The Pi profile deployed NO NetworkPolicies, so the default-deny baseline
+  # and every per-service rule were absent on the profile most likely to sit
+  # directly on the household LAN. The policies for workloads this profile
+  # does not run are inert (they select pods that do not exist), so including
+  # the whole directory is safe and keeps the two profiles from drifting.
+  - ../../base/network-policies/
   - ../../../adguard/
 
 patches:
