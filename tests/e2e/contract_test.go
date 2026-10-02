@@ -13,12 +13,6 @@ import (
 	"github.com/migel9090/netSoldier/libs/events"
 )
 
-// Shared credentials for the authenticated e2e posture.
-const (
-	e2eAPIKey        = "e2e-api-key"
-	e2eWebhookSecret = "e2e-webhook-secret"
-)
-
 // TestDetectionToKillswitchContract is the test whose absence let the
 // detection → enforcement path break in the shipped configuration.
 //

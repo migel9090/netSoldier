@@ -19,6 +19,14 @@ import (
 	"github.com/migel9090/netSoldier/libs/events"
 )
 
+// Credentials for the authenticated e2e posture. They live here, in the
+// untagged helper file, because the helpers below reference them and both the
+// e2e and integration builds compile this file.
+const (
+	e2eAPIKey        = "e2e-api-key"
+	e2eWebhookSecret = "e2e-webhook-secret"
+)
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
