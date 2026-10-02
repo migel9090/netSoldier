@@ -1,0 +1,26 @@
+# Devices the killswitch must NEVER enforce against.
+#
+# This exists because the allowlist was documented in the runbook and the
+# user guide but wired into no manifest, so a cluster deployed as shipped ran
+# with NOTHING protected — including the router, whose loss takes the whole
+# network offline (see docs/threat-model.md). The controller now refuses to
+# auto-block at all while this list is empty; it queues every action for
+# human approval instead.
+#
+# Fill these in for YOUR network before relying on automatic enforcement.
+# MAC and IP spellings are normalized, so any of aa:bb:cc:dd:ee:ff,
+# AA-BB-CC-DD-EE-FF or aabbccddeeff match the same device. IPs accept CIDR,
+# which is the robust choice for an infrastructure range because DHCP leases
+# move.
+#
+# At minimum protect: the router/default gateway, the DNS server (AdGuard),
+# the sensor host itself, and anything whose loss is an emergency (alarm,
+# heating, medical).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: killswitch-allowlist
+data:
+  # Example values — replace with the real ones.
+  ALLOWLIST_MACS: ""
+  ALLOWLIST_IPS: "192.168.1.1"

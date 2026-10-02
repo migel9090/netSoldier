@@ -34,6 +34,46 @@ spec:
               value: "http://clickhouse.netsoldier.svc:8123"
             - name: CLICKHOUSE_DATABASE
               value: "netsoldier"
+            # The audit log is the accountability record for every
+            # enforcement decision; the account writing it is authenticated
+            # and holds INSERT on audit_log only.
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: writer-username
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: writer-password
+            # Authenticates every mutating endpoint. Without it the
+            # controller serves approve/revert to anything that can reach it.
+            - name: KILLSWITCH_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: killswitch-credentials
+                  key: api-key
+            # Verifies the HMAC on inbound detection events so a tampered
+            # payload cannot raise confidence or re-target an action.
+            - name: WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: killswitch-credentials
+                  key: webhook-secret
+            # Devices that must never be enforced against. While empty the
+            # controller disables auto-block and queues everything for a
+            # human — see allowlist-configmap.yaml.
+            - name: ALLOWLIST_MACS
+              valueFrom:
+                configMapKeyRef:
+                  name: killswitch-allowlist
+                  key: ALLOWLIST_MACS
+            - name: ALLOWLIST_IPS
+              valueFrom:
+                configMapKeyRef:
+                  name: killswitch-allowlist
+                  key: ALLOWLIST_IPS
             - name: ADGUARD_URL
               value: "http://adguard-web.dns.svc:3000"
             - name: ADGUARD_USER
