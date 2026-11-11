@@ -1,16 +1,18 @@
 # Exceptions for the SCA gate (.github/workflows/sca.yml).
 #
 # osv-scanner fails the build on *any* finding, so an advisory that cannot be
-# resolved by upgrading has to be recorded here with a reason. Keep this list
-# short and re-check each entry when the dependency is next bumped.
-
-[[IgnoredVulns]]
-id = "GO-2026-5932"
-reason = """
-Informational advisory: golang.org/x/crypto/openpgp is unmaintained. It has no
-fixed version by design — the upstream guidance is to stop using the package,
-not to upgrade. It applies only to the openpgp/* subpackages, and nothing in
-this repository imports them (verified: no match for `crypto/openpgp` in any
-Go source). x/crypto itself is pulled in as an indirect test dependency and is
-held at a version past every fixable advisory.
-"""
+# resolved by upgrading has to be recorded here with a reason. Never ignore an
+# advisory that has a fixed release: upgrade instead. Keep this list short.
+#
+# Every entry carries a reason and an `ignoreUntil` review date, after which
+# osv-scanner reports the advisory again and the entry has to be re-justified
+# or removed:
+#
+#   [[IgnoredVulns]]
+#   id = "GO-YYYY-NNNN"
+#   ignoreUntil = 2027-01-31
+#   reason = """Why there is no fix, and why it is not reachable here."""
+#
+# There are currently no exceptions. GO-2026-5932 (x/crypto/openpgp) was
+# ignored until x/crypto shipped a fixed release; tests/e2e now pins
+# golang.org/x/crypto v0.59.0, which is past it.

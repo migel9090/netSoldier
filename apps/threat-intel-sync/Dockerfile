@@ -5,7 +5,7 @@
 # killswitch-controller it does not copy that module in — doing so would
 # invalidate this image's dependency layer whenever the shared contract
 # changed, for no reason.
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS build
 
 ARG TARGETOS
 ARG TARGETARCH
