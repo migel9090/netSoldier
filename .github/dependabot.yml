@@ -1,50 +1,35 @@
 version: 2
 
+# Every manifest in the repository is covered. Auto-merge is deliberately
+# off: every update goes through review and the CI gates like any other PR.
+#
+# No `labels:` keys on purpose. Custom labels that do not exist in the
+# repository make Dependabot post an error on every PR; without the key it
+# applies its default `dependencies` + ecosystem labels and creates them if
+# they are missing.
+
 updates:
   # ── Go modules ────────────────────────────────────────────────
+  # One grouped PR across all modules so the go.work workspace stays
+  # consistent. Dependabot does not touch the `go` directive, go.work or
+  # go.work.sum: after merging, run `go work sync` if the workspace drifted.
   - package-ecosystem: gomod
-    directory: /apps/detection-engine
+    directories:
+      - /apps/detection-engine
+      - /apps/device-inventory
+      - /apps/killswitch-controller
+      - /apps/threat-intel-sync
+      - /libs/events
+      - /tests/e2e
     schedule:
       interval: weekly
     commit-message:
       prefix: "build(deps)"
-    labels:
-      - dependencies
     open-pull-requests-limit: 5
     groups:
       go-deps:
         patterns:
           - "*"
-
-  - package-ecosystem: gomod
-    directory: /apps/device-inventory
-    schedule:
-      interval: weekly
-    commit-message:
-      prefix: "build(deps)"
-    labels:
-      - dependencies
-    open-pull-requests-limit: 5
-
-  - package-ecosystem: gomod
-    directory: /apps/killswitch-controller
-    schedule:
-      interval: weekly
-    commit-message:
-      prefix: "build(deps)"
-    labels:
-      - dependencies
-    open-pull-requests-limit: 5
-
-  - package-ecosystem: gomod
-    directory: /apps/threat-intel-sync
-    schedule:
-      interval: weekly
-    commit-message:
-      prefix: "build(deps)"
-    labels:
-      - dependencies
-    open-pull-requests-limit: 5
 
   # ── Python ────────────────────────────────────────────────────
   - package-ecosystem: pip
@@ -53,8 +38,6 @@ updates:
       interval: weekly
     commit-message:
       prefix: "build(deps)"
-    labels:
-      - dependencies
     open-pull-requests-limit: 5
     groups:
       python-deps:
@@ -68,8 +51,6 @@ updates:
       interval: weekly
     commit-message:
       prefix: "build(deps)"
-    labels:
-      - dependencies
     open-pull-requests-limit: 5
     groups:
       npm-deps:
@@ -77,14 +58,36 @@ updates:
           - "*"
 
   # ── Docker base images ────────────────────────────────────────
+  # The golang: tag is one of the places that carry the single project Go
+  # version (go.work is the source of truth; every go.mod matches). A PR
+  # bumping it must also bump `go` in go.work and every go.mod.
   - package-ecosystem: docker
-    directory: /apps/detection-engine
+    directories:
+      - /apps/detection-engine
+      - /apps/device-inventory
+      - /apps/killswitch-controller
+      - /apps/threat-intel-sync
+      - /apps/ml-anomaly
+      - /apps/web-ui
+      - /deploy/docker/zeek
     schedule:
       interval: monthly
     commit-message:
       prefix: "build(deps)"
-    labels:
-      - dependencies
+    open-pull-requests-limit: 5
+    groups:
+      go-base-image:
+        patterns:
+          - "golang"
+
+  # ── Terraform providers ───────────────────────────────────────
+  - package-ecosystem: terraform
+    directory: /infra/terraform
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "build(deps)"
+    open-pull-requests-limit: 5
 
   # ── GitHub Actions ────────────────────────────────────────────
   - package-ecosystem: github-actions
@@ -93,9 +96,6 @@ updates:
       interval: weekly
     commit-message:
       prefix: "ci(deps)"
-    labels:
-      - dependencies
-      - ci
     groups:
       actions-deps:
         patterns:
