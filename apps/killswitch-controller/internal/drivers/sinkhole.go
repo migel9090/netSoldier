@@ -8,12 +8,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/migel9090/netSoldier/libs/events"
+	"golang.org/x/net/publicsuffix"
 )
 
 // domainPattern is what we are willing to turn into an AdGuard filter rule.
@@ -28,6 +30,14 @@ import (
 var domainPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
 
 // validateDomain normalizes and checks a domain destined for a filter rule.
+//
+// Being a syntactically valid hostname is not enough. "203.0.113.9" matches
+// the hostname grammar, and AdGuard would store ||203.0.113.9^ as a rule that
+// does not block the address. A public suffix is worse: ||co.uk^ or
+// ||github.io^ blocks every registrant under it, which for a household is
+// most of a country's web or every GitHub Pages site. Both are refused here,
+// at the point a value becomes a control-plane instruction, whatever
+// upstream said.
 func validateDomain(domain string) (string, error) {
 	d := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(domain), ".")))
 	if d == "" {
@@ -39,7 +49,26 @@ func validateDomain(domain string) (string, error) {
 	if !domainPattern.MatchString(d) {
 		return "", fmt.Errorf("refusing to build a filter rule from %q: not a plain hostname", domain)
 	}
+	// netip refuses leading zeros ("192.168.001.001"), so an all-numeric
+	// last label catches the spellings it does not parse: no real TLD is
+	// numeric.
+	if _, err := netip.ParseAddr(d); err == nil || isNumeric(d[strings.LastIndexByte(d, '.')+1:]) {
+		return "", fmt.Errorf("refusing to build a filter rule from %q: it is an IP address, not a domain", domain)
+	}
+	if suffix, _ := publicsuffix.PublicSuffix(d); suffix == d {
+		return "", fmt.Errorf("refusing to build a filter rule from %q: it is a public suffix, "+
+			"blocking it would block every domain registered under it", domain)
+	}
 	return d, nil
+}
+
+func isNumeric(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return s != ""
 }
 
 // SinkholeDriver blocks malicious domains via AdGuard Home's custom

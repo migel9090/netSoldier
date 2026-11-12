@@ -207,7 +207,10 @@ func TestSinkholeReportsUpstreamFailure(t *testing.T) {
 }
 
 func TestValidateDomain(t *testing.T) {
-	ok := []string{"example.com", "a.b.c.example.com", "xn--80ak6aa92e.com", "1-2.example"}
+	ok := []string{
+		"example.com", "a.b.c.example.com", "xn--80ak6aa92e.com", "1-2.example",
+		"123.example", "evil.example.co.uk", "someone.github.io", "c2.evil.test",
+	}
 	for _, d := range ok {
 		if _, err := validateDomain(d); err != nil {
 			t.Errorf("validateDomain(%q) should pass: %v", d, err)
@@ -218,5 +221,54 @@ func TestValidateDomain(t *testing.T) {
 		if _, err := validateDomain(d); err == nil {
 			t.Errorf("validateDomain(%q) should fail", d)
 		}
+	}
+}
+
+// TestValidateDomainRefusesAddresses: "203.0.113.9" is a valid hostname by
+// grammar alone, so an IP from Zeek Intel was accepted as ||203.0.113.9^.
+func TestValidateDomainRefusesAddresses(t *testing.T) {
+	for _, d := range []string{
+		"203.0.113.9", "1.2.3.4", "192.168.001.001", "10.0.0.1.", "1.2.3.4.5", "255.255.255.255",
+	} {
+		if got, err := validateDomain(d); err == nil {
+			t.Errorf("validateDomain(%q) = %q, an address must never become a filter rule", d, got)
+		} else if !strings.Contains(err.Error(), "IP address") {
+			t.Errorf("validateDomain(%q): error should say why, got %v", d, err)
+		}
+	}
+}
+
+// TestValidateDomainRefusesPublicSuffixes: ||co.uk^ blocks every UK
+// registrant; ||github.io^ every GitHub Pages site.
+func TestValidateDomainRefusesPublicSuffixes(t *testing.T) {
+	for _, d := range []string{"co.uk", "CO.UK.", "com.au", "github.io", "s3.amazonaws.com", "blogspot.com"} {
+		if got, err := validateDomain(d); err == nil {
+			t.Errorf("validateDomain(%q) = %q, a public suffix must never become a filter rule", d, got)
+		} else if !strings.Contains(err.Error(), "public suffix") {
+			t.Errorf("validateDomain(%q): error should say why, got %v", d, err)
+		}
+	}
+}
+
+// TestSinkholeRefusesWhatThe1xEngineSent runs the values the 1.x
+// detection-engine actually put in `domain` through the driver. None of them
+// names a domain, and none may reach AdGuard.
+func TestSinkholeRefusesWhatThe1xEngineSent(t *testing.T) {
+	ag := newFakeAdGuard(t)
+	d := NewSinkholeDriver(ag.srv.URL, "admin", "pw")
+	for _, domain := range []string{
+		"cdn.legit.example (→203.0.113.7)",         // DNS-answer IP-IoC hit
+		"ET MALWARE Cobalt Strike Beacon Observed", // Suricata alert
+		"192.168.1.50",                         // volumetric anomaly: the device's own address
+		"198.51.100.20",                        // address-only beacon / DNS-less TLS / Zeek ADDR hit
+		"t13d3012h2_1d37bd780c83_882d495ac381", // Zeek TLSFP intel hit
+	} {
+		action := &events.EnforcementAction{ID: "ACT-x", BlockedDomain: domain}
+		if err := d.Apply(context.Background(), action); err == nil {
+			t.Errorf("%q must be refused", domain)
+		}
+	}
+	if rules := ag.current(); len(rules) != 0 {
+		t.Fatalf("no rule should have been written: %v", rules)
 	}
 }

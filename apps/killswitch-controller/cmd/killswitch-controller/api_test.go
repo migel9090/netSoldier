@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/actions"
 	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/drivers"
@@ -38,7 +39,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.HandleFunc("GET /policy", handleGetPolicy(pol, true))
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true, newEvaluationLedger(time.Hour)))
 	mux.HandleFunc("GET /allowlist", handleGetAllowlist(pol))
 	mux.HandleFunc("GET /actions/pending", handleListByState(store, events.StatePending))
 	mux.HandleFunc("GET /actions/active", handleListByState(store, events.StateActive))
@@ -132,18 +133,9 @@ func TestGetAllowlist(t *testing.T) {
 func TestEvaluateAutoBlock(t *testing.T) {
 	env := newTestEnv(t)
 
-	resp := env.post(t, "/evaluate", events.DetectionEvent{
-		ID:          "DET-1",
-		Severity:    events.SeverityCritical,
-		Confidence:  95,
-		ClientIP:    "192.168.1.100",
-		ClientMAC:   "aa:bb:cc:dd:ee:ff",
-		Domain:      "evil.com",
-		MatchedIoC:  "evil.com",
-		IoCType:     "domain",
-		Source:      "test",
-		SignalClass: events.SignalIoC,
-	})
+	ev := withDomainTarget(testEvent(95, events.SeverityCritical), "evil.com")
+	ev.ClientMAC = "aa:bb:cc:dd:ee:ff"
+	resp := env.post(t, "/evaluate", ev)
 	if resp.StatusCode != 200 {
 		t.Fatalf("evaluate: %d", resp.StatusCode)
 	}
@@ -161,19 +153,15 @@ func TestEvaluateAutoBlock(t *testing.T) {
 	if action["auto_approved"] != true {
 		t.Errorf("action.auto_approved: got %v, want true", action["auto_approved"])
 	}
+	if action["blocked_domain"] != "evil.com" || action["detection_summary"] != ev.Summary {
+		t.Errorf("action should carry the target domain and the summary: %v", action)
+	}
 }
 
 func TestEvaluatePending(t *testing.T) {
 	env := newTestEnv(t)
 
-	resp := env.post(t, "/evaluate", events.DetectionEvent{
-		ID:         "DET-2",
-		Severity:   events.SeverityMedium,
-		Confidence: 60,
-		ClientIP:   "192.168.1.100",
-		Domain:     "suspicious.com",
-		IoCType:    "domain",
-	})
+	resp := env.post(t, "/evaluate", withDomainTarget(testEvent(60, events.SeverityMedium), "suspicious.com"))
 
 	result := decodeJSON[map[string]any](t, resp)
 	decision := result["decision"].(map[string]any)
@@ -190,12 +178,7 @@ func TestEvaluatePending(t *testing.T) {
 func TestEvaluateIgnoreBelowThreshold(t *testing.T) {
 	env := newTestEnv(t)
 
-	resp := env.post(t, "/evaluate", events.DetectionEvent{
-		ID:         "DET-3",
-		Severity:   events.SeverityLow,
-		Confidence: 30,
-		ClientIP:   "192.168.1.100",
-	})
+	resp := env.post(t, "/evaluate", testEvent(30, events.SeverityLow))
 
 	result := decodeJSON[map[string]any](t, resp)
 	decision := result["decision"].(map[string]any)
@@ -212,13 +195,9 @@ func TestEvaluateIgnoreAllowlisted(t *testing.T) {
 	env := newTestEnv(t)
 	env.policy.Allowlist.AddMAC("aa:bb:cc:dd:ee:ff")
 
-	resp := env.post(t, "/evaluate", events.DetectionEvent{
-		ID:         "DET-4",
-		Severity:   events.SeverityCritical,
-		Confidence: 99,
-		ClientMAC:  "aa:bb:cc:dd:ee:ff",
-		ClientIP:   "192.168.1.100",
-	})
+	ev := testEvent(99, events.SeverityCritical)
+	ev.ClientMAC = "aa:bb:cc:dd:ee:ff"
+	resp := env.post(t, "/evaluate", ev)
 
 	result := decodeJSON[map[string]any](t, resp)
 	decision := result["decision"].(map[string]any)
@@ -232,15 +211,9 @@ func TestActionLifecycle(t *testing.T) {
 	env := newTestEnv(t)
 
 	// Create a pending action via evaluate
-	env.post(t, "/evaluate", events.DetectionEvent{
-		ID:         "DET-LC",
-		Severity:   events.SeverityMedium,
-		Confidence: 60,
-		ClientIP:   "192.168.1.50",
-		ClientMAC:  "11:22:33:44:55:66",
-		Domain:     "maybe-bad.com",
-		IoCType:    "domain",
-	})
+	ev := withDomainTarget(testEvent(60, events.SeverityMedium), "maybe-bad.com")
+	ev.ClientIP, ev.ClientMAC = "192.168.1.50", "11:22:33:44:55:66"
+	env.post(t, "/evaluate", ev)
 
 	// List pending — should have 1
 	resp := env.get(t, "/actions/pending")
@@ -302,14 +275,7 @@ func TestActionLifecycle(t *testing.T) {
 func TestActionReject(t *testing.T) {
 	env := newTestEnv(t)
 
-	env.post(t, "/evaluate", events.DetectionEvent{
-		ID:         "DET-REJ",
-		Severity:   events.SeverityMedium,
-		Confidence: 60,
-		ClientIP:   "192.168.1.50",
-		Domain:     "maybe-bad.com",
-		IoCType:    "domain",
-	})
+	env.post(t, "/evaluate", withDomainTarget(testEvent(60, events.SeverityMedium), "maybe-bad.com"))
 
 	resp := env.get(t, "/actions/pending")
 	pending := decodeJSON[[]map[string]any](t, resp)
@@ -350,9 +316,9 @@ func TestAuthMiddleware(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true, newEvaluationLedger(time.Hour)))
 
-	handler := authMiddleware("test-secret", "", mux)
+	handler := authMiddleware("test-secret", nil, mux)
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -364,7 +330,7 @@ func TestAuthMiddleware(t *testing.T) {
 	resp.Body.Close()
 
 	// POST without auth → 401
-	body, _ := json.Marshal(events.DetectionEvent{})
+	body, _ := json.Marshal(testEvent(30, events.SeverityLow))
 	resp, _ = http.Post(srv.URL+"/evaluate", "application/json", bytes.NewReader(body))
 	if resp.StatusCode != 401 {
 		t.Errorf("POST without auth: expected 401, got %d", resp.StatusCode)

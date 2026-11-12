@@ -49,12 +49,12 @@ func newAuthTestEnv(t *testing.T, apiKey string) (*httptest.Server, *actions.Sto
 	mux.HandleFunc("GET /actions/pending", handleListByState(store, events.StatePending))
 	mux.HandleFunc("GET /actions/active", handleListByState(store, events.StateActive))
 	mux.HandleFunc("GET /actions/{id}", handleGetAction(store))
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true, newEvaluationLedger(time.Hour)))
 	mux.HandleFunc("POST /actions/{id}/approve", handleApprove(store, resolve))
 	mux.HandleFunc("POST /actions/{id}/reject", handleReject(store))
 	mux.HandleFunc("POST /actions/{id}/revert", handleRevert(store, resolve))
 
-	srv := httptest.NewServer(authMiddleware(apiKey, "", mux))
+	srv := httptest.NewServer(authMiddleware(apiKey, nil, mux))
 	t.Cleanup(srv.Close)
 	return srv, store
 }
@@ -126,18 +126,13 @@ func TestSecAllowlistNoDriverApplied(t *testing.T) {
 	resolve := func(string) (drivers.Driver, error) { return drv, nil }
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true, newEvaluationLedger(time.Hour)))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	body, _ := json.Marshal(events.DetectionEvent{
-		ID:         "DET-SEC-1",
-		Severity:   events.SeverityCritical,
-		Confidence: 100,
-		ClientMAC:  "aa:bb:cc:dd:ee:ff",
-		ClientIP:   "192.168.1.42",
-		Domain:     "evil.com",
-	})
+	ev := withDomainTarget(testEvent(100, events.SeverityCritical), "evil.com")
+	ev.ClientMAC, ev.ClientIP = "aa:bb:cc:dd:ee:ff", "192.168.1.42"
+	body, _ := json.Marshal(ev)
 	resp, err := http.Post(srv.URL+"/evaluate", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -170,7 +165,7 @@ func TestSecAllowlistConcurrentEvaluations(t *testing.T) {
 	resolve := func(string) (drivers.Driver, error) { return drv, nil }
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true, newEvaluationLedger(time.Hour)))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -180,12 +175,9 @@ func TestSecAllowlistConcurrentEvaluations(t *testing.T) {
 	for range goroutines {
 		go func() {
 			defer wg.Done()
-			body, _ := json.Marshal(events.DetectionEvent{
-				Severity:   events.SeverityCritical,
-				Confidence: 100,
-				ClientMAC:  "aa:bb:cc:dd:ee:ff",
-				ClientIP:   "192.168.1.42",
-			})
+			ev := testEvent(100, events.SeverityCritical)
+			ev.ClientMAC, ev.ClientIP = "aa:bb:cc:dd:ee:ff", "192.168.1.42"
+			body, _ := json.Marshal(ev)
 			resp, err := http.Post(srv.URL+"/evaluate", "application/json", bytes.NewReader(body))
 			if err != nil {
 				t.Errorf("POST /evaluate: %v", err)
@@ -216,7 +208,7 @@ func TestSecAuthRequiredAllPOSTEndpoints(t *testing.T) {
 		path string
 		body any
 	}{
-		{"/evaluate", events.DetectionEvent{Severity: events.SeverityCritical, Confidence: 99, ClientIP: "10.0.0.1"}},
+		{"/evaluate", testEvent(99, events.SeverityCritical)},
 		{"/actions/" + a.ID + "/approve", map[string]string{"approved_by": "admin"}},
 		{"/actions/" + a.ID + "/reject", map[string]string{"reason": "test"}},
 		{"/actions/" + a.ID + "/revert", map[string]string{"reason": "test"}},
@@ -252,7 +244,7 @@ func TestSecAuthRejectsInvalidSchemes(t *testing.T) {
 		{"lowercase_bearer", "bearer secret-key"},
 	}
 
-	body, _ := json.Marshal(events.DetectionEvent{})
+	body, _ := json.Marshal(testEvent(99, events.SeverityCritical))
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			req, _ := http.NewRequest("POST", srv.URL+"/evaluate", bytes.NewReader(body))

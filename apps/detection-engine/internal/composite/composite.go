@@ -28,6 +28,7 @@
 package composite
 
 import (
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -35,6 +36,7 @@ import (
 	"time"
 
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
+	"github.com/migel9090/netSoldier/libs/events"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -153,8 +155,8 @@ func (c *Correlator) Observe(a detection.Alert) *detection.Alert {
 	compositesEmitted.WithLabelValues(countLabel(len(classes))).Inc()
 	compositeConfidence.Observe(float64(comp.Confidence))
 	slog.Warn("composite detection",
-		"client", client, "confidence", comp.Confidence,
-		"signals", comp.Signals, "severity", comp.Severity,
+		"id", comp.ID, "client", client, "confidence", comp.Confidence,
+		"signals", classes, "severity", comp.Severity, "target", comp.Target,
 	)
 	if c.Emit != nil {
 		c.Emit(comp)
@@ -197,8 +199,20 @@ func (c *Correlator) build(trigger detection.Alert, sigs []signal, classes []str
 		clientMAC = anchor.ClientMAC
 	}
 
+	// One signal per class, each with its OWN confidence and indicator, so
+	// the receiver can see that a 93 was built from, say, a feed hit at 20
+	// and two heuristics — the combined number alone hides that.
+	signals := make([]events.Signal, 0, len(classes))
+	for _, cl := range classes {
+		signals = append(signals, signalOf(best[cl]))
+	}
+
 	return detection.Alert{
+		// A composite is a detection in its own right: the action it drives
+		// must be traceable to it, not to whichever signal triggered it.
+		ID:          detection.NewID(),
 		Timestamp:   now,
+		Summary:     summarize(classes, best, anchor, clientIP),
 		Domain:      anchor.Domain,
 		ClientIP:    clientIP,
 		ClientMAC:   clientMAC,
@@ -213,9 +227,65 @@ func (c *Correlator) build(trigger detection.Alert, sigs []signal, classes []str
 		Threat:      anchor.Threat,
 		Tags:        tags,
 		SignalClass: detection.SignalComposite,
-		Signals:     classes,
-		SignalCount: len(classes),
+		Signals:     signals,
+		Target:      compositeTarget(classes, best),
 	}
+}
+
+// signalOf is the contract signal one contributing alert stands for.
+func signalOf(s signal) events.Signal {
+	if len(s.alert.Signals) > 0 {
+		out := s.alert.Signals[0]
+		out.Class = s.class
+		return out
+	}
+	return events.Signal{
+		Class:      s.class,
+		Confidence: detection.ClampConfidence(s.confidence),
+		Source:     s.alert.Source,
+	}
+}
+
+// compositeTarget picks what a composite may enforce on: the target of the
+// strongest known-bad signal that has one, otherwise that of the strongest
+// heuristic. The confidence-ranked anchor is deliberately NOT used — it is
+// usually a heuristic, and taking its destination is how a weak feed hit on
+// one name came to block whatever a beacon pointed at. Whether the chosen
+// target is actually vouched for strongly enough is the policy's question
+// (events.DetectionEvent.AttestedSignal); this only says what it would be.
+//
+// A known-bad signal whose indicator is not enforceable (an IDS rule id)
+// has no target and so does not take part; the heuristics' destination is
+// then the only candidate.
+func compositeTarget(classes []string, best map[string]signal) *events.Target {
+	var target *events.Target
+	for _, knownBad := range []bool{true, false} {
+		conf := -1
+		for _, cl := range classes {
+			s := best[cl]
+			if events.IsKnownBadSignal(cl) != knownBad || s.alert.Target == nil || s.confidence <= conf {
+				continue
+			}
+			t := *s.alert.Target
+			target, conf = &t, s.confidence
+		}
+		if target != nil {
+			return target
+		}
+	}
+	return nil
+}
+
+func summarize(classes []string, best map[string]signal, anchor detection.Alert, client string) string {
+	parts := make([]string, 0, len(classes))
+	for _, cl := range classes {
+		parts = append(parts, fmt.Sprintf("%s %d", cl, best[cl].confidence))
+	}
+	s := fmt.Sprintf("%d corroborating signals for %s (%s)", len(classes), client, strings.Join(parts, ", "))
+	if anchor.Summary != "" {
+		s += "; strongest: " + anchor.Summary
+	}
+	return s
 }
 
 // combine folds independent per-class confidences with a noisy-OR:

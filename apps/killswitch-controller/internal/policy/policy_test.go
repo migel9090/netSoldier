@@ -14,16 +14,45 @@ func newTestPolicy() *Policy {
 	return p
 }
 
-func TestAutoBlock(t *testing.T) {
-	p := newTestPolicy()
-	d := p.Evaluate(events.DetectionEvent{
-		Confidence:  95,
-		Severity:    events.SeverityCritical,
+var evilDomain = &events.Target{Type: events.TargetDomain, Value: "evil.example"}
+
+// feedMatch is a single-signal domain IoC detection, the shape the engine
+// emits for a feed hit on a DNS query.
+func feedMatch(conf int, sev string) events.DetectionEvent {
+	return events.DetectionEvent{
+		Confidence:  conf,
+		Severity:    sev,
 		ClientIP:    "192.168.1.100",
 		SignalClass: events.SignalIoC,
-	})
+		Signals: []events.Signal{{Class: events.SignalIoC, Confidence: conf,
+			Indicator: "evil.example", IndicatorType: events.IndicatorDomain, Source: "threatfox"}},
+		Target: evilDomain,
+	}
+}
+
+// composite builds a multi-class detection from the given classes.
+func composite(conf int, target *events.Target, classes ...string) events.DetectionEvent {
+	ev := events.DetectionEvent{
+		Confidence:  conf,
+		Severity:    events.SeverityCritical,
+		ClientIP:    "192.168.1.100",
+		SignalClass: events.SignalComposite,
+		Target:      target,
+	}
+	for _, c := range classes {
+		ev.Signals = append(ev.Signals, events.Signal{Class: c, Confidence: 70})
+	}
+	return ev
+}
+
+func TestAutoBlock(t *testing.T) {
+	p := newTestPolicy()
+	d := p.Evaluate(feedMatch(95, events.SeverityCritical))
 	if d.Action != "auto_block" {
-		t.Fatalf("expected auto_block, got %q", d.Action)
+		t.Fatalf("expected auto_block, got %q (%s)", d.Action, d.Reason)
+	}
+	if !strings.Contains(d.Reason, "target=evil.example") {
+		t.Errorf("auto-block reason should name what is blocked, got %q", d.Reason)
 	}
 	if d.ActionType != events.ActionDNSSinkhole {
 		t.Fatalf("expected dns_sinkhole, got %q", d.ActionType)
@@ -129,29 +158,15 @@ func TestAutoMinSignalsRequiresCorroboration(t *testing.T) {
 	p.AutoMinSignals = 2
 
 	// a composite carrying only one signal class → downgraded to pending
-	single := p.Evaluate(events.DetectionEvent{
-		Confidence:  95,
-		Severity:    events.SeverityCritical,
-		ClientIP:    "192.168.1.100",
-		SignalClass: events.SignalComposite,
-		Signals:     []string{events.SignalIoC},
-		SignalCount: 1,
-	})
+	single := p.Evaluate(composite(95, evilDomain, events.SignalIoC))
 	if single.Action != "pending" {
 		t.Fatalf("single-signal composite should be pending under AutoMinSignals=2, got %q", single.Action)
 	}
 
 	// two corroborating classes, one of them a feed match → auto-block
-	corrob := p.Evaluate(events.DetectionEvent{
-		Confidence:  93,
-		Severity:    events.SeverityCritical,
-		ClientIP:    "192.168.1.100",
-		SignalClass: events.SignalComposite,
-		Signals:     []string{events.SignalIoC, events.SignalBeacon},
-		SignalCount: 2,
-	})
+	corrob := p.Evaluate(composite(93, evilDomain, events.SignalIoC, events.SignalBeacon))
 	if corrob.Action != "auto_block" {
-		t.Fatalf("two-signal composite should auto-block, got %q", corrob.Action)
+		t.Fatalf("two-signal composite should auto-block, got %q (%s)", corrob.Action, corrob.Reason)
 	}
 }
 
@@ -159,17 +174,71 @@ func TestKnownBadIoCAutoBlocksEvenWithSignalGate(t *testing.T) {
 	p := newTestPolicy()
 	p.AutoMinSignals = 2
 
-	// a single known-bad IoC feed match carries no composite metadata
-	// (SignalCount 0) — it must still auto-block instantly.
+	// a single known-bad IoC feed match is not a composite — it must still
+	// auto-block instantly.
+	d := p.Evaluate(feedMatch(95, events.SeverityCritical))
+	if d.Action != "auto_block" {
+		t.Fatalf("known-bad IoC should auto-block regardless of signal gate, got %q", d.Action)
+	}
+}
+
+// TestIPTargetNeverAutoBlocks: an IP-IoC hit used to be auto-blocked with
+// blocked_domain "cdn.x (→203.0.113.7)", which then failed in the sinkhole.
+// The policy must queue it for a human and say why.
+func TestIPTargetNeverAutoBlocks(t *testing.T) {
+	p := newTestPolicy()
+	ev := feedMatch(95, events.SeverityCritical)
+	ev.Signals[0].Indicator, ev.Signals[0].IndicatorType = "203.0.113.7", events.IndicatorIP
+	ev.Target = &events.Target{Type: events.TargetIP, Value: "203.0.113.7"}
+
+	d := p.Evaluate(ev)
+	if d.Action != "pending" {
+		t.Fatalf("an ip target must not auto-block, got %q", d.Action)
+	}
+	if !strings.Contains(d.Reason, "target is ip 203.0.113.7") ||
+		!strings.Contains(d.Reason, "only a domain can be blocked automatically") {
+		t.Errorf("reason should say plainly why, got %q", d.Reason)
+	}
+}
+
+// TestNoTargetNeverAutoBlocks: an IDS rule hit names no destination; its
+// rule text used to become the sinkhole domain.
+func TestNoTargetNeverAutoBlocks(t *testing.T) {
+	p := newTestPolicy()
 	d := p.Evaluate(events.DetectionEvent{
 		Confidence:  95,
 		Severity:    events.SeverityCritical,
 		ClientIP:    "192.168.1.100",
-		Source:      "threatfox",
-		SignalClass: events.SignalIoC,
+		Domain:      "looks-like-a.domain.example", // never a source of targets
+		Summary:     "evil.example",                // nor is this
+		SignalClass: events.SignalIDS,
+		Signals: []events.Signal{{Class: events.SignalIDS, Confidence: 95,
+			Indicator: "2031999", IndicatorType: events.IndicatorSID}},
 	})
-	if d.Action != "auto_block" {
-		t.Fatalf("known-bad IoC should auto-block regardless of signal gate, got %q", d.Action)
+	if d.Action != "pending" {
+		t.Fatalf("an event without a target must not auto-block, got %q", d.Action)
+	}
+	if !strings.Contains(d.Reason, "no enforceable target") {
+		t.Errorf("reason should say there is nothing to block, got %q", d.Reason)
+	}
+}
+
+// TestPendingExplainsMissingTarget: an action an operator approves with the
+// sinkhole will fail if there is no domain; the queue should say so up front.
+func TestPendingExplainsMissingTarget(t *testing.T) {
+	p := newTestPolicy()
+	d := p.Evaluate(events.DetectionEvent{
+		Confidence: 60,
+		Severity:   events.SeverityMedium,
+		ClientIP:   "192.168.1.100",
+	})
+	if d.Action != "pending" || !strings.Contains(d.Reason, "no enforceable target") {
+		t.Fatalf("got %q (%s)", d.Action, d.Reason)
+	}
+
+	withTarget := feedMatch(60, events.SeverityMedium)
+	if d := p.Evaluate(withTarget); strings.Contains(d.Reason, "target") {
+		t.Errorf("a domain target needs no explanation, got %q", d.Reason)
 	}
 }
 
@@ -292,14 +361,10 @@ func TestCorroboratedHeuristicsNeverAutoBlock(t *testing.T) {
 	p := newTestPolicy()
 	p.AutoMinSignals = 2
 
-	heuristicsOnly := events.DetectionEvent{
-		Confidence:  93, // what combine([75,70]) actually produces
-		Severity:    events.SeverityCritical,
-		ClientIP:    "192.168.1.100",
-		SignalClass: events.SignalComposite,
-		Signals:     []string{events.SignalBeacon, events.SignalVolumetric},
-		SignalCount: 2,
-	}
+	// what combine([75,70]) actually produces, pointed at the beacon's
+	// destination
+	heuristicsOnly := composite(93, &events.Target{Type: events.TargetDomain, Value: "updates.vendor.example"},
+		events.SignalBeacon, events.SignalVolumetric)
 
 	d := p.Evaluate(heuristicsOnly)
 	if d.Action != "pending" {
@@ -312,8 +377,8 @@ func TestCorroboratedHeuristicsNeverAutoBlock(t *testing.T) {
 
 	// Add an IDS signature: now something external attests this is bad.
 	withSignature := heuristicsOnly
-	withSignature.Signals = []string{events.SignalBeacon, events.SignalVolumetric, events.SignalIDS}
-	withSignature.SignalCount = 3
+	withSignature.Signals = append(append([]events.Signal(nil), heuristicsOnly.Signals...),
+		events.Signal{Class: events.SignalIDS, Confidence: 70})
 	if d := p.Evaluate(withSignature); d.Action != "auto_block" {
 		t.Fatalf("heuristics corroborated by an IDS signature should auto-block, got %q", d.Action)
 	}
@@ -337,14 +402,7 @@ func TestUnlabelledEventNeverAutoBlocks(t *testing.T) {
 func TestAutoRequireKnownBadOptOut(t *testing.T) {
 	p := newTestPolicy()
 	p.AutoRequireKnownBad = false
-	d := p.Evaluate(events.DetectionEvent{
-		Confidence:  93,
-		Severity:    events.SeverityCritical,
-		ClientIP:    "192.168.1.100",
-		SignalClass: events.SignalComposite,
-		Signals:     []string{events.SignalBeacon, events.SignalVolumetric},
-		SignalCount: 2,
-	})
+	d := p.Evaluate(composite(93, evilDomain, events.SignalBeacon, events.SignalVolumetric))
 	if d.Action != "auto_block" {
 		t.Fatalf("with the gate disabled heuristics may auto-block, got %q", d.Action)
 	}

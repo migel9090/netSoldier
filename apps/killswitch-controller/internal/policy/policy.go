@@ -217,17 +217,21 @@ func (p *Policy) Evaluate(ev events.DetectionEvent) Decision {
 			Action:     "auto_block",
 			ActionType: p.DefaultAction,
 			TTLSeconds: p.DefaultTTL,
-			Reason: fmt.Sprintf("auto: confidence=%d severity=%s signals=%d known_bad=%v",
-				ev.Confidence, ev.Severity, signalCount(ev), ev.KnownBadSignals()),
+			Reason: fmt.Sprintf("auto: confidence=%d severity=%s signals=%d known_bad=%v target=%s",
+				ev.Confidence, ev.Severity, signalCount(ev), ev.KnownBadSignals(), ev.Target.Value),
 		}
 	}
 
 	if ev.Confidence >= p.PendMinConfidence && evRank >= severityRank(p.PendMinSeverity) {
+		reason := fmt.Sprintf("pending: confidence=%d severity=%s", ev.Confidence, ev.Severity)
+		if problem := targetProblem(ev); problem != "" {
+			reason += " (" + problem + ")"
+		}
 		return Decision{
 			Action:     "pending",
 			ActionType: p.DefaultAction,
 			TTLSeconds: p.DefaultTTL,
-			Reason:     fmt.Sprintf("pending: confidence=%d severity=%s", ev.Confidence, ev.Severity),
+			Reason:     reason,
 		}
 	}
 
@@ -247,33 +251,59 @@ func (p *Policy) autoBlockBlockedBy(ev events.DetectionEvent) (string, bool) {
 	if !p.corroborated(ev) {
 		return fmt.Sprintf("needs %d signals, has %d", p.AutoMinSignals, signalCount(ev)), false
 	}
+	if problem := targetProblem(ev); problem != "" {
+		return problem, false
+	}
 	return "", true
 }
 
-// corroborated reports whether the event satisfies the AutoMinSignals gate.
-// A single known-bad IoC feed match (no composite signal metadata) counts
-// as sufficient on its own regardless of AutoMinSignals — that is the
-// classic "block this C2 domain now" case. Composite detections must carry
-// at least AutoMinSignals distinct signal classes.
+// targetProblem explains why the event cannot be enforced automatically by
+// name, or returns "" when its target is a domain.
 //
-// The SignalCount==0 shortcut is only safe because autoBlockBlockedBy has
-// already established that a known-bad class is present: an unlabelled event
-// cannot reach here with AutoRequireKnownBad on.
+// The target is the ONLY thing enforcement may act on. Domain and Summary
+// are what was observed and how to describe it; in 1.x the sinkhole was fed
+// Domain, which for an IP-IoC hit was "cdn.x (→203.0.113.7)" and for an IDS
+// hit was the rule message, so those auto-blocks always failed in the
+// driver. Without a domain target there is nothing the automatic path can
+// block, and the operator reviewing the queue should read why.
+func targetProblem(ev events.DetectionEvent) string {
+	switch {
+	case ev.Target == nil:
+		return "no enforceable target: the detection names no domain or address to block"
+	case ev.Target.Type != events.TargetDomain:
+		return fmt.Sprintf("target is %s %s: only a domain can be blocked automatically",
+			ev.Target.Type, ev.Target.Value)
+	default:
+		return ""
+	}
+}
+
+// corroborated reports whether the event satisfies the AutoMinSignals gate.
+// A single-signal known-bad detection (an IoC feed match) counts as
+// sufficient on its own regardless of AutoMinSignals — that is the classic
+// "block this C2 domain now" case. Composite detections must carry at least
+// AutoMinSignals distinct signal classes.
+//
+// The single-signal shortcut is only safe because autoBlockBlockedBy has
+// already established that a known-bad class is present: an event without
+// one cannot reach here with AutoRequireKnownBad on.
 func (p *Policy) corroborated(ev events.DetectionEvent) bool {
 	if p.AutoMinSignals <= 1 {
 		return true
 	}
-	if ev.SignalCount == 0 {
+	if ev.SignalClass != events.SignalComposite {
 		return true // single-signal known-bad IoC; not a composite
 	}
-	return ev.SignalCount >= p.AutoMinSignals
+	return len(ev.ContributingClasses()) >= p.AutoMinSignals
 }
 
+// signalCount is the number of distinct signal classes behind the event,
+// counting an event that lists none as one.
 func signalCount(ev events.DetectionEvent) int {
-	if ev.SignalCount == 0 {
-		return 1
+	if n := len(ev.ContributingClasses()); n > 0 {
+		return n
 	}
-	return ev.SignalCount
+	return 1
 }
 
 func severityRank(s string) int {

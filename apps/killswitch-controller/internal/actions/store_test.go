@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/migel9090/netSoldier/libs/events"
 )
@@ -351,6 +352,63 @@ func TestAuditFailureDoesNotBlockTransition(t *testing.T) {
 		events.ActionDNSSinkhole, "test", 3600, false, "x.example")
 	if err := s.Approve(a.ID, "operator"); err != nil {
 		t.Fatalf("transition should still succeed when the audit sink fails: %v", err)
+	}
+}
+
+// TestCreateForDetectionTakesDomainFromTargetOnly: blocked_domain used to be
+// the event's domain field, which carried "cdn.x (→203.0.113.7)" for an
+// IP-IoC hit and the rule message for an IDS alert.
+func TestCreateForDetectionTakesDomainFromTargetOnly(t *testing.T) {
+	s := newTestStore()
+	base := events.DetectionEvent{
+		ID: "DET-abc-1", ClientIP: "192.168.1.10", ClientMAC: "aa:bb:cc:dd:ee:ff",
+		ClientName: "kids-tablet", Summary: "DNS answer 203.0.113.7 for cdn.x matches feodo ip indicator",
+		Domain: "cdn.x",
+	}
+
+	tests := []struct {
+		name   string
+		target *events.Target
+		want   string
+	}{
+		{"domain target", &events.Target{Type: events.TargetDomain, Value: "evil.example"}, "evil.example"},
+		{"ip target", &events.Target{Type: events.TargetIP, Value: "203.0.113.7"}, ""},
+		{"no target", nil, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ev := base
+			ev.Target = tt.target
+			a := s.CreateForDetection(ev, events.ActionDNSSinkhole, "rule", 3600, false)
+			if a.BlockedDomain != tt.want {
+				t.Errorf("blocked_domain = %q, want %q (never the observed domain %q)", a.BlockedDomain, tt.want, ev.Domain)
+			}
+			if a.DetectionID != "DET-abc-1" || a.DetectionSummary != base.Summary || a.ClientName != "kids-tablet" {
+				t.Errorf("detection fields not carried: %+v", a)
+			}
+			if a.TargetMAC != base.ClientMAC || a.TargetIP != base.ClientIP || a.State != events.StatePending {
+				t.Errorf("action = %+v", a)
+			}
+			if got := s.Get(a.ID); got == nil || got.DetectionSummary != base.Summary {
+				t.Errorf("stored action lost the summary: %+v", got)
+			}
+		})
+	}
+}
+
+func TestActivateRecordsActivatedAt(t *testing.T) {
+	s := newTestStore()
+	a := s.Create("DET-1", "aa:bb:cc:dd:ee:ff", "192.168.1.10", events.ActionDNSSinkhole, "test", 3600, true, "evil.com")
+	if a.ActivatedAt != nil {
+		t.Fatal("a new action has not been activated")
+	}
+	before := time.Now()
+	if err := s.Activate(a.ID); err != nil {
+		t.Fatal(err)
+	}
+	got := s.Get(a.ID)
+	if got.ActivatedAt == nil || got.ActivatedAt.Before(before) {
+		t.Fatalf("activated_at = %v, want the activation time", got.ActivatedAt)
 	}
 }
 

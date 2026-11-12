@@ -9,41 +9,53 @@
 package eventmap
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
 	"github.com/migel9090/netSoldier/libs/events"
 )
 
-// validIoCTypes are the ioc_type values the DetectionEvent schema allows.
-var validIoCTypes = map[string]struct{}{
-	"domain": {}, "ip": {}, "url": {}, "ja3": {}, "tlsfp": {}, "md5": {}, "sha256": {},
-}
-
-// AlertToEvent maps an internal Alert to the shared contract, coercing the
-// ioc_type to a schema-valid value (beacon/flow-window signals carry
-// descriptive types that aren't in the enum → normalized to "ip").
+// AlertToEvent maps an internal Alert to the shared contract.
 //
-// SignalClass is carried through deliberately (step 124): the killswitch
-// gates auto-enforcement on whether a detection is backed by an externally
-// attested known-bad indicator, and it can only tell that from the signal
-// class. Dropping the field here silently promotes heuristics to known-bad.
+// Producers are expected to fill Summary, Signals and Target themselves;
+// they know what they observed. The fallbacks here only keep an alert from
+// an incomplete producer valid in the most conservative way: a generic
+// summary, one signal carrying the alert's class and confidence but NO
+// indicator, and no target. Such an event can be shown and queued for a
+// human, never enforced automatically — inventing an indicator here would be
+// exactly the guess the typed target exists to stop.
+//
+// Validate the result before sending it; an alert that cannot be made valid
+// (no class, unparsable client address) must be reported, not delivered.
 func AlertToEvent(a detection.Alert) events.DetectionEvent {
-	iocType := a.IoCType
-	if _, ok := validIoCTypes[iocType]; !ok {
-		iocType = "ip"
-	}
 	sev := a.Severity
 	if sev == "" {
 		sev = detection.SeverityForConfidence(a.Confidence)
 	}
-	return events.DetectionEvent{
+	clientIP := a.ClientIP
+	if c, ok := events.CanonicalIP(clientIP); ok {
+		clientIP = c
+	}
+
+	signals := a.Signals
+	if len(signals) == 0 && a.SignalClass != "" && a.SignalClass != detection.SignalComposite {
+		signals = []events.Signal{{
+			Class:      a.SignalClass,
+			Confidence: detection.ClampConfidence(a.Confidence),
+			Source:     a.Source,
+		}}
+	}
+	ev := events.DetectionEvent{
 		SchemaVersion: events.DetectionSchemaVersion,
 		ID:            a.ID,
 		Timestamp:     a.Timestamp,
+		Summary:       a.Summary,
 		Domain:        a.Domain,
 		MatchedIoC:    a.MatchedIoC,
-		IoCType:       iocType,
-		ClientIP:      a.ClientIP,
-		ClientMAC:     a.ClientMAC,
+		IoCType:       a.IoCType,
+		ClientIP:      clientIP,
+		ClientMAC:     strings.ToLower(a.ClientMAC),
 		ClientName:    a.ClientName,
 		Severity:      sev,
 		Confidence:    a.Confidence,
@@ -54,7 +66,40 @@ func AlertToEvent(a detection.Alert) events.DetectionEvent {
 		QueryType:     a.QueryType,
 		Tags:          a.Tags,
 		SignalClass:   a.SignalClass,
-		Signals:       a.Signals,
-		SignalCount:   a.SignalCount,
+		Signals:       signals,
+		Target:        a.Target,
 	}
+	if ev.SignalClass == "" {
+		ev.SignalClass = classOf(signals)
+	}
+	if strings.TrimSpace(ev.Summary) == "" {
+		ev.Summary = fallbackSummary(ev)
+	}
+	return ev
+}
+
+// classOf derives signal_class from the signals the way the contract defines
+// it: the single class, or composite for more than one.
+func classOf(signals []events.Signal) string {
+	ev := events.DetectionEvent{Signals: signals}
+	switch classes := ev.ContributingClasses(); len(classes) {
+	case 0:
+		return ""
+	case 1:
+		return classes[0]
+	default:
+		return detection.SignalComposite
+	}
+}
+
+func fallbackSummary(ev events.DetectionEvent) string {
+	what := ev.SignalClass
+	if what == "" {
+		what = "unclassified"
+	}
+	s := fmt.Sprintf("%s detection for %s", what, ev.ClientIP)
+	if ev.Threat != "" {
+		s += ": " + ev.Threat
+	}
+	return s
 }

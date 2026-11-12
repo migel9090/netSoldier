@@ -34,10 +34,11 @@ func newSignedEnv(t *testing.T, autoBlockAllowed bool) *signedEnv {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, autoBlockAllowed))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, autoBlockAllowed,
+		newEvaluationLedger(ledgerRetention(0))))
 
 	env := &signedEnv{key: "api-key", secret: "wh-secret"}
-	env.srv = httptest.NewServer(authMiddleware(env.key, env.secret, mux))
+	env.srv = httptest.NewServer(authMiddleware(env.key, &events.SignatureVerifier{Secret: env.secret}, mux))
 	t.Cleanup(env.srv.Close)
 	return env
 }
@@ -73,18 +74,10 @@ func (e *signedEnv) postRaw(t *testing.T, body []byte, key, sig string) *http.Re
 }
 
 func criticalIoCEvent() events.DetectionEvent {
-	return events.DetectionEvent{
-		ID:          "DET-sig-1",
-		Severity:    events.SeverityCritical,
-		Confidence:  95,
-		ClientIP:    "192.168.1.100",
-		ClientMAC:   "aa:bb:cc:dd:ee:ff",
-		Domain:      "evil.com",
-		MatchedIoC:  "evil.com",
-		IoCType:     "domain",
-		Source:      "threatfox",
-		SignalClass: events.SignalIoC,
-	}
+	ev := withDomainTarget(testEvent(95, events.SeverityCritical), "evil.com")
+	ev.ClientMAC = "aa:bb:cc:dd:ee:ff"
+	ev.Source = "threatfox"
+	return ev
 }
 
 // TestSignedEvaluateAccepted is the contract test whose absence let the
@@ -113,22 +106,13 @@ func TestEvaluateRejectsMissingSignature(t *testing.T) {
 func TestEvaluateRejectsTamperedPayload(t *testing.T) {
 	env := newSignedEnv(t, true)
 
-	original, _ := json.Marshal(events.DetectionEvent{
-		ID:          "DET-sig-2",
-		Severity:    events.SeverityLow,
-		Confidence:  10,
-		ClientIP:    "192.168.1.100",
-		SignalClass: events.SignalIoC,
-	})
+	low := testEvent(10, events.SeverityLow)
+	original, _ := json.Marshal(low)
 	sig := events.SignPayload(env.secret, original)
 
-	escalated, _ := json.Marshal(events.DetectionEvent{
-		ID:          "DET-sig-2",
-		Severity:    events.SeverityCritical,
-		Confidence:  99,
-		ClientIP:    "192.168.1.100",
-		SignalClass: events.SignalIoC,
-	})
+	high := low
+	high.Severity, high.Confidence = events.SeverityCritical, 99
+	escalated, _ := json.Marshal(high)
 	if resp := env.postRaw(t, escalated, env.key, sig); resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("escalated payload should be rejected, got %d", resp.StatusCode)
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -64,11 +65,18 @@ var (
 		Name:      "driver_failures_total",
 		Help:      "Enforcement driver apply/revert failures by operation.",
 	}, []string{"operation"})
+	// duplicateEvents counts deliveries of an already-evaluated event id:
+	// sender retries, or replays inside the signature window.
+	duplicateEvents = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "killswitch",
+		Name:      "duplicate_events_total",
+		Help:      "Detection events answered from the idempotency ledger instead of re-evaluated.",
+	})
 )
 
 func init() {
 	prometheus.MustRegister(pendingActions, activeActions, allowlistEntries,
-		autoBlockEnabled, rejectedRequests, driverFailures)
+		autoBlockEnabled, rejectedRequests, driverFailures, duplicateEvents)
 }
 
 func main() {
@@ -211,16 +219,21 @@ func main() {
 			"anyone able to reach this service can approve or revert enforcement")
 	}
 	webhookSecret := os.Getenv("WEBHOOK_SECRET")
+	tolerance := envDuration("WEBHOOK_SIGNATURE_TOLERANCE", events.DefaultSignatureTolerance)
+	var verifier *events.SignatureVerifier
 	if webhookSecret == "" {
 		slog.Warn("no WEBHOOK_SECRET set — detection events are accepted without " +
 			"signature verification; their contents cannot be trusted")
+	} else {
+		verifier = &events.SignatureVerifier{Secret: webhookSecret, Tolerance: tolerance}
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("GET /policy", handleGetPolicy(pol, autoBlockAllowed))
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, autoBlockAllowed))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, autoBlockAllowed,
+		newEvaluationLedger(ledgerRetention(tolerance))))
 	mux.HandleFunc("GET /allowlist", handleGetAllowlist(pol))
 	mux.HandleFunc("GET /actions/pending", handleListByState(store, events.StatePending))
 	mux.HandleFunc("GET /actions/active", handleListByState(store, events.StateActive))
@@ -229,7 +242,7 @@ func main() {
 	mux.HandleFunc("POST /actions/{id}/reject", handleReject(store))
 	mux.HandleFunc("POST /actions/{id}/revert", handleRevert(store, resolve))
 
-	handler := authMiddleware(apiKey, webhookSecret, mux)
+	handler := authMiddleware(apiKey, verifier, mux)
 
 	addr := envOr("LISTEN_ADDR", ":8084")
 	srv := &http.Server{
@@ -242,7 +255,8 @@ func main() {
 
 	go func() {
 		slog.Info("starting killswitch-controller", "addr", addr,
-			"auth", apiKey != "", "signature_required", webhookSecret != "")
+			"auth", apiKey != "", "signature_required", verifier != nil,
+			"signature_tolerance", tolerance)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server failed", "error", err)
 			os.Exit(1)
@@ -259,12 +273,12 @@ func main() {
 	}
 }
 
-// authMiddleware authenticates mutating requests and verifies the HMAC on
-// signed payloads. GET endpoints stay unauthenticated by design (read-only),
-// but note /allowlist and /actions do disclose which devices cannot be
-// blocked and what is currently enforced — NetworkPolicy is what keeps them
-// private, so it has to be in place.
-func authMiddleware(apiKey, webhookSecret string, next http.Handler) http.Handler {
+// authMiddleware authenticates mutating requests and verifies the signature
+// on detection events (nil verifier: none required). GET endpoints stay
+// unauthenticated by design (read-only), but note /allowlist and /actions do
+// disclose which devices cannot be blocked and what is currently enforced —
+// NetworkPolicy is what keeps them private, so it has to be in place.
+func authMiddleware(apiKey string, verifier *events.SignatureVerifier, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
@@ -293,12 +307,19 @@ func authMiddleware(apiKey, webhookSecret string, next http.Handler) http.Handle
 
 		// Only /evaluate carries a signed detection payload; operator
 		// actions are authenticated by the bearer token alone.
-		if webhookSecret != "" && r.URL.Path == "/evaluate" {
-			if err := events.VerifyPayload(webhookSecret, r.Header.Get(events.SignatureHeader), body); err != nil {
-				rejectedRequests.WithLabelValues("bad_signature").Inc()
+		if verifier != nil && r.URL.Path == "/evaluate" {
+			if err := verifier.Verify(r.Header.Get(events.SignatureHeader), body); err != nil {
+				reason := "bad_signature"
+				if errors.Is(err, events.ErrStaleSignature) {
+					// A genuine MAC outside the window: a replay, or the two
+					// clocks have drifted apart. Worth telling apart on a
+					// dashboard.
+					reason = "stale_signature"
+				}
+				rejectedRequests.WithLabelValues(reason).Inc()
 				slog.Warn("rejected detection event with invalid signature",
 					"error", err, "remote", r.RemoteAddr)
-				writeJSONError(w, http.StatusUnauthorized, "invalid webhook signature")
+				writeJSONError(w, http.StatusUnauthorized, "invalid webhook signature: "+err.Error())
 				return
 			}
 		}
@@ -394,14 +415,45 @@ func handleGetPolicy(pol *policy.Policy, autoBlockAllowed bool) http.HandlerFunc
 	}
 }
 
+// handleEvaluate decides on one detection event.
+//
+// The event is validated before anything else looks at it: a detection that
+// does not say what it is, who it is about, or what evidence it rests on is
+// refused with the reasons, not half-evaluated. It is then evaluated at most
+// once per event id (see evaluationLedger). Enforcement acts on the event's
+// typed target only, never on its domain or summary.
 func handleEvaluate(pol *policy.Policy, store *actions.Store, resolve driverResolver,
-	autoBlockAllowed bool) http.HandlerFunc {
+	autoBlockAllowed bool, ledger *evaluationLedger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+		if err != nil {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		var ev events.DetectionEvent
-		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+		if err := json.Unmarshal(body, &ev); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
+		if err := ev.Validate(); err != nil {
+			rejectedRequests.WithLabelValues("invalid_event").Inc()
+			slog.Warn("rejected invalid detection event", "id", ev.ID, "error", err)
+			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+
+		digest := sha256.Sum256(body)
+		entry, first := ledger.claim(ev.ID, digest)
+		if !first {
+			respondToRepeat(w, r, store, ledger, entry, ev.ID, digest)
+			return
+		}
+		finished := false
+		defer func() {
+			if !finished {
+				ledger.abandon(ev.ID, entry)
+			}
+		}()
 
 		decision := pol.Evaluate(ev)
 
@@ -415,19 +467,55 @@ func handleEvaluate(pol *policy.Policy, store *actions.Store, resolve driverReso
 		var action *events.EnforcementAction
 		switch decision.Action {
 		case "auto_block":
-			action = store.Create(ev.ID, ev.ClientMAC, ev.ClientIP, decision.ActionType,
-				decision.Reason, decision.TTLSeconds, true, ev.Domain)
+			action = store.CreateForDetection(ev, decision.ActionType, decision.Reason,
+				decision.TTLSeconds, true)
 			applyAction(r.Context(), store, resolve, action)
 		case "pending":
-			action = store.Create(ev.ID, ev.ClientMAC, ev.ClientIP, decision.ActionType,
-				decision.Reason, decision.TTLSeconds, false, ev.Domain)
+			action = store.CreateForDetection(ev, decision.ActionType, decision.Reason,
+				decision.TTLSeconds, false)
 		}
+		ledger.finish(entry, decision, actionID(action))
+		finished = true
 
 		writeJSON(w, http.StatusOK, map[string]any{
 			"decision": decision,
 			"action":   store.Get(actionID(action)),
 		})
 	}
+}
+
+// respondToRepeat answers a second delivery of an event id with the first
+// delivery's decision and the current state of its action, creating nothing.
+// The same id with different content is not a repeat but a producer reusing
+// ids, which would silently swallow a detection; that is refused.
+func respondToRepeat(w http.ResponseWriter, r *http.Request, store *actions.Store,
+	ledger *evaluationLedger, entry *evaluation, id string, digest [sha256.Size]byte) {
+	if entry.digest != digest {
+		rejectedRequests.WithLabelValues("event_id_reused").Inc()
+		slog.Error("detection event id reused with different content — refusing it; "+
+			"the producer is not generating unique ids", "id", id)
+		writeJSONError(w, http.StatusConflict,
+			"event id "+id+" was already evaluated with different content")
+		return
+	}
+	select {
+	case <-entry.done:
+	case <-r.Context().Done():
+		return
+	}
+	decision, actID, ok := ledger.outcome(entry)
+	if !ok {
+		writeJSONError(w, http.StatusServiceUnavailable,
+			"the first delivery of this event did not complete; retry")
+		return
+	}
+	duplicateEvents.Inc()
+	slog.Info("repeated detection event answered from the ledger", "id", id, "action_id", actID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"decision":  decision,
+		"action":    store.Get(actID),
+		"duplicate": true,
+	})
 }
 
 // applyAction runs the driver and only activates the action if it succeeded.
@@ -618,6 +706,16 @@ func instanceIDPrefix() string {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+		slog.Warn("invalid duration env, using default", "key", key, "value", v, "default", fallback)
 	}
 	return fallback
 }

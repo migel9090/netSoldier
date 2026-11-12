@@ -7,11 +7,15 @@ package ingest
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/iocmatch"
+	"github.com/migel9090/netSoldier/libs/events"
 )
 
 // SensorEvent is the unified representation of a detection-grade
@@ -27,6 +31,7 @@ type SensorEvent struct {
 	DstPort       int
 	Proto         string
 	Signature     string // rule message or observation point
+	SignatureID   string // IDS rule SID (kind "ids-alert")
 	Category      string
 	Indicator     string // matched IoC value ("" for pure IDS alerts)
 	IndicatorType string // normalized: domain, ip, ja3, tlsfp, cert-sha1, ...
@@ -34,6 +39,10 @@ type SensorEvent struct {
 	Confidence    int
 	Source        string // feed / ruleset attribution
 	Threat        string
+
+	// DstDomain is the destination name a beacon was observed to, when the
+	// sensor knows one (kind "ml-beacon").
+	DstDomain string
 
 	// TLS client observations (kind "tls-client").
 	SNI string
@@ -111,22 +120,24 @@ func (e *SensorEvent) applyThreatIntel(raw string) {
 
 // ToAlert converts a SensorEvent into a detection.Alert, enriching intel
 // hits from the live IoC matcher when the indicator is still known.
+//
+// Each sensor kind says something different, so each is mapped on its own
+// terms: the summary describes what was seen, Domain carries only a DNS name
+// that was really observed, the one signal carries this observation's own
+// confidence and the indicator it attests, and Target is set only when there
+// is something concrete to act on — the feed's domain or address for an
+// intel hit, the observed destination for a heuristic. A Suricata rule hit
+// attests a rule, not a destination, so it carries no target; neither does a
+// volumetric anomaly, which is about the device itself.
 func ToAlert(ev SensorEvent, m *iocmatch.Matcher) detection.Alert {
 	a := detection.Alert{
 		Timestamp:   ev.Timestamp,
-		Domain:      ev.Indicator,
-		ClientIP:    ev.SrcIP,
-		MatchedIoC:  ev.Indicator,
-		IoCType:     ev.IndicatorType,
+		ClientIP:    canonicalOrRaw(ev.SrcIP),
 		Severity:    ev.Severity,
 		Source:      ev.Source,
 		Confidence:  ev.Confidence,
 		Threat:      ev.Threat,
 		SignalClass: signalClass(ev.Kind),
-	}
-	if a.MatchedIoC == "" {
-		a.MatchedIoC = ev.Signature
-		a.Domain = ev.Signature
 	}
 	if a.Threat == "" {
 		a.Threat = ev.Signature
@@ -149,6 +160,53 @@ func ToAlert(ev SensorEvent, m *iocmatch.Matcher) detection.Alert {
 			a.MitreName = ioc.MitreName
 		}
 	}
+	a.Confidence = detection.ClampConfidence(a.Confidence)
+
+	sig := events.Signal{Class: a.SignalClass, Confidence: a.Confidence, Source: a.Source}
+	switch ev.Kind {
+	case "ids-alert":
+		if ev.SignatureID != "" && ev.SignatureID != "0" {
+			sig.Indicator, sig.IndicatorType = ev.SignatureID, events.IndicatorSID
+		}
+		a.Summary = fmt.Sprintf("IDS signature %q (%s)", ev.Signature, flow(ev))
+	case "intel-hit":
+		sig.Indicator, sig.IndicatorType = ev.Indicator, ev.IndicatorType
+		switch ev.IndicatorType {
+		case events.IndicatorDomain:
+			if d, ok := events.CanonicalDomain(ev.Indicator); ok {
+				sig.Indicator = d
+				a.Domain = d
+				a.Target = &events.Target{Type: events.TargetDomain, Value: d}
+			}
+		case events.IndicatorIP:
+			if ip, ok := events.CanonicalIP(ev.Indicator); ok {
+				sig.Indicator = ip
+				a.Target = &events.Target{Type: events.TargetIP, Value: ip}
+			}
+		}
+		a.Summary = fmt.Sprintf("Zeek Intel: %s %s listed by %s, seen in %s (%s)",
+			ev.IndicatorType, sig.Indicator, a.Source, ev.Signature, flow(ev))
+	case "ml-beacon":
+		if d, ok := events.CanonicalDomain(ev.DstDomain); ok {
+			sig.Indicator, sig.IndicatorType = d, events.IndicatorDomain
+			a.Domain = d
+			a.Target = &events.Target{Type: events.TargetDomain, Value: d}
+		} else if ip, ok := events.CanonicalIP(ev.DstIP); ok {
+			sig.Indicator, sig.IndicatorType = ip, events.IndicatorIP
+			a.Target = &events.Target{Type: events.TargetIP, Value: ip}
+		}
+		a.Summary = "Beaconing from " + a.ClientIP + ": " + ev.Signature
+	case "ml-anomaly":
+		a.Summary = "Volumetric anomaly for " + a.ClientIP + ": " + ev.Signature
+		if ev.Threat != "" {
+			a.Summary += " — " + ev.Threat
+		}
+	default:
+		a.Summary = fmt.Sprintf("%s %s: %s", ev.Sensor, ev.Kind, firstNonEmpty(ev.Signature, ev.Indicator))
+	}
+	a.Signals = []events.Signal{sig}
+	a.MatchedIoC, a.IoCType = sig.Indicator, sig.IndicatorType
+
 	if a.MitreID == "" {
 		a.MitreID, a.MitreName = iocmatch.DeriveMitre(iocmatch.IoC{
 			Type: ev.IndicatorType, Threat: ev.Threat,
@@ -158,6 +216,40 @@ func ToAlert(ev SensorEvent, m *iocmatch.Matcher) detection.Alert {
 		a.Severity = "medium"
 	}
 	return a
+}
+
+// flow renders the observation's endpoints for a summary.
+func flow(ev SensorEvent) string {
+	src, dst := ev.SrcIP, ev.DstIP
+	if ev.SrcPort > 0 {
+		src = net.JoinHostPort(src, strconv.Itoa(ev.SrcPort))
+	}
+	if ev.DstPort > 0 {
+		dst = net.JoinHostPort(dst, strconv.Itoa(ev.DstPort))
+	}
+	if dst == "" {
+		return src
+	}
+	return src + " → " + dst
+}
+
+// canonicalOrRaw returns the canonical form of an address, or the input
+// unchanged when it does not parse, so a bad sensor row fails validation
+// visibly instead of carrying a guessed address.
+func canonicalOrRaw(ip string) string {
+	if c, ok := events.CanonicalIP(ip); ok {
+		return c
+	}
+	return ip
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // signalClass maps a SensorEvent kind to the composite-confidence signal

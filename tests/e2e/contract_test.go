@@ -3,10 +3,14 @@
 package e2e
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 
@@ -94,8 +98,12 @@ func TestDetectionToKillswitchContract(t *testing.T) {
 	if a.BlockedDomain != "evil.example.com" {
 		t.Errorf("blocked_domain = %q, want evil.example.com", a.BlockedDomain)
 	}
-	if a.DetectionID == "" {
-		t.Error("the action should carry the detection ID that triggered it")
+	if !regexp.MustCompile(events.DetectionIDPattern).MatchString(a.DetectionID) {
+		t.Errorf("detection_id = %q: the action should carry the namespaced id of the "+
+			"detection that triggered it", a.DetectionID)
+	}
+	if a.DetectionSummary == "" {
+		t.Error("the action should carry the detection's summary for the approval dialog")
 	}
 }
 
@@ -125,23 +133,14 @@ func TestKillswitchRejectsUnauthenticated(t *testing.T) {
 	t.Cleanup(stopKs)
 	waitHealthy(t, "http://"+ksAddr+"/healthz")
 
-	ev := events.DetectionEvent{
-		SchemaVersion: events.DetectionSchemaVersion,
-		ID:            "DET-unauth",
-		Timestamp:     time.Now().UTC(),
-		Domain:        "attacker.example",
-		MatchedIoC:    "attacker.example",
-		IoCType:       "domain",
-		ClientIP:      "192.168.1.200",
-		ClientMAC:     "aa:bb:cc:dd:ee:99",
-		Severity:      events.SeverityCritical,
-		Confidence:    99,
-		SignalClass:   events.SignalIoC,
-	}
+	ev := v2Event("attacker.example", 99, events.SeverityCritical)
+	ev.ClientIP, ev.ClientMAC = "192.168.1.200", "aa:bb:cc:dd:ee:99"
 	body, err := json.Marshal(ev)
 	if err != nil {
 		t.Fatal(err)
 	}
+	legacy := hmac.New(sha256.New, []byte(e2eWebhookSecret))
+	legacy.Write(body)
 
 	cases := []struct {
 		name  string
@@ -152,6 +151,12 @@ func TestKillswitchRejectsUnauthenticated(t *testing.T) {
 		{"token but no signature", e2eAPIKey, ""},
 		{"valid token, wrong signature", e2eAPIKey, events.SignPayload("wrong-secret", body)},
 		{"valid signature, wrong token", "wrong-token", events.SignPayload(e2eWebhookSecret, body)},
+		// A genuine signature captured ten minutes ago: outside the window.
+		{"stale signature", e2eAPIKey,
+			events.SignPayloadAt(e2eWebhookSecret, time.Now().Add(-10*time.Minute), body)},
+		// The 1.x body-only scheme has no timestamp; accepting it would
+		// reopen the replay hole.
+		{"legacy body-only signature", e2eAPIKey, "sha256=" + hex.EncodeToString(legacy.Sum(nil))},
 	}
 
 	for _, tc := range cases {
@@ -212,19 +217,8 @@ func TestEmptyAllowlistDisablesAutoBlock(t *testing.T) {
 	t.Cleanup(stopKs)
 	waitHealthy(t, "http://"+ksAddr+"/healthz")
 
-	ev := events.DetectionEvent{
-		SchemaVersion: events.DetectionSchemaVersion,
-		ID:            "DET-noallow",
-		Timestamp:     time.Now().UTC(),
-		Domain:        "c2.example",
-		MatchedIoC:    "c2.example",
-		IoCType:       "domain",
-		ClientIP:      "192.168.1.200",
-		ClientMAC:     "aa:bb:cc:dd:ee:99",
-		Severity:      events.SeverityCritical,
-		Confidence:    99,
-		SignalClass:   events.SignalIoC,
-	}
+	ev := v2Event("c2.example", 99, events.SeverityCritical)
+	ev.ClientIP, ev.ClientMAC = "192.168.1.200", "aa:bb:cc:dd:ee:99"
 
 	var result struct {
 		Decision struct {
@@ -279,17 +273,14 @@ func TestHeuristicsNeverAutoBlockE2E(t *testing.T) {
 	t.Cleanup(stopKs)
 	waitHealthy(t, "http://"+ksAddr+"/healthz")
 
-	base := events.DetectionEvent{
-		SchemaVersion: events.DetectionSchemaVersion,
-		Timestamp:     time.Now().UTC(),
-		Domain:        "updates.vendor.example",
-		MatchedIoC:    "updates.vendor.example",
-		IoCType:       "domain",
-		ClientIP:      "192.168.1.150",
-		ClientMAC:     "aa:bb:cc:dd:ee:50",
-		Severity:      events.SeverityCritical,
-		Confidence:    93, // exactly what combine([75, 70]) produces
-	}
+	// A composite pointed at the beacon's destination, as the engine builds
+	// it when no known-bad signal names a target of its own.
+	base := v2Event("updates.vendor.example", 93, events.SeverityCritical) // 93 = combine([75, 70])
+	base.ClientIP, base.ClientMAC = "192.168.1.150", "aa:bb:cc:dd:ee:50"
+	base.Source = "composite"
+	beacon := events.Signal{Class: events.SignalBeacon, Confidence: 75,
+		Indicator: "updates.vendor.example", IndicatorType: events.IndicatorDomain, Source: "rita"}
+	volumetric := events.Signal{Class: events.SignalVolumetric, Confidence: 70, Source: "iforest"}
 
 	type evalResult struct {
 		Decision struct {
@@ -302,10 +293,9 @@ func TestHeuristicsNeverAutoBlockE2E(t *testing.T) {
 	// Two heuristics, corroborated, critical, 93 confidence → must still
 	// wait for a human.
 	heuristics := base
-	heuristics.ID = "DET-heuristics"
+	heuristics.ID = "DET-e2e-9001"
 	heuristics.SignalClass = events.SignalComposite
-	heuristics.Signals = []string{events.SignalBeacon, events.SignalVolumetric}
-	heuristics.SignalCount = 2
+	heuristics.Signals = []events.Signal{beacon, volumetric}
 
 	var got evalResult
 	postAuthedJSON(t, "http://"+ksAddr+"/evaluate", e2eAPIKey, heuristics, &got)
@@ -323,10 +313,10 @@ func TestHeuristicsNeverAutoBlockE2E(t *testing.T) {
 
 	// The same client corroborated by an IDS signature IS known-bad.
 	withSignature := base
-	withSignature.ID = "DET-with-signature"
+	withSignature.ID = "DET-e2e-9002"
 	withSignature.SignalClass = events.SignalComposite
-	withSignature.Signals = []string{events.SignalBeacon, events.SignalVolumetric, events.SignalIDS}
-	withSignature.SignalCount = 3
+	withSignature.Signals = []events.Signal{beacon, volumetric,
+		{Class: events.SignalIDS, Confidence: 70, Indicator: "2013028", IndicatorType: events.IndicatorSID}}
 
 	var signed evalResult
 	postAuthedJSON(t, "http://"+ksAddr+"/evaluate", e2eAPIKey, withSignature, &signed)
@@ -377,29 +367,14 @@ func TestAllowlistProtectsGatewayE2E(t *testing.T) {
 		name string
 		ev   events.DetectionEvent
 	}{
-		{
-			name: "allowlisted MAC in a different spelling",
-			ev: events.DetectionEvent{
-				ID: "DET-gw-mac", ClientMAC: "aa:bb:cc:dd:ee:ff", ClientIP: "10.9.9.9",
-				Severity: events.SeverityCritical, Confidence: 99, SignalClass: events.SignalIoC,
-				Domain: "c2.example", MatchedIoC: "c2.example", IoCType: "domain",
-			},
-		},
-		{
-			name: "address inside an allowlisted CIDR",
-			ev: events.DetectionEvent{
-				ID: "DET-gw-cidr", ClientMAC: "11:22:33:44:55:66", ClientIP: "192.168.1.1",
-				Severity: events.SeverityCritical, Confidence: 99, SignalClass: events.SignalIoC,
-				Domain: "c2.example", MatchedIoC: "c2.example", IoCType: "domain",
-			},
-		},
+		{name: "allowlisted MAC in a different spelling", ev: v2Event("c2.example", 99, events.SeverityCritical)},
+		{name: "address inside an allowlisted CIDR", ev: v2Event("c2.example", 99, events.SeverityCritical)},
 	}
+	cases[0].ev.ClientMAC, cases[0].ev.ClientIP = "aa:bb:cc:dd:ee:ff", "10.9.9.9"
+	cases[1].ev.ClientMAC, cases[1].ev.ClientIP = "11:22:33:44:55:66", "192.168.1.1"
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.ev.SchemaVersion = events.DetectionSchemaVersion
-			tc.ev.Timestamp = time.Now().UTC()
-
 			var got evalResult
 			postAuthedJSON(t, "http://"+ksAddr+"/evaluate", e2eAPIKey, tc.ev, &got)
 			if got.Decision.Action != "ignore" {

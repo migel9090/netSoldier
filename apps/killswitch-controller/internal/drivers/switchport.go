@@ -48,11 +48,15 @@ type SwitchRequest struct {
 // to a webhook. quarantineVLAN is the VLAN ID used for quarantine
 // (0 = disable port instead of VLAN reassignment).
 //
-// secret signs each request body with HMAC-SHA256 so the webhook handler can
-// verify the instruction came from this controller. Disabling a switch port
-// is the most destructive action in the system; sending it unauthenticated
-// meant anyone able to reach the webhook URL could cut off any device, and
-// the handler had no way to tell a genuine request from a forged one.
+// secret signs each request with HMAC-SHA256 over a timestamp and the body
+// (events.SignatureHeader, "t=…,v1=…") so the webhook handler can verify the
+// instruction came from this controller, and came from it recently.
+// Disabling a switch port is the most destructive action in the system;
+// sending it unauthenticated meant anyone able to reach the webhook URL could
+// cut off any device, and a body-only signature meant anyone who once
+// captured a "disable_port" could replay it forever. The adapter must verify
+// with events.SignatureVerifier (or the same construction) and reject stale
+// timestamps.
 func NewSwitchPortDriver(webhookURL string, quarantineVLAN int, secret string,
 	guard *TargetGuard) *SwitchPortDriver {
 	return &SwitchPortDriver{

@@ -106,6 +106,9 @@ func TestPhase1E2E(t *testing.T) {
 	assertEq(t, "webhook.schema_version", events.DetectionSchemaVersion, wp.SchemaVersion)
 	assertEq(t, "webhook.domain", "evil.example.com", wp.Domain)
 	assertEq(t, "webhook.client_ip", "192.168.1.42", wp.ClientIP)
+	if err := wp.Validate(); err != nil {
+		t.Errorf("webhook payload breaks the v2 contract: %v", err)
+	}
 	t.Log("detection pipeline OK")
 
 	// ── Alerts API ──────────────────────────────────────────────────
@@ -143,17 +146,9 @@ func TestPhase1E2E(t *testing.T) {
 	}
 
 	var ignoreResult evalResp
-	httpPostJSON(t, "http://"+ksAddr+"/evaluate", map[string]any{
-		"schema_version": "1.0",
-		"id":             "DET-E2E-IGNORE",
-		"domain":         "benign.example.com",
-		"matched_ioc":    "benign.example.com",
-		"ioc_type":       "domain",
-		"client_ip":      "192.168.1.10",
-		"severity":       "low",
-		"confidence":     10,
-		"source":         "e2e-test",
-	}, &ignoreResult)
+	ignoreEv := v2Event("benign.example.com", 10, events.SeverityLow)
+	ignoreEv.ClientIP = "192.168.1.10"
+	httpPostJSON(t, "http://"+ksAddr+"/evaluate", ignoreEv, &ignoreResult)
 	assertEq(t, "ignore.decision", "ignore", ignoreResult.Decision.Action)
 	if ignoreResult.Action != nil {
 		t.Error("ignore: expected nil action")
@@ -164,19 +159,9 @@ func TestPhase1E2E(t *testing.T) {
 
 	t.Log("evaluating medium-severity detection → pending")
 	var pendResult evalResp
-	httpPostJSON(t, "http://"+ksAddr+"/evaluate", map[string]any{
-		"schema_version": "1.0",
-		"id":             "DET-E2E-PENDING",
-		"domain":         "suspicious.example.com",
-		"matched_ioc":    "suspicious.example.com",
-		"ioc_type":       "domain",
-		"client_ip":      "192.168.1.42",
-		"client_mac":     "aa:bb:cc:dd:ee:ff",
-		"severity":       "medium",
-		"confidence":     75,
-		"source":         "e2e-test",
-		"threat":         "test-malware",
-	}, &pendResult)
+	pendEv := v2Event("suspicious.example.com", 75, events.SeverityMedium)
+	pendEv.ClientMAC, pendEv.Threat = "aa:bb:cc:dd:ee:ff", "test-malware"
+	httpPostJSON(t, "http://"+ksAddr+"/evaluate", pendEv, &pendResult)
 	assertEq(t, "pending.decision", "pending", pendResult.Decision.Action)
 	if pendResult.Action == nil {
 		t.Fatal("pending: action is nil")
@@ -231,25 +216,14 @@ func TestPhase1E2E(t *testing.T) {
 
 	// ── Killswitch: auto-block ──────────────────────────────────────
 
-	// signal_class is load-bearing: auto-block requires an externally
+	// The signals are load-bearing: auto-block requires an externally
 	// attested known-bad indicator (a feed match or an IDS signature), not
-	// just high confidence. See the heuristics case below.
+	// just high confidence, and a domain target to act on.
 	t.Log("evaluating critical-severity known-bad detection → auto-block")
 	var autoResult evalResp
-	httpPostJSON(t, "http://"+ksAddr+"/evaluate", map[string]any{
-		"schema_version": "1.0",
-		"id":             "DET-E2E-AUTO",
-		"domain":         "c2.evil.test",
-		"matched_ioc":    "c2.evil.test",
-		"ioc_type":       "domain",
-		"client_ip":      "192.168.1.99",
-		"client_mac":     "ff:ee:dd:cc:bb:aa",
-		"severity":       "critical",
-		"confidence":     95,
-		"source":         "e2e-test",
-		"threat":         "c2-beacon",
-		"signal_class":   events.SignalIoC,
-	}, &autoResult)
+	autoEv := v2Event("c2.evil.test", 95, events.SeverityCritical)
+	autoEv.ClientIP, autoEv.ClientMAC, autoEv.Threat = "192.168.1.99", "ff:ee:dd:cc:bb:aa", "c2-beacon"
+	httpPostJSON(t, "http://"+ksAddr+"/evaluate", autoEv, &autoResult)
 	assertEq(t, "auto.decision", "auto_block", autoResult.Decision.Action)
 	if autoResult.Action == nil {
 		t.Fatal("auto-block: action is nil")

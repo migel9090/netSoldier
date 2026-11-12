@@ -2,10 +2,13 @@ package detection
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -103,36 +106,100 @@ var (
 		Help:      "Detections emitted without a client MAC (allowlist can only match on IP).",
 	})
 
-	alertCounter atomic.Int64
+	alertCounter atomic.Uint64
+	idPrefix     atomic.Pointer[string]
 )
 
 func init() {
 	prometheus.MustRegister(queriesChecked, alertsGenerated, threatlistDomains, pollErrors,
 		pollBatchSaturated, macResolutionFailures)
+	p := defaultIDPrefix()
+	idPrefix.Store(&p)
 }
 
-type Alert struct {
-	ID          string    `json:"id"`
-	Timestamp   time.Time `json:"timestamp"`
-	Domain      string    `json:"domain"`
-	ClientIP    string    `json:"client_ip"`
-	ClientMAC   string    `json:"client_mac,omitempty"`
-	ClientName  string    `json:"client_name,omitempty"`
-	QueryType   string    `json:"query_type"`
-	MatchedIoC  string    `json:"matched_ioc"`
-	IoCType     string    `json:"ioc_type,omitempty"`
-	Severity    string    `json:"severity"`
-	Source      string    `json:"source"`
-	Confidence  int       `json:"confidence,omitempty"`
-	MitreID     string    `json:"mitre_id,omitempty"`
-	MitreName   string    `json:"mitre_name,omitempty"`
-	Threat      string    `json:"threat,omitempty"`
-	Tags        []string  `json:"tags,omitempty"`
-	SignalClass string    `json:"signal_class,omitempty"`
+// NewID returns the next detection id, DET-<instance prefix>-<n>.
+//
+// A bare counter restarted at DET-1 on every boot, so the same id named
+// different detections over the service's lifetime and an action's
+// detection_id could not be traced back. The per-process prefix makes ids
+// unique across restarts; the counter keeps them ordered within one.
+func NewID() string {
+	return events.FormatDetectionID(*idPrefix.Load(), alertCounter.Add(1))
+}
 
-	// Composite-confidence output (step 116).
-	Signals     []string `json:"signals,omitempty"`
-	SignalCount int      `json:"signal_count,omitempty"`
+// SetIDPrefix replaces the per-process id prefix (DETECTION_ID_PREFIX). It
+// must be alphanumeric so ids keep the contract's shape.
+func SetIDPrefix(prefix string) error {
+	if !events.ValidIDPrefix(prefix) {
+		return fmt.Errorf("id prefix %q must be non-empty and alphanumeric", prefix)
+	}
+	idPrefix.Store(&prefix)
+	return nil
+}
+
+// IDPrefix returns the current per-process id prefix.
+func IDPrefix() string { return *idPrefix.Load() }
+
+// defaultIDPrefix is the start time in base 36 plus 24 random bits: two
+// processes collide only if they start in the same second AND draw the same
+// random suffix. The hostname would read better but pod names carry dashes,
+// which the id pattern reserves as the separator.
+func defaultIDPrefix() string {
+	var b [3]byte
+	_, _ = rand.Read(b[:]) // never fails: crypto/rand aborts the process instead
+	return strconv.FormatInt(time.Now().Unix(), 36) + hex.EncodeToString(b[:])
+}
+
+// ClampConfidence bounds a confidence to the contract's 0-100. Feed data is
+// third-party input; an out-of-range value would make the whole event
+// invalid and lose the detection.
+func ClampConfidence(c int) int {
+	switch {
+	case c < 0:
+		return 0
+	case c > 100:
+		return 100
+	default:
+		return c
+	}
+}
+
+// Alert is the engine's record of one detection; eventmap turns it into the
+// shared events.DetectionEvent. It is also what GET /alerts returns.
+type Alert struct {
+	ID        string    `json:"id"`
+	Timestamp time.Time `json:"timestamp"`
+	// Summary is the human-readable description and the only field meant
+	// for display.
+	Summary string `json:"summary"`
+	// Domain is the DNS name actually observed (the queried name), or "".
+	// Never rule text, an address, a fingerprint or a decorated string.
+	Domain     string `json:"domain"`
+	ClientIP   string `json:"client_ip"`
+	ClientMAC  string `json:"client_mac,omitempty"`
+	ClientName string `json:"client_name,omitempty"`
+	QueryType  string `json:"query_type"`
+	// MatchedIoC/IoCType are the indicator of the strongest signal: display
+	// and the false-positive suppression key.
+	MatchedIoC  string   `json:"matched_ioc"`
+	IoCType     string   `json:"ioc_type,omitempty"`
+	Severity    string   `json:"severity"`
+	Source      string   `json:"source"`
+	Confidence  int      `json:"confidence,omitempty"`
+	MitreID     string   `json:"mitre_id,omitempty"`
+	MitreName   string   `json:"mitre_name,omitempty"`
+	Threat      string   `json:"threat,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	SignalClass string   `json:"signal_class,omitempty"`
+
+	// Signals is the evidence, one entry per contributing signal with its
+	// own confidence and attested indicator; a composite carries one per
+	// distinct class.
+	Signals []events.Signal `json:"signals,omitempty"`
+	// Target is what enforcement may act on, or nil when the detection
+	// names nothing concrete. Producers set it; nothing downstream may
+	// derive it from Domain or Summary.
+	Target *events.Target `json:"target,omitempty"`
 }
 
 type Engine struct {
@@ -212,13 +279,13 @@ func (e *Engine) poll(ctx context.Context) {
 		}
 
 		if ioc, ok := e.matcher.MatchDomain(domain); ok {
-			e.emitAlert(entry, domain, ioc)
+			e.emitAlert(entry, domain, "", ioc)
 		}
 
 		for _, ans := range entry.Answer {
 			if ans.Type == "A" || ans.Type == "AAAA" {
 				if ioc, ok := e.matcher.MatchIP(ans.Value); ok {
-					e.emitAlert(entry, domain+" (→"+ans.Value+")", ioc)
+					e.emitAlert(entry, domain, ans.Value, ioc)
 				}
 			}
 		}
@@ -229,29 +296,33 @@ func (e *Engine) poll(ctx context.Context) {
 	}
 }
 
-func (e *Engine) emitAlert(entry adguard.QueryLogEntry, domain string, ioc iocmatch.IoC) {
-	id := fmt.Sprintf("DET-%d", alertCounter.Add(1))
+// emitAlert records a feed match on one querylog entry: on the queried name
+// itself when answer is "", otherwise on that A/AAAA answer.
+//
+// The two cases enforce different things. A domain match targets the feed's
+// indicator (the listed parent, not the queried FQDN, which may be one of
+// thousands of subdomains). An answer match targets the ADDRESS: the queried
+// name is often a shared CDN host, and blocking it would cut off every site
+// behind it — so the name stays in Domain, where it is only context.
+func (e *Engine) emitAlert(entry adguard.QueryLogEntry, queried, answer string, ioc iocmatch.IoC) {
 	alert := Alert{
-		ID:          id,
+		ID:          NewID(),
 		Timestamp:   entry.Time,
-		Domain:      domain,
-		ClientIP:    entry.Client,
+		Domain:      queried,
+		ClientIP:    canonicalOrRaw(entry.Client),
 		QueryType:   entry.Question.Type,
 		MatchedIoC:  ioc.Value,
 		IoCType:     ioc.Type,
 		Severity:    ioc.Severity,
 		Source:      ioc.Source,
-		Confidence:  ioc.Confidence,
+		Confidence:  ClampConfidence(ioc.Confidence),
 		MitreID:     ioc.MitreID,
 		MitreName:   ioc.MitreName,
 		Threat:      ioc.Threat,
 		Tags:        ioc.Tags,
 		SignalClass: SignalIoC,
 	}
-	alert.ClientMAC, alert.ClientName = e.resolveClient(entry.Client)
-	if alert.IoCType == "" {
-		alert.IoCType = "domain"
-	}
+	alert.ClientMAC, alert.ClientName = e.resolveClient(alert.ClientIP)
 	if alert.Severity == "" {
 		alert.Severity = "high"
 	}
@@ -259,13 +330,57 @@ func (e *Engine) emitAlert(entry adguard.QueryLogEntry, domain string, ioc iocma
 		alert.Source = "local"
 	}
 
+	if answer == "" {
+		alert.IoCType = events.IndicatorDomain
+		if d, ok := events.CanonicalDomain(ioc.Value); ok {
+			alert.MatchedIoC = d
+			alert.Target = &events.Target{Type: events.TargetDomain, Value: d}
+		}
+		alert.Summary = fmt.Sprintf("DNS query for %s matches %s domain indicator %s",
+			queried, alert.Source, alert.MatchedIoC)
+	} else {
+		// MatchIP returns the feed entry, which is a CIDR when the address
+		// matched a listed range: the feed attests the range, the target is
+		// the address that was actually answered.
+		alert.IoCType = events.IndicatorIP
+		if strings.Contains(ioc.Value, "/") {
+			alert.IoCType = events.IndicatorCIDR
+		}
+		addr := canonicalOrRaw(answer)
+		if _, ok := events.CanonicalIP(addr); ok {
+			alert.Target = &events.Target{Type: events.TargetIP, Value: addr}
+		}
+		alert.Summary = fmt.Sprintf("DNS answer %s for %s matches %s %s indicator %s",
+			addr, queried, alert.Source, alert.IoCType, ioc.Value)
+	}
+	if ioc.Threat != "" {
+		alert.Summary += " (" + ioc.Threat + ")"
+	}
+	alert.Signals = []events.Signal{{
+		Class:         SignalIoC,
+		Confidence:    alert.Confidence,
+		Indicator:     alert.MatchedIoC,
+		IndicatorType: alert.IoCType,
+		Source:        alert.Source,
+	}}
+
 	e.addAlert(alert)
 	alertsGenerated.WithLabelValues(alert.Severity).Inc()
 	slog.Warn("threat detected",
-		"id", id, "domain", domain, "client", entry.Client,
+		"id", alert.ID, "domain", queried, "answer", answer, "client", entry.Client,
 		"matched_ioc", ioc.Value, "severity", alert.Severity,
 		"mitre", ioc.MitreID,
 	)
+}
+
+// canonicalOrRaw returns the canonical form of an address, or the input
+// unchanged when it does not parse (the event will then fail validation and
+// be reported, rather than silently carry a guessed address).
+func canonicalOrRaw(ip string) string {
+	if c, ok := events.CanonicalIP(ip); ok {
+		return c
+	}
+	return ip
 }
 
 // Ingest routes an externally-built alert (unified sensor events from
@@ -273,7 +388,7 @@ func (e *Engine) emitAlert(entry adguard.QueryLogEntry, domain string, ioc iocma
 // ring buffer, metrics, and the OnAlert fan-out.
 func (e *Engine) Ingest(a Alert) {
 	if a.ID == "" {
-		a.ID = fmt.Sprintf("DET-%d", alertCounter.Add(1))
+		a.ID = NewID()
 	}
 	if a.Severity == "" {
 		a.Severity = "medium"
