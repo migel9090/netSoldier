@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/ioc"
+	"github.com/migel9090/netSoldier/libs/indicator"
 )
 
 // csvHeader is the schema contract with the Vector aggregator's `ioc` file
@@ -35,6 +36,9 @@ func WriteCSV(w io.Writer, indicators []ioc.Indicator, types ...string) error {
 		if ind.Type == ioc.TypeIP && net.ParseIP(ind.Value) == nil {
 			continue
 		}
+		if !exportable("csv", ind) {
+			continue
+		}
 		kept = append(kept, ind)
 	}
 	sort.Slice(kept, func(i, j int) bool { return kept[i].Value < kept[j].Value })
@@ -44,8 +48,13 @@ func WriteCSV(w io.Writer, indicators []ioc.Indicator, types ...string) error {
 		return err
 	}
 	for _, ind := range kept {
+		// encoding/csv quotes separators and line breaks; Text removes
+		// control characters as well, because a quoted newline is legal CSV
+		// that a line-oriented consumer would still split.
 		if err := cw.Write([]string{
-			ind.Value, ind.Type, ind.Source, ind.Threat,
+			ind.Value, ind.Type,
+			indicator.Text(ind.Source, indicator.MaxSourceLen*4),
+			indicator.Text(ind.Threat, indicator.MaxTextLen),
 			strconv.Itoa(ind.Confidence),
 		}); err != nil {
 			return err

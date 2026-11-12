@@ -11,16 +11,27 @@ import (
 
 // WriteAdGuard writes domain indicators as an AdGuard-compatible filter list.
 // Format: ||domain^ (blocks domain and all subdomains).
+//
+// A rule is raw filter syntax, so only a value that passes domain validation
+// in canonical form — letters, digits, hyphens and dots — is written. The
+// old exporter turned "*.*.*" into "||*.*^" and would have passed
+// "evil.example^$dnsrewrite=…" straight into the filter engine.
 func WriteAdGuard(w io.Writer, indicators []ioc.Indicator) {
-	sort.Slice(indicators, func(i, j int) bool {
-		return indicators[i].Value < indicators[j].Value
+	kept := indicators[:0:0]
+	for _, ind := range indicators {
+		if ind.Type == ioc.TypeDomain && exportable("adguard", ind) {
+			kept = append(kept, ind)
+		}
+	}
+	sort.Slice(kept, func(i, j int) bool {
+		return kept[i].Value < kept[j].Value
 	})
 
 	fmt.Fprintln(w, "! Title: netSoldier Threat Intel")
-	fmt.Fprintf(w, "! Entries: %d\n", len(indicators))
+	fmt.Fprintf(w, "! Entries: %d\n", len(kept))
 	fmt.Fprintln(w, "! Homepage: https://github.com/migel9090/netSoldier")
 	fmt.Fprintln(w, "!")
-	for _, ind := range indicators {
+	for _, ind := range kept {
 		fmt.Fprintf(w, "||%s^\n", ind.Value)
 	}
 }

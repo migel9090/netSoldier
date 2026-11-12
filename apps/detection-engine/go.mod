@@ -5,6 +5,7 @@ go 1.27.4
 require (
 	github.com/gopacket/gopacket v1.7.7
 	github.com/migel9090/netSoldier/libs/events v0.0.0
+	github.com/migel9090/netSoldier/libs/indicator v0.0.0
 	github.com/prometheus/client_golang v1.24.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0
 	go.opentelemetry.io/otel v1.47.0
@@ -42,3 +43,5 @@ require (
 )
 
 replace github.com/migel9090/netSoldier/libs/events v0.0.0 => ../../libs/events
+
+replace github.com/migel9090/netSoldier/libs/indicator v0.0.0 => ../../libs/indicator

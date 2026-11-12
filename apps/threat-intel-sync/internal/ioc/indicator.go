@@ -3,19 +3,22 @@ package ioc
 import (
 	"strings"
 	"time"
+
+	"github.com/migel9090/netSoldier/libs/indicator"
 )
 
-// Normalized IoC type constants.
+// Normalized IoC type constants. They are the shared library's names, so
+// the JSON export and the detection-engine's matcher cannot disagree.
 const (
-	TypeDomain     = "domain"
-	TypeIP         = "ip"
-	TypeURL        = "url"
-	TypeMD5        = "md5"
-	TypeSHA256     = "sha256"
-	TypeJA3        = "ja3"
-	TypeTLSFP      = "tlsfp" // TLS client fingerprint (JA4-format)
-	TypeCertSHA1   = "cert-sha1"
-	TypeCertSHA256 = "cert-sha256"
+	TypeDomain     = indicator.TypeDomain
+	TypeIP         = indicator.TypeIP
+	TypeURL        = indicator.TypeURL
+	TypeMD5        = indicator.TypeMD5
+	TypeSHA256     = indicator.TypeSHA256
+	TypeJA3        = indicator.TypeJA3
+	TypeTLSFP      = indicator.TypeTLSFP // TLS client fingerprint (JA4-format)
+	TypeCertSHA1   = indicator.TypeCertSHA1
+	TypeCertSHA256 = indicator.TypeCertSHA256
 )
 
 // Indicator is the common representation of an indicator of compromise
@@ -26,10 +29,16 @@ type Indicator struct {
 	Source     string
 	Threat     string
 	Confidence int
-	FirstSeen  time.Time
-	LastSeen   time.Time
-	Tags       []string
-	Reference  string
+	// FirstSeen and LastSeen are the feed's own claims about the indicator
+	// and are carried through as metadata only; they say nothing about
+	// whether the feed still lists it.
+	FirstSeen time.Time
+	LastSeen  time.Time
+	Tags      []string
+	Reference string
+	// LastAsserted is stamped by the store on every upsert: the last time a
+	// feed answered with this indicator in it. Expiry is measured from here.
+	LastAsserted time.Time `json:",omitzero"`
 }
 
 // Key returns the deduplication key for this indicator.
