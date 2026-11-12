@@ -12,6 +12,7 @@ WORKDIR /src
 
 # Module graph first so dependency download caches independently of sources.
 COPY libs/events/ libs/events/
+COPY libs/indicator/ libs/indicator/
 COPY apps/detection-engine/go.mod apps/detection-engine/go.sum apps/detection-engine/
 WORKDIR /src/apps/detection-engine
 RUN go mod download
