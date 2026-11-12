@@ -191,23 +191,29 @@ func TestUpsertAllNormalizesValues(t *testing.T) {
 }
 
 // TestPruneBefore covers the other half of the "indicators never expire"
-// problem: a domain a feed has withdrawn (false positive, or a lapsed
+// problem: a domain withdrawn by every feed (false positive, or a lapsed
 // registration taken over by a legitimate owner) used to keep matching
-// forever because the store only ever grew.
+// forever because the store only ever grew. Expiry is measured from when a
+// feed last asserted the indicator — the feed's own dates do not count, so
+// an undated row is no longer kept forever (TI-7).
 func TestPruneBefore(t *testing.T) {
-	s := NewStore()
 	now := time.Now().UTC()
+	clock := now.Add(-60 * 24 * time.Hour)
+	s := NewStore(WithClock(func() time.Time { return clock }))
 
 	s.UpsertAll([]Indicator{
-		{Type: TypeDomain, Value: "fresh.example", Source: "feed", Confidence: 90, LastSeen: now},
-		{Type: TypeDomain, Value: "stale.example", Source: "feed", Confidence: 90,
-			LastSeen: now.Add(-60 * 24 * time.Hour)},
+		{Type: TypeDomain, Value: "stale.example", Source: "feed", Confidence: 90, LastSeen: now},
 		{Type: TypeDomain, Value: "undated.example", Source: "feed", Confidence: 90},
+	})
+	clock = now
+	s.UpsertAll([]Indicator{
+		{Type: TypeDomain, Value: "fresh.example", Source: "feed", Confidence: 90,
+			LastSeen: now.Add(-400 * 24 * time.Hour)},
 	})
 
 	removed := s.PruneBefore(now.Add(-30 * 24 * time.Hour))
-	if removed != 1 {
-		t.Fatalf("removed = %d, want 1", removed)
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
 	}
 
 	remaining := map[string]bool{}
@@ -215,13 +221,10 @@ func TestPruneBefore(t *testing.T) {
 		remaining[ind.Value] = true
 	}
 	if !remaining["fresh.example"] {
-		t.Error("a recently seen indicator must survive pruning")
+		t.Error("an indicator asserted just now must survive, whatever its feed-supplied last_seen")
 	}
-	if remaining["stale.example"] {
-		t.Error("the stale indicator should have been pruned")
-	}
-	if !remaining["undated.example"] {
-		t.Error("an undated indicator should be kept rather than guessed at")
+	if remaining["stale.example"] || remaining["undated.example"] {
+		t.Errorf("indicators last asserted 60 days ago should have been pruned, got %v", remaining)
 	}
 }
 
@@ -232,7 +235,7 @@ func TestValidateIndicatorTypes(t *testing.T) {
 		{Type: TypeIP, Value: "192.0.2.0/24"},
 		{Type: TypeURL, Value: "http://evil.example/payload"},
 		{Type: TypeMD5, Value: "D41D8CD98F00B204E9800998ECF8427E"},
-		{Type: TypeSHA256, Value: "abc123"},
+		{Type: TypeSHA256, Value: "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"},
 		{Type: TypeTLSFP, Value: "t13d1516h2_8daaf6152771_b186095e22b6"},
 	}
 	for _, i := range ok {
@@ -246,6 +249,8 @@ func TestValidateIndicatorTypes(t *testing.T) {
 		{Type: TypeIP, Value: "not-an-ip"},
 		{Type: TypeIP, Value: "0.0.0.0"},
 		{Type: "nope", Value: "x"},
+		{Type: TypeSHA256, Value: "abc123"}, // not 64 hex digits (TI-2)
+		{Type: TypeMD5, Value: "not-a-hash;rm"},
 		{Type: TypeDomain, Value: "evil.example", Confidence: 101},
 		{Type: TypeDomain, Value: "evil.example", Confidence: -1},
 	}

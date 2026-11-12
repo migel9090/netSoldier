@@ -15,7 +15,12 @@ import (
 // WriteSuricataDataset writes indicators as a Suricata dataset file, one
 // value per line. Suricata stores string-type datasets base64-encoded;
 // ip, md5 and sha256 datasets use the raw value.
+//
+// A raw dataset line is parsed by Suricata as-is, and one unparsable line
+// fails the whole dataset load, so only values that pass validation in
+// canonical form are written.
 func WriteSuricataDataset(w io.Writer, indicators []ioc.Indicator, base64Encode bool) {
+	indicators = suricataSafe(indicators)
 	sort.Slice(indicators, func(i, j int) bool {
 		return indicators[i].Value < indicators[j].Value
 	})
@@ -32,6 +37,7 @@ func WriteSuricataDataset(w io.Writer, indicators []ioc.Indicator, base64Encode 
 // (format ndjson, one JSON object per line). The match value is stored
 // under valueKey; the remaining fields enrich the alert via context_key.
 func WriteSuricataJSONDataset(w io.Writer, indicators []ioc.Indicator, valueKey string) {
+	indicators = suricataSafe(indicators)
 	sort.Slice(indicators, func(i, j int) bool {
 		return indicators[i].Value < indicators[j].Value
 	})
@@ -62,13 +68,29 @@ func HandleSuricataDataset(store *ioc.Store, base64Encode bool, types ...string)
 	}
 }
 
+// suricataSafe drops indicators that fail validation. The never-empty seed
+// entries carry no type (every stored indicator has one) and are reserved
+// values, so they pass through.
+func suricataSafe(indicators []ioc.Indicator) []ioc.Indicator {
+	kept := indicators[:0:0]
+	for _, ind := range indicators {
+		if (ind.Type == "" && ind.Source == suricataSeedSource) || exportable("suricata", ind) {
+			kept = append(kept, ind)
+		}
+	}
+	return kept
+}
+
+// suricataSeedSource marks the sentinel entries below.
+const suricataSeedSource = "netsoldier-seed"
+
 // suricataSeedEntries guarantee json datasets are never empty: Suricata
 // fails to load a rule whose ndjson dataset file has no valid entries.
 // The sentinel values cannot occur in real traffic (.invalid TLD,
 // TEST-NET-1 address).
 var suricataSeedEntries = map[string]ioc.Indicator{
-	"domain": {Value: "sentinel.netsoldier.invalid", Source: "netsoldier-seed"},
-	"ip":     {Value: "192.0.2.254", Source: "netsoldier-seed"},
+	"domain": {Value: "sentinel.netsoldier.invalid", Source: suricataSeedSource},
+	"ip":     {Value: "192.0.2.254", Source: suricataSeedSource},
 }
 
 // HandleSuricataJSONDataset returns an HTTP handler serving indicators of

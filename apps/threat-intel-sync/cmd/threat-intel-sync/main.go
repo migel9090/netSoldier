@@ -7,113 +7,63 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/abusech"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/export"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/ioc"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/misp"
-	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/spamhaus"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
-
-type source struct {
-	name  string
-	fetch func(context.Context) ([]ioc.Indicator, error)
-}
-
-var (
-	// This service had no /metrics endpoint at all, which meant feed health
-	// was unobservable: a sync that had been failing for weeks looked
-	// exactly like a quiet network. Stale threat intel is a silent
-	// detection gap, so it needs to be a number someone can alert on.
-	syncLastSuccess = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: "threat_intel",
-		Name:      "source_last_success_timestamp_seconds",
-		Help:      "Unix timestamp of the last successful fetch per source.",
-	}, []string{"source"})
-	syncFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "threat_intel",
-		Name:      "source_failures_total",
-		Help:      "Feed fetch failures per source.",
-	}, []string{"source"})
-	indicatorsFetched = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: "threat_intel",
-		Name:      "source_indicators",
-		Help:      "Indicators accepted from the most recent successful fetch per source.",
-	}, []string{"source"})
-	indicatorsRejected = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "threat_intel",
-		Name:      "source_indicators_rejected_total",
-		Help:      "Indicators dropped as unsafe or malformed per source.",
-	}, []string{"source"})
-	storeSize = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "threat_intel",
-		Name:      "store_indicators",
-		Help:      "Total unique indicators currently in the store.",
-	})
-	indicatorsPruned = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "threat_intel",
-		Name:      "indicators_pruned_total",
-		Help:      "Indicators removed because no feed has re-asserted them.",
-	})
-	cycleLastComplete = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "threat_intel",
-		Name:      "sync_cycle_last_complete_timestamp_seconds",
-		Help:      "Unix timestamp of the last completed sync cycle.",
-	})
-)
-
-func init() {
-	prometheus.MustRegister(syncLastSuccess, syncFailures, indicatorsFetched,
-		indicatorsRejected, storeSize, indicatorsPruned, cycleLastComplete)
-}
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
+	cfg, err := loadConfig(os.Getenv)
+	if err != nil {
+		slog.Error("invalid configuration, refusing to start", "error", err)
+		os.Exit(1)
+	}
+
+	store, err := openStore(cfg)
+	if err != nil {
+		slog.Error("indicator store unavailable, refusing to start", "path", cfg.dbPath, "error", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	initSourceMetrics(cfg, store.FeedSuccess())
+	storeCapacity.Set(float64(cfg.storeMax))
+	storeSize.Set(float64(store.Len()))
+
+	ready := newReadiness(store)
+	if store.Len() > 0 {
+		// The last good set is served straight away; feeds refresh it as
+		// they answer. A restart during a feed outage no longer empties
+		// every consumer's list.
+		ready.trust()
+		slog.Info("serving persisted indicator set", "indicators", store.Len())
+	}
+	if len(cfg.sources) == 0 {
+		slog.Error("no sources enabled")
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	store := ioc.NewStore()
-	sources := configureSources()
-
-	syncInterval := parseDuration(envOr("SYNC_INTERVAL", "6h"), 6*time.Hour)
-	// Indicators a feed has stopped asserting age out. Default 30 days,
-	// comfortably more than several sync intervals, so a transient feed
-	// outage never drops live intel.
-	indicatorTTL := parseDuration(envOr("INDICATOR_TTL", "720h"), 30*24*time.Hour)
-	go runSyncLoop(ctx, store, sources, syncInterval, indicatorTTL)
-
-	addr := envOr("LISTEN_ADDR", ":8083")
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("GET /export/adguard", export.HandleAdGuard(store))
-	mux.HandleFunc("GET /export/suricata/domains", export.HandleSuricataDataset(store, true, ioc.TypeDomain))
-	mux.HandleFunc("GET /export/suricata/ips", export.HandleSuricataDataset(store, false, ioc.TypeIP))
-	mux.HandleFunc("GET /export/suricata/domains.json", export.HandleSuricataJSONDataset(store, "domain", ioc.TypeDomain))
-	mux.HandleFunc("GET /export/suricata/ips.json", export.HandleSuricataJSONDataset(store, "ip", ioc.TypeIP))
-	mux.HandleFunc("GET /export/suricata/md5", export.HandleSuricataDataset(store, false, ioc.TypeMD5))
-	mux.HandleFunc("GET /export/suricata/sha256", export.HandleSuricataDataset(store, false, ioc.TypeSHA256))
-	mux.HandleFunc("GET /export/zeek/intel.dat", export.HandleZeekIntel(store))
-	mux.HandleFunc("GET /export/json", export.HandleJSON(store))
-	mux.HandleFunc("GET /export/csv", export.HandleCSV(store, ioc.TypeDomain, ioc.TypeIP))
-	mux.Handle("GET /metrics", promhttp.Handler())
+	go newScheduler(cfg, store, ready).run(ctx)
 
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
+		Addr:         cfg.listenAddr,
+		Handler:      routes(store, ready),
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 
 	go func() {
-		slog.Info("starting threat-intel-sync", "addr", addr, "sync_interval", syncInterval)
+		slog.Info("starting threat-intel-sync", "addr", cfg.listenAddr, "sync_interval", cfg.syncInterval,
+			"sources", cfg.sourceNames(), "persistent", store.Persistent())
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("server failed", "error", err)
 			os.Exit(1)
@@ -130,147 +80,89 @@ func main() {
 	}
 }
 
-func configureSources() []source {
-	var sources []source
-
-	if mispURL := os.Getenv("MISP_URL"); mispURL != "" {
-		key := envOr("MISP_API_KEY", "")
-		if key == "" {
-			slog.Error("MISP_URL set but MISP_API_KEY is empty")
-			os.Exit(1)
-		}
-		client := misp.NewClient(mispURL, key)
-		sources = append(sources, source{
-			name: "misp",
-			fetch: func(ctx context.Context) ([]ioc.Indicator, error) {
-				attrs, err := client.FetchAllAttributes(ctx, misp.SearchRequest{
-					Types: []string{
-						misp.TypeDomain, misp.TypeHostname,
-						misp.TypeIPDst, misp.TypeIPSrc,
-						misp.TypeURL, misp.TypeMD5, misp.TypeSHA256, misp.TypeJA3,
-						misp.TypeX509SHA1, misp.TypeX509SHA256,
-					},
-					Published: true,
-					Timestamp: envOr("MISP_LOOKBACK", "7d"),
-					ToIDs:     true,
-				})
-				if err != nil {
-					return nil, err
-				}
-				return mispToIndicators(attrs), nil
-			},
-		})
-		slog.Info("source configured", "source", "misp", "url", mispURL)
+// routes serves the probes, the metrics and every export, the exports
+// behind the readiness gate.
+func routes(store *ioc.Store, ready *readiness) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.HandleFunc("GET /readyz", handleReadyz(ready, store))
+	for path, h := range map[string]http.HandlerFunc{
+		"/export/adguard":               export.HandleAdGuard(store),
+		"/export/suricata/domains":      export.HandleSuricataDataset(store, true, ioc.TypeDomain),
+		"/export/suricata/ips":          export.HandleSuricataDataset(store, false, ioc.TypeIP),
+		"/export/suricata/domains.json": export.HandleSuricataJSONDataset(store, "domain", ioc.TypeDomain),
+		"/export/suricata/ips.json":     export.HandleSuricataJSONDataset(store, "ip", ioc.TypeIP),
+		"/export/suricata/md5":          export.HandleSuricataDataset(store, false, ioc.TypeMD5),
+		"/export/suricata/sha256":       export.HandleSuricataDataset(store, false, ioc.TypeSHA256),
+		"/export/zeek/intel.dat":        export.HandleZeekIntel(store),
+		"/export/json":                  export.HandleJSON(store),
+		"/export/csv":                   export.HandleCSV(store, ioc.TypeDomain, ioc.TypeIP),
+	} {
+		mux.HandleFunc("GET "+path, requireReady(ready, h))
 	}
-
-	// abuse.ch feeds (ThreatFox / URLhaus / Feodo) dropped their CC0
-	// dedication in 2025; the current terms of use restrict free access to
-	// non-commercial use (commercial use needs a paid Spamhaus subscription).
-	// They are ON by default for the project's primary home/non-commercial
-	// use, and disabled when COMMERCIAL_MODE=true so a commercial deployment
-	// ships clean. See COMPLIANCE.md.
-	if commercialModeEnabled() {
-		slog.Info("COMMERCIAL_MODE on: abuse.ch feeds (ThreatFox/URLhaus/Feodo) disabled (non-commercial terms)")
-	} else {
-		slog.Warn("abuse.ch feeds enabled (ThreatFox/URLhaus/Feodo): non-commercial use only — set COMMERCIAL_MODE=true to disable for commercial deployments")
-
-		tfClient := abusech.NewThreatFoxClient()
-		tfDays := parseIntOr(envOr("THREATFOX_DAYS", "7"), 7)
-		sources = append(sources, source{
-			name: "threatfox",
-			fetch: func(ctx context.Context) ([]ioc.Indicator, error) {
-				return tfClient.Fetch(ctx, tfDays)
-			},
-		})
-
-		uhClient := abusech.NewURLhausClient()
-		uhLimit := parseIntOr(envOr("URLHAUS_LIMIT", "1000"), 1000)
-		sources = append(sources, source{
-			name: "urlhaus",
-			fetch: func(ctx context.Context) ([]ioc.Indicator, error) {
-				return uhClient.Fetch(ctx, uhLimit)
-			},
-		})
-
-		feClient := abusech.NewFeodoClient()
-		sources = append(sources, source{
-			name: "feodo",
-			fetch: func(ctx context.Context) ([]ioc.Indicator, error) {
-				return feClient.Fetch(ctx)
-			},
-		})
-	}
-
-	// Spamhaus DROP is free for commercial use too (attribution required,
-	// see COMPLIANCE.md), so it stays enabled regardless of COMMERCIAL_MODE.
-	spClient := spamhaus.NewClient()
-	sources = append(sources, source{
-		name: "spamhaus",
-		fetch: func(ctx context.Context) ([]ioc.Indicator, error) {
-			return spClient.FetchAll(ctx)
-		},
-	})
-
-	slog.Info("sources ready", "count", len(sources))
-	return sources
+	mux.Handle("GET /metrics", promhttp.Handler())
+	return mux
 }
 
-func runSyncLoop(ctx context.Context, store *ioc.Store, sources []source,
-	interval, indicatorTTL time.Duration) {
-	slog.Info("sync loop started", "interval", interval, "sources", len(sources),
-		"indicator_ttl", indicatorTTL)
-	syncOnce(ctx, store, sources, indicatorTTL)
+// openStore opens the durable store when INDICATOR_DB_PATH is set, and drops
+// what disabled sources asserted: a persisted set must not keep serving a
+// feed that has since been switched off (COMMERCIAL_MODE in particular).
+func openStore(cfg config) (*ioc.Store, error) {
+	opts := []ioc.Option{ioc.WithMaxIndicators(cfg.storeMax)}
+	if cfg.dbPath == "" {
+		slog.Warn("INDICATOR_DB_PATH not set: indicator store is memory-only; after a restart " +
+			"exports answer 503 until a feed has answered")
+		storePersistent.Set(0)
+		return ioc.NewStore(opts...), nil
+	}
+	store, ls, err := ioc.OpenStore(cfg.dbPath, opts...)
+	if err != nil {
+		return nil, err
+	}
+	storePersistent.Set(1)
+	removed := store.RetainFeeds(cfg.sourceNames())
+	slog.Info("indicator database loaded", "path", cfg.dbPath, "assertions", ls.Loaded,
+		"invalid_deleted", ls.Invalid, "over_cap_deleted", ls.Dropped,
+		"removed_from_disabled_sources", removed, "indicators", store.Len())
+	return store, nil
+}
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
+// requireReady answers 503 until there is a set worth serving. Every
+// consumer (the Zeek and Vector sidecars with curl -f, the Suricata updater,
+// the detection-engine's sync) keeps its previous list on a non-200, so
+// "not yet" no longer reads as "the list is empty".
+func requireReady(r *readiness, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		if ok, reason := r.Ready(); !ok {
+			w.Header().Set("Retry-After", "60")
+			http.Error(w, "threat intel not ready: "+reason, http.StatusServiceUnavailable)
 			return
-		case <-ticker.C:
-			syncOnce(ctx, store, sources, indicatorTTL)
 		}
+		next(w, req)
 	}
 }
 
-func syncOnce(ctx context.Context, store *ioc.Store, sources []source, indicatorTTL time.Duration) {
-	slog.Info("sync cycle starting")
-	anySucceeded := false
+// handleHealthz is the liveness probe: the process is up and serving HTTP.
+// It deliberately says nothing about the intel; that is /readyz.
+func handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
 
-	for _, src := range sources {
-		indicators, err := src.fetch(ctx)
-		if err != nil {
-			syncFailures.WithLabelValues(src.name).Inc()
-			slog.Error("source failed", "source", src.name, "error", err)
-			continue
+// handleReadyz is the readiness probe: 200 once exports are served, 503
+// before.
+func handleReadyz(r *readiness, store *ioc.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		ok, reason := r.Ready()
+		body := map[string]any{"status": "ready", "indicators": store.Len()}
+		w.Header().Set("Content-Type", "application/json")
+		if !ok {
+			body["status"] = "not ready"
+			body["reason"] = reason
+			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-
-		accepted, rejected := store.UpsertAll(indicators)
-		anySucceeded = true
-		syncLastSuccess.WithLabelValues(src.name).SetToCurrentTime()
-		indicatorsFetched.WithLabelValues(src.name).Set(float64(accepted))
-		if rejected > 0 {
-			indicatorsRejected.WithLabelValues(src.name).Add(float64(rejected))
-			slog.Warn("source returned unusable indicators",
-				"source", src.name, "rejected", rejected, "accepted", accepted)
-		}
-		slog.Info("source synced", "source", src.name, "fetched", len(indicators),
-			"accepted", accepted, "rejected", rejected, "store_total", store.Len())
+		json.NewEncoder(w).Encode(body)
 	}
-
-	// Only expire indicators after at least one feed answered. Pruning on a
-	// cycle where everything failed would quietly empty the store during an
-	// outage — exactly when detection coverage matters most.
-	if anySucceeded && indicatorTTL > 0 {
-		if n := store.PruneBefore(time.Now().UTC().Add(-indicatorTTL)); n > 0 {
-			indicatorsPruned.Add(float64(n))
-			slog.Info("pruned stale indicators", "removed", n, "ttl", indicatorTTL)
-		}
-	}
-
-	storeSize.Set(float64(store.Len()))
-	cycleLastComplete.SetToCurrentTime()
-	slog.Info("sync cycle complete", "store_total", store.Len(), "any_source_succeeded", anySucceeded)
 }
 
 func mispToIndicators(attrs []misp.Attribute) []ioc.Indicator {
@@ -317,43 +209,4 @@ func mapMISPType(t string) string {
 	default:
 		return ""
 	}
-}
-
-func handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-// commercialModeEnabled reports whether the deployment must exclude data
-// sources whose terms forbid commercial use (see COMPLIANCE.md).
-func commercialModeEnabled() bool {
-	switch strings.ToLower(os.Getenv("COMMERCIAL_MODE")) {
-	case "1", "true", "yes":
-		return true
-	default:
-		return false
-	}
-}
-
-func parseDuration(s string, fallback time.Duration) time.Duration {
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		return fallback
-	}
-	return d
-}
-
-func parseIntOr(s string, fallback int) int {
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		return fallback
-	}
-	return n
 }

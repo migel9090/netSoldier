@@ -4,41 +4,53 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/feedhttp"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/ioc"
 )
+
+// URLhausMaxLimit is the largest "limit" the recent-URLs endpoint accepts,
+// per https://urlhaus-api.abuse.ch/.
+const URLhausMaxLimit = 1000
 
 // URLhausClient fetches malicious URLs from URLhaus (abuse.ch).
 type URLhausClient struct {
 	apiURL string
 	http   *http.Client
+	opts   options
 }
 
-func NewURLhausClient() *URLhausClient {
+func NewURLhausClient(opts ...Option) *URLhausClient {
 	return &URLhausClient{
 		apiURL: "https://urlhaus-api.abuse.ch/v1/urls/recent/",
 		http:   &http.Client{Timeout: 60 * time.Second},
+		opts:   buildOptions(opts),
 	}
 }
 
 // Fetch retrieves the most recent malicious URLs (up to limit).
+//
+// The documented call is an HTTP GET with the limit as a path segment
+// (/v1/urls/recent/limit/<n>/); the client used to POST a form, which the
+// API answers with query_status "http_get_expected".
 func (c *URLhausClient) Fetch(ctx context.Context, limit int) ([]ioc.Indicator, error) {
-	if limit <= 0 {
-		limit = 1000
+	if limit <= 0 || limit > URLhausMaxLimit {
+		limit = URLhausMaxLimit
 	}
 
-	form := url.Values{"limit": {strconv.Itoa(limit)}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiURL, strings.NewReader(form.Encode()))
+	target := strings.TrimRight(c.apiURL, "/") + "/limit/" + strconv.Itoa(limit) + "/"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	c.opts.authorize(req)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -47,40 +59,53 @@ func (c *URLhausClient) Fetch(ctx context.Context, limit int) ([]ioc.Indicator, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("URLhaus %d: %s", resp.StatusCode, body)
+		return nil, feedhttp.StatusError("URLhaus", resp)
 	}
 
-	var result urlhausResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
-	if result.QueryStatus != "ok" {
-		return nil, fmt.Errorf("URLhaus query_status: %s", result.QueryStatus)
-	}
-
-	indicators := make([]ioc.Indicator, 0, len(result.URLs))
-	for _, e := range result.URLs {
-		indicators = append(indicators, ioc.Indicator{
-			Type:      ioc.TypeURL,
-			Value:     e.URL,
-			Source:    "urlhaus",
-			Threat:    e.Threat,
-			FirstSeen: parseAbusechTime(e.DateAdded),
-			Tags:      e.Tags,
-			Reference: e.URLhausLink,
-		})
-
-		if host := extractHost(e.URL); host != "" && !isIPAddress(host) {
+	var indicators []ioc.Indicator
+	status, rows, malformed, err := decodeEnvelope(feedhttp.LimitBody(resp.Body, c.opts.maxBytes), "urls",
+		func(dec *json.Decoder) error {
+			var e urlhausEntry
+			if err := dec.Decode(&e); err != nil {
+				return err
+			}
+			added := parseAbusechTime(e.DateAdded)
 			indicators = append(indicators, ioc.Indicator{
-				Type:      ioc.TypeDomain,
-				Value:     host,
+				Type:      ioc.TypeURL,
+				Value:     e.URL,
 				Source:    "urlhaus",
 				Threat:    e.Threat,
-				FirstSeen: parseAbusechTime(e.DateAdded),
+				FirstSeen: added,
 				Tags:      e.Tags,
+				Reference: e.Reference,
 			})
-		}
+			if host := extractHost(e.URL); host != "" && !isIPAddress(host) {
+				indicators = append(indicators, ioc.Indicator{
+					Type:      ioc.TypeDomain,
+					Value:     host,
+					Source:    "urlhaus",
+					Threat:    e.Threat,
+					FirstSeen: added,
+					Tags:      e.Tags,
+				})
+			}
+			return nil
+		})
+	if err != nil {
+		return indicators, fmt.Errorf("decode after %d rows: %w", rows, err)
+	}
+	switch status {
+	case "ok":
+	case "no_results", "no_result":
+		return nil, nil
+	default:
+		return indicators, fmt.Errorf("URLhaus query_status: %q", status)
+	}
+	if malformed > 0 && len(indicators) == 0 {
+		return nil, fmt.Errorf("URLhaus: all %d rows malformed", malformed)
+	}
+	if malformed > 0 {
+		slog.Warn("urlhaus: skipped malformed rows", "malformed", malformed, "rows", rows)
 	}
 	return indicators, nil
 }
@@ -95,27 +120,18 @@ func extractHost(rawURL string) string {
 }
 
 func isIPAddress(s string) bool {
-	for _, c := range s {
-		if c != '.' && (c < '0' || c > '9') && c != ':' {
-			return false
-		}
-	}
-	return len(s) > 0
+	_, err := netip.ParseAddr(s)
+	return err == nil
 }
 
-type urlhausResponse struct {
-	QueryStatus string         `json:"query_status"`
-	URLs        []urlhausEntry `json:"urls"`
-}
-
+// urlhausEntry mirrors one recent-URLs row as documented at
+// https://urlhaus-api.abuse.ch/ ("date_added", "urlhaus_reference"; the
+// client used to read "dateadded" and "urlhaus_link", which this endpoint
+// does not send). Only the fields used are declared.
 type urlhausEntry struct {
-	ID          string   `json:"id"`
-	DateAdded   string   `json:"dateadded"`
-	URL         string   `json:"url"`
-	URLStatus   string   `json:"url_status"`
-	Threat      string   `json:"threat"`
-	Tags        []string `json:"tags"`
-	URLhausLink string   `json:"urlhaus_link"`
-	Host        string   `json:"host"`
-	Reporter    string   `json:"reporter"`
+	DateAdded string   `json:"date_added"`
+	URL       string   `json:"url"`
+	Threat    string   `json:"threat"`
+	Tags      []string `json:"tags"`
+	Reference string   `json:"urlhaus_reference"`
 }

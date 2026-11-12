@@ -15,7 +15,8 @@ func TestWriteCSV(t *testing.T) {
 		{Type: ioc.TypeIP, Value: "203.0.113.7", Source: "spamhaus-drop", Confidence: 75},
 		{Type: ioc.TypeIP, Value: "198.51.100.0/24", Source: "spamhaus-drop"}, // CIDR: dropped
 		{Type: ioc.TypeJA3, Value: "db8a6f4f9f8195ea17db377175d2cb08"},        // unrequested type
-		{Type: ioc.TypeDomain, Value: `quoted,"tricky".example.com`, Source: "misp"},
+		{Type: ioc.TypeDomain, Value: "tricky.example.com", Source: "misp", Threat: `quoted, "tricky"` + "\nsecond line"},
+		{Type: ioc.TypeDomain, Value: `quoted,"tricky".example.com`, Source: "misp"}, // invalid: dropped
 	}
 
 	var buf bytes.Buffer
@@ -41,8 +42,8 @@ func TestWriteCSV(t *testing.T) {
 	if rows[2][0] != "evil.example.com" || rows[2][3] != "Mozi" || rows[2][4] != "90" {
 		t.Errorf("row[2] = %v", rows[2])
 	}
-	if rows[3][0] != `quoted,"tricky".example.com` {
-		t.Errorf("quoted value survived incorrectly: %v", rows[3])
+	if rows[3][0] != "tricky.example.com" || rows[3][3] != `quoted, "tricky" second line` {
+		t.Errorf("quoted threat survived incorrectly: %v", rows[3])
 	}
 }
 

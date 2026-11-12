@@ -85,12 +85,14 @@ func TestMatchIPNoMatch(t *testing.T) {
 
 func TestMatchIPCIDR(t *testing.T) {
 	m := New()
-	m.Add([]IoC{{Value: "10.0.0.0/24", Type: "ip", Source: "test", Confidence: 70}})
+	// A private range is no longer an acceptable indicator (DE-15), so the
+	// fixture uses a documentation range.
+	m.Add([]IoC{{Value: "198.51.100.0/24", Type: "ip", Source: "test", Confidence: 70}})
 
-	if _, ok := m.MatchIP("10.0.0.42"); !ok {
-		t.Fatal("expected CIDR match for 10.0.0.42")
+	if _, ok := m.MatchIP("198.51.100.42"); !ok {
+		t.Fatal("expected CIDR match for 198.51.100.42")
 	}
-	if _, ok := m.MatchIP("10.0.1.1"); ok {
+	if _, ok := m.MatchIP("198.51.101.1"); ok {
 		t.Fatal("should not match IP outside CIDR")
 	}
 }
@@ -106,12 +108,13 @@ func TestMatchIPWithPort(t *testing.T) {
 
 func TestMatchHash(t *testing.T) {
 	m := New()
-	m.Add([]IoC{{Value: "abc123", Type: "ja3", Source: "test", Confidence: 80}})
+	// A JA3 is an MD5 digest: "abc123" is no longer accepted (DE-15).
+	m.Add([]IoC{{Value: "DB8A6F4F9F8195EA17DB377175D2CB08", Type: "ja3", Source: "test", Confidence: 80}})
 
-	if _, ok := m.MatchHash("abc123"); !ok {
+	if _, ok := m.MatchHash("db8a6f4f9f8195ea17db377175d2cb08"); !ok {
 		t.Fatal("expected hash match")
 	}
-	if _, ok := m.MatchHash("ABC123"); !ok {
+	if _, ok := m.MatchHash("DB8A6F4F9F8195EA17DB377175D2CB08"); !ok {
 		t.Fatal("hash match should be case-insensitive")
 	}
 	if _, ok := m.MatchHash("xyz789"); ok {
@@ -152,7 +155,7 @@ func TestSize(t *testing.T) {
 	m.Add([]IoC{
 		{Value: "evil.com", Type: "domain", Confidence: 80},
 		{Value: "1.2.3.4", Type: "ip", Confidence: 80},
-		{Value: "abc123", Type: "ja3", Confidence: 80},
+		{Value: "db8a6f4f9f8195ea17db377175d2cb08", Type: "ja3", Confidence: 80},
 	})
 	if m.Size() != 3 {
 		t.Fatalf("expected size 3, got %d", m.Size())

@@ -6,5 +6,6 @@ use (
 	./apps/killswitch-controller
 	./apps/threat-intel-sync
 	./libs/events
+	./libs/indicator
 	./tests/e2e
 )
