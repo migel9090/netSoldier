@@ -1,10 +1,10 @@
-# Build context is the repository ROOT for consistency with the other Go
-# images (see the `build-threat-intel-sync` job in .github/workflows/ci.yml and
-# /.dockerignore for what the context carries). This module has no `replace`
-# directive onto libs/events, so unlike detection-engine and
-# killswitch-controller it does not copy that module in — doing so would
-# invalidate this image's dependency layer whenever the shared contract
-# changed, for no reason.
+# Build context is the repository ROOT (see the `build-threat-intel-sync` job
+# in .github/workflows/ci.yml and /.dockerignore for what the context
+# carries). go.mod replaces libs/indicator with the in-tree copy, so that
+# module has to be inside the context or `go mod download` cannot resolve the
+# graph. libs/events is not copied: this service does not use the event
+# contract, and copying it would invalidate the dependency layer whenever the
+# contract changed, for no reason.
 FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS build
 
 ARG TARGETOS
@@ -13,6 +13,7 @@ ARG TARGETARCH
 WORKDIR /src
 
 # Module graph first so dependency download caches independently of sources.
+COPY libs/indicator/ libs/indicator/
 COPY apps/threat-intel-sync/go.mod apps/threat-intel-sync/go.sum apps/threat-intel-sync/
 WORKDIR /src/apps/threat-intel-sync
 RUN go mod download
