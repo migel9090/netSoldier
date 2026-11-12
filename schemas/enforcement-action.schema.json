@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/migel9090/netSoldier/schemas/enforcement-action.schema.json",
+  "title": "netSoldier Enforcement Action",
+  "description": "A killswitch enforcement decision and its lifecycle, as returned by the killswitch-controller API. Version 2.x. Mirrors events.EnforcementAction in libs/events; libs/events/schema_test.go fails when the two drift apart.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "timestamp",
+    "detection_id",
+    "action_type",
+    "state",
+    "target_mac",
+    "policy_rule",
+    "auto_approved"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^2\\.[0-9]+$"
+    },
+    "id": {
+      "type": "string",
+      "description": "Action id, namespaced per controller process."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the action was created."
+    },
+    "detection_id": {
+      "type": "string",
+      "description": "Id of the detection event that triggered the action."
+    },
+    "detection_summary": {
+      "type": "string",
+      "description": "Copy of the detection's summary, for the approval dialog. Display only."
+    },
+    "client_name": {
+      "type": "string",
+      "description": "Device name from the detection, if known."
+    },
+    "action_type": {
+      "type": "string",
+      "enum": ["dns_sinkhole", "arp_isolate", "switch_acl"]
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "approved",
+        "active",
+        "reverted",
+        "rejected",
+        "expired",
+        "apply_failed",
+        "revert_failed",
+        "failed"
+      ],
+      "description": "apply_failed: nothing is enforced. revert_failed: STILL enforced. expired: pending and never approved. 'failed' is the deprecated 1.x state, still emitted until the state machine moves to the split states."
+    },
+    "target_mac": {
+      "type": "string",
+      "description": "MAC of the device the action is about."
+    },
+    "target_ip": {
+      "type": "string",
+      "description": "IP of the device the action is about."
+    },
+    "blocked_domain": {
+      "type": "string",
+      "description": "The domain a dns_sinkhole blocks. Taken from a domain target only."
+    },
+    "policy_rule": {
+      "type": "string",
+      "description": "Why the policy decided what it did; for a pending action, why it could not be enforced automatically."
+    },
+    "auto_approved": {
+      "type": "boolean"
+    },
+    "ttl_seconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "activated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the driver confirmed the apply."
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "reverted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "approved_by": {
+      "type": "string"
+    },
+    "rejected_by": {
+      "type": "string"
+    },
+    "reverted_by": {
+      "type": "string",
+      "description": "Actor of the revert; 'ttl' for the reaper."
+    },
+    "reason": {
+      "type": "string"
+    },
+    "failure_reason": {
+      "type": "string",
+      "description": "Which driver call failed and why."
+    }
+  },
+  "additionalProperties": false
+}

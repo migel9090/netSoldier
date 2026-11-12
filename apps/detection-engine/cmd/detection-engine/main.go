@@ -24,15 +24,38 @@ import (
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/tlsheur"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/tracing"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/webhook"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
+
+// invalidEvents counts detections dropped because they would not validate.
+// Non-zero means a producer is building events the killswitch refuses.
+var invalidEvents = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "detection_engine",
+	Name:      "invalid_events_total",
+	Help:      "Detections not forwarded because they break the event contract.",
+})
+
+func init() {
+	prometheus.MustRegister(invalidEvents)
+}
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	// Detection ids carry a per-process prefix so they stay unique across
+	// restarts. Overridable for deployments that want a stable, readable
+	// instance name; it must be alphanumeric.
+	if p := os.Getenv("DETECTION_ID_PREFIX"); p != "" {
+		if err := detection.SetIDPrefix(p); err != nil {
+			slog.Warn("invalid DETECTION_ID_PREFIX, using a generated prefix", "error", err)
+		}
+	}
+	slog.Info("detection id prefix", "prefix", detection.IDPrefix())
 
 	otelEndpoint := envOr("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector.observability.svc:4317")
 	tp, err := tracing.Init(ctx, "detection-engine", otelEndpoint)
@@ -103,7 +126,17 @@ func main() {
 			envOr("WEBHOOK_SECRET", ""), envOr("WEBHOOK_TOKEN", ""), 3)
 		go sender.Run(ctx)
 		forward = func(a detection.Alert) {
-			sender.Send(eventmap.AlertToEvent(a))
+			ev := eventmap.AlertToEvent(a)
+			// The receiver would refuse it anyway; refusing here keeps the
+			// reason in this service's log and metrics, next to the producer
+			// that built it, instead of a 4xx line on the other side.
+			if err := ev.Validate(); err != nil {
+				invalidEvents.Inc()
+				slog.Error("detection not forwarded: it breaks the event contract",
+					"id", a.ID, "signal_class", a.SignalClass, "error", err)
+				return
+			}
+			sender.Send(ev)
 		}
 		slog.Info("webhook enabled", "url", webhookURL,
 			"signed", os.Getenv("WEBHOOK_SECRET") != "",

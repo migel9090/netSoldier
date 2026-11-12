@@ -3,11 +3,14 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/migel9090/netSoldier/libs/events"
 )
@@ -79,6 +82,28 @@ func TestSwitchPortSignsRequests(t *testing.T) {
 	}
 	if err := events.VerifyPayload("other-secret", call.signature, call.rawBody); err == nil {
 		t.Fatal("signature must not verify under a different secret")
+	}
+}
+
+// TestSwitchPortSignatureIsTimestamped: a body-only signature let a captured
+// "disable_port" be replayed at the adapter indefinitely. The v2 signature
+// carries its time, so the same request is refused once it is stale.
+func TestSwitchPortSignatureIsTimestamped(t *testing.T) {
+	fs := newFakeSwitch(t)
+	d := NewSwitchPortDriver(fs.srv.URL, 0, "switch-secret", nil)
+	action := &events.EnforcementAction{ID: "ACT-1", TargetMAC: "aa:bb:cc:dd:ee:ff", TargetIP: "192.168.1.50"}
+	if err := d.Apply(context.Background(), action); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	call := fs.last()
+	if !strings.HasPrefix(call.signature, "t=") || !strings.Contains(call.signature, ",v1=") {
+		t.Fatalf("switch request must carry signature v2, got %q", call.signature)
+	}
+
+	later := &events.SignatureVerifier{Secret: "switch-secret",
+		Now: func() time.Time { return time.Now().Add(10 * time.Minute) }}
+	if err := later.Verify(call.signature, call.rawBody); !errors.Is(err, events.ErrStaleSignature) {
+		t.Fatalf("a replay ten minutes later must be rejected as stale, got %v", err)
 	}
 }
 

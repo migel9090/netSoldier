@@ -49,19 +49,20 @@ func (SuricataAlerts) Parse(row json.RawMessage) (SensorEvent, string, error) {
 	sev, _ := r.AlertSeverity.Int64()
 
 	ev := SensorEvent{
-		Sensor:    "suricata",
-		Kind:      "ids-alert",
-		Timestamp: time.Unix(ts, 0).UTC(),
-		FlowID:    r.FlowID.String(),
-		SrcIP:     r.SrcIP,
-		SrcPort:   toInt(r.SrcPort),
-		DstIP:     r.DestIP,
-		DstPort:   toInt(r.DestPort),
-		Proto:     r.Proto,
-		Signature: r.AlertSignature,
-		Category:  r.AlertCategory,
-		Severity:  suricataSeverity(int(sev)),
-		Source:    "et-open",
+		Sensor:      "suricata",
+		Kind:        "ids-alert",
+		Timestamp:   time.Unix(ts, 0).UTC(),
+		FlowID:      r.FlowID.String(),
+		SrcIP:       r.SrcIP,
+		SrcPort:     toInt(r.SrcPort),
+		DstIP:       r.DestIP,
+		DstPort:     toInt(r.DestPort),
+		Proto:       r.Proto,
+		Signature:   r.AlertSignature,
+		SignatureID: r.AlertSignatureID.String(),
+		Category:    r.AlertCategory,
+		Severity:    suricataSeverity(int(sev)),
+		Source:      "et-open",
 	}
 	ev.applyThreatIntel(r.ThreatIntel)
 

@@ -114,8 +114,11 @@ func TestToAlertIDSFallbacks(t *testing.T) {
 		SrcIP: "192.168.1.50", Signature: "ET SCAN Nmap", Severity: "low", Source: "et-open",
 	}
 	a := ToAlert(ev, nil)
-	if a.MatchedIoC != "ET SCAN Nmap" || a.Threat != "ET SCAN Nmap" {
-		t.Errorf("signature fallback missing: %+v", a)
+	if a.Threat != "ET SCAN Nmap" || !strings.Contains(a.Summary, "ET SCAN Nmap") {
+		t.Errorf("rule text belongs in threat and summary: %+v", a)
+	}
+	if a.MatchedIoC != "" || a.Domain != "" {
+		t.Errorf("rule text must not become an indicator or a domain: %+v", a)
 	}
 	if a.MitreID == "" {
 		t.Errorf("expected derived mitre, got none")

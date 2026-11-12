@@ -5,6 +5,7 @@ go 1.27.4
 require (
 	github.com/migel9090/netSoldier/libs/events v0.0.0
 	github.com/prometheus/client_golang v1.24.1
+	golang.org/x/net v0.62.0
 )
 
 require (

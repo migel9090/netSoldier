@@ -82,6 +82,29 @@ var terminalStates = map[string]struct{}{
 // Create inserts a new enforcement action. For auto-approved actions,
 // state starts at Approved; otherwise Pending.
 func (s *Store) Create(detectionID, targetMAC, targetIP, actionType, policyRule string, ttl int, autoApproved bool, domain string) *events.EnforcementAction {
+	return s.insert(s.newAction(detectionID, targetMAC, targetIP, actionType, policyRule, ttl, autoApproved, domain))
+}
+
+// CreateForDetection inserts an action for a detection event.
+//
+// The blocked domain comes from the event's typed target and from nowhere
+// else: only a domain target feeds it. The event's domain field is the name
+// that was observed and its summary is prose — the 1.x path copied domain
+// here, which for an IP-IoC hit was "cdn.x (→203.0.113.7)" and for an IDS
+// alert the rule message. The summary and device name are copied for the
+// approval dialog only.
+func (s *Store) CreateForDetection(ev events.DetectionEvent, actionType, policyRule string, ttl int, autoApproved bool) *events.EnforcementAction {
+	var domain string
+	if ev.Target != nil && ev.Target.Type == events.TargetDomain {
+		domain = ev.Target.Value
+	}
+	a := s.newAction(ev.ID, ev.ClientMAC, ev.ClientIP, actionType, policyRule, ttl, autoApproved, domain)
+	a.DetectionSummary = ev.Summary
+	a.ClientName = ev.ClientName
+	return s.insert(a)
+}
+
+func (s *Store) newAction(detectionID, targetMAC, targetIP, actionType, policyRule string, ttl int, autoApproved bool, domain string) *events.EnforcementAction {
 	id := fmt.Sprintf("%s-%d", s.opts.IDPrefix, actionCounter.Add(1))
 	now := time.Now()
 
@@ -114,15 +137,19 @@ func (s *Store) Create(detectionID, targetMAC, targetIP, actionType, policyRule 
 		ExpiresAt:     expiresAt,
 		ApprovedBy:    approvedBy,
 	}
+	return action
+}
 
+func (s *Store) insert(action *events.EnforcementAction) *events.EnforcementAction {
 	s.mu.Lock()
-	s.actions[id] = action
-	s.order = append(s.order, id)
+	s.actions[action.ID] = action
+	s.order = append(s.order, action.ID)
 	s.evictLocked()
 	s.mu.Unlock()
 
-	s.writeAudit("", state, "system", "created", action)
-	slog.Info("action created", "id", id, "state", state, "target", targetMAC, "type", actionType)
+	s.writeAudit("", action.State, "system", "created", action)
+	slog.Info("action created", "id", action.ID, "state", action.State,
+		"target", action.TargetMAC, "type", action.ActionType, "detection_id", action.DetectionID)
 	return action
 }
 
@@ -250,6 +277,10 @@ func (s *Store) transition(id, to, actor, reason string, allowedFrom ...string) 
 	a.State = to
 	if to == events.StateApproved {
 		a.ApprovedBy = actor
+	}
+	if to == events.StateActive {
+		now := time.Now()
+		a.ActivatedAt = &now
 	}
 	s.mu.Unlock()
 

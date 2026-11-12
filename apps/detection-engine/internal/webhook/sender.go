@@ -33,17 +33,20 @@ type Sender struct {
 	retries int
 	http    *http.Client
 	ch      chan any
+	// now is the signing clock; tests replace it.
+	now func() time.Time
 }
 
 // NewSender builds a webhook sender.
 //
-// secret signs the body with HMAC-SHA256 (events.SignatureHeader) so the
-// receiver can prove the payload was not altered in transit. token is the
+// secret signs each request with HMAC-SHA256 over a timestamp and the body
+// (events.SignatureHeader) so the receiver can prove the payload was not
+// altered in transit and is not a replay of an old capture. token is the
 // bearer credential the receiver authenticates the CALLER with — the
 // killswitch's authMiddleware requires it on every POST, so omitting it is
 // how enforcement silently stopped working the moment auth was enabled.
-// They answer different questions ("is this really from the engine?" vs.
-// "is this request allowed?") and are both needed.
+// They answer different questions ("is this really from the engine, now?"
+// vs. "is this request allowed?") and are both needed.
 func NewSender(url, secret, token string, retries int) *Sender {
 	return &Sender{
 		url:     url,
@@ -52,6 +55,7 @@ func NewSender(url, secret, token string, retries int) *Sender {
 		retries: retries,
 		http:    &http.Client{Timeout: 10 * time.Second},
 		ch:      make(chan any, 64),
+		now:     time.Now,
 	}
 }
 
@@ -106,8 +110,12 @@ func (s *Sender) deliver(ctx context.Context, payload any) {
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
+		// Signed per attempt, at send time: the receiver rejects a signature
+		// older than its tolerance, so one computed before the first attempt
+		// would turn a slow retry into a rejection. The body — and with it
+		// the event id the receiver deduplicates on — stays the same bytes.
 		if s.secret != "" {
-			req.Header.Set(events.SignatureHeader, events.SignPayload(s.secret, body))
+			req.Header.Set(events.SignatureHeader, events.SignPayloadAt(s.secret, s.now(), body))
 		}
 		if s.token != "" {
 			req.Header.Set("Authorization", "Bearer "+s.token)

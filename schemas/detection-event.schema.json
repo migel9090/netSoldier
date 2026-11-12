@@ -2,77 +2,82 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/migel9090/netSoldier/schemas/detection-event.schema.json",
   "title": "netSoldier Detection Event",
-  "description": "Canonical detection event produced by the detection-engine. Version 1.0.",
+  "description": "Canonical detection event produced by the detection-engine and consumed by the killswitch-controller. Version 2.x. Mirrors events.DetectionEvent in libs/events; libs/events/schema_test.go fails when the two drift apart. Receivers ignore unknown fields so minor versions can add optional ones; this schema describes the exact 2.0 shape.",
   "type": "object",
   "required": [
     "schema_version",
     "id",
     "timestamp",
-    "domain",
-    "matched_ioc",
-    "ioc_type",
+    "summary",
     "client_ip",
     "severity",
     "confidence",
-    "source"
+    "source",
+    "threat",
+    "signal_class",
+    "signals"
   ],
   "properties": {
     "schema_version": {
       "type": "string",
-      "const": "1.0",
-      "description": "Schema version. Bumped on breaking changes."
+      "pattern": "^2\\.[0-9]+$",
+      "description": "MAJOR.MINOR. Receivers reject a major version they do not speak."
     },
     "id": {
       "type": "string",
-      "pattern": "^DET-[0-9]+$",
-      "description": "Unique detection identifier."
+      "pattern": "^DET-[A-Za-z0-9]+-[0-9]+$",
+      "description": "DET-<per-process prefix>-<counter>; unique across restarts. Composite detections get their own id."
     },
     "timestamp": {
       "type": "string",
       "format": "date-time",
       "description": "When the detection occurred (RFC 3339)."
     },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable description. The ONLY field meant for display; never used to decide or perform enforcement."
+    },
     "domain": {
       "type": "string",
-      "description": "Queried domain or domain(→IP) that matched."
+      "description": "The DNS name actually observed (the queried name), absent when the detection has none. Never rule text, an address, a fingerprint or a decorated string."
     },
     "matched_ioc": {
       "type": "string",
-      "description": "The IoC value that matched (domain, IP, hash)."
+      "description": "Indicator of the strongest signal, for display and as the false-positive suppression key."
     },
     "ioc_type": {
       "type": "string",
-      "enum": ["domain", "ip", "url", "ja3", "tlsfp", "md5", "sha256"],
-      "description": "Type of the matched indicator. 'tlsfp' is the TLS client fingerprint (JA4-format)."
+      "description": "Type of matched_ioc. Open vocabulary: domain, ip, cidr, url, ja3, tlsfp, md5, sha256, sid, ..."
     },
     "client_ip": {
       "type": "string",
-      "format": "ipv4",
-      "description": "IP address of the client that triggered the detection."
+      "anyOf": [{ "format": "ipv4" }, { "format": "ipv6" }],
+      "description": "Canonical IPv4 or IPv6 address of the client that triggered the detection."
     },
     "client_mac": {
       "type": "string",
       "pattern": "^([0-9a-f]{2}:){5}[0-9a-f]{2}$",
-      "description": "MAC address of the client device (if known)."
+      "description": "Lower-case colon-separated MAC of the client device, when known."
     },
     "client_name": {
       "type": "string",
-      "description": "Hostname or friendly name of the client device."
+      "description": "Hostname or friendly name of the client device, when known."
     },
     "severity": {
       "type": "string",
       "enum": ["critical", "high", "medium", "low"],
-      "description": "Derived from IoC confidence: ≥90=critical, ≥70=high, ≥50=medium, <50=low."
+      "description": "Derived from confidence: >=90 critical, >=70 high, >=50 medium, else low."
     },
     "confidence": {
       "type": "integer",
       "minimum": 0,
       "maximum": 100,
-      "description": "IoC confidence score (0-100)."
+      "description": "Combined confidence over all signals (noisy-OR for composites)."
     },
     "source": {
       "type": "string",
-      "description": "IoC feed source (local, threatfox, feodo, spamhaus, misp, etc.)."
+      "description": "Feed, sensor or 'composite'."
     },
     "threat": {
       "type": "string",
@@ -94,18 +99,71 @@
     "tags": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Arbitrary tags from the IoC source."
+      "description": "Arbitrary tags from the source."
+    },
+    "signal_class": {
+      "type": "string",
+      "enum": ["ioc", "ids-signature", "tls", "beacon", "volumetric", "composite"],
+      "description": "The class of a single-signal event; 'composite' when signals span more than one distinct class."
     },
     "signals": {
       "type": "array",
-      "items": { "type": "string" },
-      "description": "Composite-confidence (step 116): contributing signal classes (ioc, ids-signature, beacon, volumetric, tls). Additive, optional."
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/signal" },
+      "description": "The evidence: one entry per contributing signal, each with its own confidence."
     },
-    "signal_count": {
-      "type": "integer",
-      "minimum": 0,
-      "description": "Composite-confidence (step 116): number of distinct corroborating signal classes. Additive, optional."
+    "target": {
+      "$ref": "#/$defs/target",
+      "description": "What enforcement may act on. Absent: nothing to enforce automatically."
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "signal": {
+      "type": "object",
+      "required": ["class", "confidence"],
+      "properties": {
+        "class": {
+          "type": "string",
+          "enum": ["ioc", "ids-signature", "tls", "beacon", "volumetric"],
+          "description": "ioc and ids-signature are known-bad; the rest are heuristics."
+        },
+        "confidence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "This signal's own confidence."
+        },
+        "indicator": {
+          "type": "string",
+          "description": "The concrete indicator this signal attests, canonical form."
+        },
+        "indicator_type": {
+          "type": "string",
+          "description": "Type of indicator. Open vocabulary, as ioc_type."
+        },
+        "source": {
+          "type": "string",
+          "description": "Feed or sensor that produced this signal."
+        }
+      },
+      "additionalProperties": false
+    },
+    "target": {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["domain", "ip"]
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Canonical value: a lower-case hostname, or a canonical IPv4/IPv6 address."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
 }

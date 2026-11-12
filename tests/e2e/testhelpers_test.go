@@ -168,7 +168,8 @@ func postAuthedJSON(t *testing.T, url, token string, body any, dst any) {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	// Only /evaluate carries a signed detection payload; operator actions
-	// are authenticated by the bearer token alone.
+	// are authenticated by the bearer token alone. Signature v2 is
+	// timestamped, so it is computed here, at send time.
 	if strings.HasSuffix(url, "/evaluate") {
 		req.Header.Set(events.SignatureHeader, events.SignPayload(e2eWebhookSecret, data))
 	}
@@ -186,6 +187,59 @@ func postAuthedJSON(t *testing.T, url, token string, body any, dst any) {
 		if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
 			t.Fatalf("POST %s: decode: %v", url, err)
 		}
+	}
+}
+
+// postEvaluateRaw posts exact bytes to /evaluate with the given signature
+// header and returns the status and body, for tests that expect a refusal.
+func postEvaluateRaw(t *testing.T, ksAddr string, body []byte, sig string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, "http://"+ksAddr+"/evaluate", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+e2eAPIKey)
+	if sig != "" {
+		req.Header.Set(events.SignatureHeader, sig)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /evaluate: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, respBody
+}
+
+var e2eEventSeq struct {
+	sync.Mutex
+	n uint64
+}
+
+// v2Event returns a contract-valid single-signal domain IoC detection for a
+// test-chosen domain indicator, with a fresh id.
+func v2Event(indicator string, confidence int, severity string) events.DetectionEvent {
+	e2eEventSeq.Lock()
+	e2eEventSeq.n++
+	n := e2eEventSeq.n
+	e2eEventSeq.Unlock()
+	return events.DetectionEvent{
+		SchemaVersion: events.DetectionSchemaVersion,
+		ID:            events.FormatDetectionID("e2e", n),
+		Timestamp:     time.Now().UTC(),
+		Summary:       "DNS query for " + indicator + " matches e2e-test domain indicator " + indicator,
+		Domain:        indicator,
+		MatchedIoC:    indicator,
+		IoCType:       events.IndicatorDomain,
+		ClientIP:      "192.168.1.42",
+		Severity:      severity,
+		Confidence:    confidence,
+		Source:        "e2e-test",
+		SignalClass:   events.SignalIoC,
+		Signals: []events.Signal{{Class: events.SignalIoC, Confidence: confidence,
+			Indicator: indicator, IndicatorType: events.IndicatorDomain, Source: "e2e-test"}},
+		Target: &events.Target{Type: events.TargetDomain, Value: indicator},
 	}
 }
 
@@ -216,19 +270,29 @@ func (m *mockAdGuard) Rules() []string {
 
 func startMockAdGuard(t *testing.T, entryTime time.Time) *mockAdGuard {
 	t.Helper()
+	return startMockAdGuardWith(t, nil, map[string]any{
+		"question": map[string]string{"host": "evil.example.com", "type": "A"},
+		"client":   "192.168.1.42",
+		"time":     entryTime,
+		"reason":   "FilteredBlackList",
+	})
+}
+
+// startMockAdGuardWith serves the given querylog entries (newest first, as
+// AdGuard does). While ready is non-nil and returns false the querylog is
+// empty, so a test can hold the entries back until the engine has loaded the
+// indicators they are meant to match.
+func startMockAdGuardWith(t *testing.T, ready func() bool, entries ...map[string]any) *mockAdGuard {
+	t.Helper()
 	m := &mockAdGuard{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /control/querylog", func(w http.ResponseWriter, _ *http.Request) {
+		data := entries
+		if ready != nil && !ready() {
+			data = []map[string]any{}
+		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"data": []map[string]any{{
-				"question": map[string]string{"host": "evil.example.com", "type": "A"},
-				"client":   "192.168.1.42",
-				"time":     entryTime,
-				"reason":   "FilteredBlackList",
-			}},
-			"oldest": "",
-		})
+		json.NewEncoder(w).Encode(map[string]any{"data": data, "oldest": ""})
 	})
 	mux.HandleFunc("GET /control/filtering/status", func(w http.ResponseWriter, _ *http.Request) {
 		m.mu.Lock()

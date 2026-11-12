@@ -65,6 +65,7 @@ func (MLBeacons) Parse(row json.RawMessage) (SensorEvent, string, error) {
 			r.BeaconScore.String(), target, r.ConnectionCount.String()),
 		Indicator:     target,
 		IndicatorType: "beacon",
+		DstDomain:     r.DstDomain,
 		Severity:      r.Severity,
 		Confidence:    toInt(r.Confidence),
 		Source:        "rita",

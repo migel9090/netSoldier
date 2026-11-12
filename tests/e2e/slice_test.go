@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 
@@ -88,11 +89,24 @@ func TestVerticalSlice(t *testing.T) {
 	assertEq(t, "webhook.ioc_type", "domain", wp.IoCType)
 	assertEq(t, "webhook.severity", "high", wp.Severity)
 	assertEq(t, "webhook.source", "local", wp.Source)
-	if wp.ID == "" {
-		t.Error("webhook id is empty")
+	if !regexp.MustCompile(events.DetectionIDPattern).MatchString(wp.ID) {
+		t.Errorf("webhook id %q does not match %s", wp.ID, events.DetectionIDPattern)
 	}
 	if wp.Timestamp.IsZero() {
 		t.Error("webhook timestamp is zero")
+	}
+	if wp.Summary == "" {
+		t.Error("webhook summary is empty")
+	}
+	if wp.Target == nil || *wp.Target != (events.Target{Type: events.TargetDomain, Value: "evil.example.com"}) {
+		t.Errorf("webhook target = %+v, want domain evil.example.com", wp.Target)
+	}
+	if len(wp.Signals) != 1 || wp.Signals[0].Class != events.SignalIoC || wp.Signals[0].Confidence != 80 ||
+		wp.Signals[0].Indicator != "evil.example.com" {
+		t.Errorf("webhook signals = %+v, want the one static-list hit at its own confidence", wp.Signals)
+	}
+	if err := wp.Validate(); err != nil {
+		t.Errorf("webhook payload breaks the v2 contract: %v", err)
 	}
 
 	// /alerts API — same data the web-ui renders.
