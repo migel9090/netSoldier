@@ -2,12 +2,16 @@
   import { page } from '$app/state'
   import { onMount } from 'svelte'
   import {
+    ApiError,
     fetchDevice,
     fetchDeviceConnections,
     fetchDeviceDNS,
     fetchDeviceAlerts,
     formatTime,
+    normaliseMac,
   } from '$lib/api'
+  import { alertHeadline, alertObservedDomain } from '$lib/alerts'
+  import { newestFirst } from '$lib/order'
   import type { Device, DeviceConnection, DeviceDNS, DeviceAlert } from '$lib/types'
 
   let device: Device | null = $state(null)
@@ -16,11 +20,14 @@
   let alerts: DeviceAlert[] = $state([])
   let loading: boolean = $state(true)
   let error: string = $state('')
+  // Per-section errors: a ClickHouse outage behind /connections must read as
+  // "could not load", not as "no connection data".
+  let connectionsError: string = $state('')
+  let dnsError: string = $state('')
+  let alertsError: string = $state('')
 
-  function mac(): string {
-    // page.params is typed as possibly-undefined per key; this route
-    // cannot match without a mac, but narrow it rather than assert.
-    return decodeURIComponent(page.params.mac ?? '')
+  function message(reason: unknown): string {
+    return reason instanceof Error ? reason.message : 'request failed'
   }
 
   function protoName(p: number): string {
@@ -45,7 +52,12 @@
 
   onMount(async () => {
     try {
-      const m = mac()
+      // page.params is already decoded by SvelteKit.
+      const m = normaliseMac(page.params.mac ?? '')
+      if (!m) {
+        error = `"${page.params.mac ?? ''}" is not a MAC address`
+        return
+      }
       const [d, c, dn, a] = await Promise.allSettled([
         fetchDevice(m),
         fetchDeviceConnections(m),
@@ -54,13 +66,15 @@
       ])
 
       if (d.status === 'fulfilled') device = d.value
-      else error = 'Device not found'
+      else if (d.reason instanceof ApiError && d.reason.status === 404) error = 'Device not found'
+      else error = message(d.reason)
 
       if (c.status === 'fulfilled') connections = c.value
+      else connectionsError = message(c.reason)
       if (dn.status === 'fulfilled') dns = dn.value
-      if (a.status === 'fulfilled') alerts = a.value
-    } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to load device'
+      else dnsError = message(dn.reason)
+      if (a.status === 'fulfilled') alerts = newestFirst(a.value)
+      else alertsError = message(a.reason)
     } finally {
       loading = false
     }
@@ -119,14 +133,19 @@
     </div>
   {/if}
 
-  {#if alerts.length > 0}
+  {#if alertsError}
+    <section>
+      <h2>Alerts</h2>
+      <p class="error">{alertsError}</p>
+    </section>
+  {:else if alerts.length > 0}
     <section>
       <h2>Alerts ({alerts.length})</h2>
-      <table>
+      <table data-testid="device-alerts">
         <thead>
           <tr>
             <th>Time</th>
-            <th>Domain</th>
+            <th>Alert</th>
             <th>Matched IoC</th>
             <th>Severity</th>
             <th>Source</th>
@@ -134,12 +153,16 @@
         </thead>
         <tbody>
           {#each alerts as a}
+            {@const observed = alertObservedDomain(a)}
             <tr>
               <td>{formatTime(a.timestamp)}</td>
-              <td class="mono truncate">{a.domain}</td>
-              <td class="mono truncate">{a.matched_ioc}</td>
+              <td class="truncate" data-testid="alert-headline" title={alertHeadline(a)}>
+                {alertHeadline(a)}
+                {#if observed}<span class="secondary mono">{observed}</span>{/if}
+              </td>
+              <td class="mono truncate">{a.matched_ioc || '—'}</td>
               <td><span class="badge badge-{a.severity}">{a.severity}</span></td>
-              <td>{a.source}</td>
+              <td>{a.source || '—'}</td>
             </tr>
           {/each}
         </tbody>
@@ -149,7 +172,9 @@
 
   <section>
     <h2>Connection History ({connections.length})</h2>
-    {#if connections.length === 0}
+    {#if connectionsError}
+      <p class="error">{connectionsError}</p>
+    {:else if connections.length === 0}
       <p class="empty">No connection data available.</p>
     {:else}
       <table>
@@ -183,7 +208,9 @@
 
   <section>
     <h2>DNS Queries ({dns.length})</h2>
-    {#if dns.length === 0}
+    {#if dnsError}
+      <p class="error">{dnsError}</p>
+    {:else if dns.length === 0}
       <p class="empty">No DNS data available.</p>
     {:else}
       <table>

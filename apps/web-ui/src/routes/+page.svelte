@@ -1,25 +1,37 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { alertClient, alertHeadline, alertObservedDomain } from '$lib/alerts'
   import { fetchDevices, fetchAlerts, formatTime } from '$lib/api'
-  import type { Device, Alert } from '$lib/types'
+  import { newestFirst } from '$lib/order'
+  import type { Alert } from '$lib/types'
 
-  let deviceCount: number = $state(0)
-  let alertCount: number = $state(0)
+  let deviceCount: number | null = $state(null)
+  let alertCount: number | null = $state(null)
   let recentAlerts: Alert[] = $state([])
+  let errors: string[] = $state([])
   let loading: boolean = $state(true)
 
   onMount(async () => {
-    try {
-      const [devices, alerts] = await Promise.all([fetchDevices(), fetchAlerts()])
-      deviceCount = devices.length
-      alertCount = alerts.length
-      recentAlerts = alerts.slice(0, 5)
-    } catch {
-      /* dashboard degrades gracefully */
-    } finally {
-      loading = false
+    // A backend outage is an error on the card, not a zero: "0 alerts" from
+    // a detection engine that is down reads as "all quiet".
+    const [devices, alerts] = await Promise.allSettled([fetchDevices(), fetchAlerts()])
+    const problems: string[] = []
+    if (devices.status === 'fulfilled') deviceCount = devices.value.length
+    else problems.push(message(devices.reason))
+    if (alerts.status === 'fulfilled') {
+      alertCount = alerts.value.length
+      // The detection engine appends, so its list is oldest-first.
+      recentAlerts = newestFirst(alerts.value).slice(0, 5)
+    } else {
+      problems.push(message(alerts.reason))
     }
+    errors = problems
+    loading = false
   })
+
+  function message(e: unknown): string {
+    return e instanceof Error ? e.message : 'request failed'
+  }
 </script>
 
 <h1>Dashboard</h1>
@@ -27,34 +39,48 @@
 {#if loading}
   <p class="loading">Loading…</p>
 {:else}
+  {#each errors as e}
+    <p class="error" data-testid="dashboard-error">{e}</p>
+  {/each}
+
   <div class="stats">
     <div class="stat-card">
-      <span class="stat-value">{deviceCount}</span>
+      <span class="stat-value" data-testid="device-count">{deviceCount ?? '—'}</span>
       <span class="stat-label">Devices discovered</span>
     </div>
     <div class="stat-card">
-      <span class="stat-value">{alertCount}</span>
+      <span class="stat-value" data-testid="alert-count">{alertCount ?? '—'}</span>
       <span class="stat-label">Detection alerts</span>
     </div>
   </div>
 
   {#if recentAlerts.length > 0}
     <h2>Recent Alerts</h2>
-    <table>
+    <table data-testid="recent-alerts">
       <thead>
         <tr>
           <th>Time</th>
-          <th>Domain</th>
+          <th>Alert</th>
           <th>Client</th>
           <th>Severity</th>
         </tr>
       </thead>
       <tbody>
         {#each recentAlerts as a}
+          {@const client = alertClient(a)}
+          {@const observed = alertObservedDomain(a)}
           <tr>
             <td>{formatTime(a.timestamp)}</td>
-            <td class="mono">{a.domain}</td>
-            <td class="mono">{a.client_ip}</td>
+            <td data-testid="alert-headline">
+              {alertHeadline(a)}
+              {#if observed}<span class="secondary mono">{observed}</span>{/if}
+            </td>
+            <td data-testid="alert-client">
+              {client.name || client.ip || client.mac || '—'}
+              {#if client.name && (client.ip || client.mac)}
+                <span class="secondary mono">{client.ip || client.mac}</span>
+              {/if}
+            </td>
             <td><span class="badge badge-{a.severity}">{a.severity}</span></td>
           </tr>
         {/each}

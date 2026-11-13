@@ -12,8 +12,21 @@ describe('route allowlist', () => {
       ['GET', '/api/alerts', '/alerts'],
       ['POST', '/api/feedback', '/feedback'],
       ['GET', '/api/killswitch/pending', '/actions/pending'],
+      ['GET', '/api/killswitch/active', '/actions/active'],
+      ['GET', '/api/killswitch/failed', '/actions/failed'],
+      ['GET', '/api/killswitch/history', '/actions/history'],
+      ['GET', '/api/killswitch/ACT-1', '/actions/ACT-1'],
       ['POST', '/api/killswitch/ACT-1/approve', '/actions/ACT-1/approve'],
       ['POST', '/api/killswitch/ACT-1/revert', '/actions/ACT-1/revert'],
+      // Shadowed by the generic {id} route until the fixed names came first.
+      ['GET', '/api/killswitch/policy', '/policy'],
+      // What encodeURIComponent(mac) produces; refusing it 404'd every detail page.
+      ['GET', '/api/devices/aa%3Abb%3Acc%3Add%3Aee%3Aff', '/devices/aa:bb:cc:dd:ee:ff'],
+      [
+        'GET',
+        '/api/devices/AA%3aBB%3acc%3Add%3Aee%3Aff/alerts',
+        '/devices/AA:BB:cc:dd:ee:ff/alerts',
+      ],
     ]
     for (const [method, path, want] of cases) {
       const matched = matchRoute(method, path)
@@ -45,6 +58,8 @@ describe('route allowlist', () => {
     expect(matchRoute('GET', '/api/killswitch/ACT-1/approve')).toBeNull()
     // Only well-formed MACs address a device.
     expect(matchRoute('GET', '/api/devices/not-a-mac')).toBeNull()
+    expect(matchRoute('GET', '/api/devices/aa%3Abb%3Acc%3Add%3Aee')).toBeNull()
+    expect(matchRoute('GET', '/api/devices/aa%253Abb%253Acc%253Add%253Aee%253Aff')).toBeNull()
     expect(matchRoute('GET', '/api/devices/aa:bb:cc:dd:ee:ff/secrets')).toBeNull()
   })
 })

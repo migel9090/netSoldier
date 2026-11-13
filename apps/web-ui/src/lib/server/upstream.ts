@@ -20,9 +20,16 @@ export interface Route {
 }
 
 // {mac} and {id} are intentionally narrow: a MAC or an action ID, nothing
-// that could contain a slash, a dot-segment or an encoded separator.
-const MAC = '([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})'
+// that could contain a slash, a dot-segment or an encoded separator. A MAC's
+// colons may arrive percent-encoded (`%3A`) — encodeURIComponent produces
+// that, and refusing it made every device detail page a 404 — so the
+// separator accepts both spellings and the upstream path always uses `:`.
+const MAC = '([0-9a-fA-F]{2}(?:(?::|%3[aA])[0-9a-fA-F]{2}){5})'
 const ID = '([A-Za-z0-9_.:-]{1,128})'
+
+function mac(raw: string): string {
+  return raw.replace(/%3a/gi, ':')
+}
 
 export const ROUTES: Route[] = [
   {
@@ -35,19 +42,19 @@ export const ROUTES: Route[] = [
     service: 'device-inventory',
     method: 'GET',
     pattern: new RegExp(`^/api/devices/${MAC}$`),
-    upstream: (m) => `/devices/${m[1]}`,
+    upstream: (m) => `/devices/${mac(m[1])}`,
   },
   {
     service: 'device-inventory',
     method: 'GET',
     pattern: new RegExp(`^/api/devices/${MAC}/(connections|dns|alerts)$`),
-    upstream: (m) => `/devices/${m[1]}/${m[2]}`,
+    upstream: (m) => `/devices/${mac(m[1])}/${m[2]}`,
   },
   {
     service: 'device-inventory',
     method: 'PUT',
     pattern: new RegExp(`^/api/devices/${MAC}/labels$`),
-    upstream: (m) => `/devices/${m[1]}/labels`,
+    upstream: (m) => `/devices/${mac(m[1])}/labels`,
   },
   {
     service: 'device-inventory',
@@ -73,11 +80,22 @@ export const ROUTES: Route[] = [
     pattern: /^\/api\/feedback$/,
     upstream: () => '/feedback',
   },
+  // The fixed killswitch names come before the generic {id} route: matching
+  // is first-hit, and {id} would otherwise swallow them (it used to make
+  // /api/killswitch/policy unreachable). `failed` and `history` are contract
+  // v2 lists; a controller that predates them answers 404, which the page
+  // reports as "not available yet".
   {
     service: 'killswitch',
     method: 'GET',
-    pattern: /^\/api\/killswitch\/(pending|active)$/,
+    pattern: /^\/api\/killswitch\/(pending|active|failed|history)$/,
     upstream: (m) => `/actions/${m[1]}`,
+  },
+  {
+    service: 'killswitch',
+    method: 'GET',
+    pattern: /^\/api\/killswitch\/policy$/,
+    upstream: () => '/policy',
   },
   {
     service: 'killswitch',
@@ -90,12 +108,6 @@ export const ROUTES: Route[] = [
     method: 'POST',
     pattern: new RegExp(`^/api/killswitch/${ID}/(approve|reject|revert)$`),
     upstream: (m) => `/actions/${m[1]}/${m[2]}`,
-  },
-  {
-    service: 'killswitch',
-    method: 'GET',
-    pattern: /^\/api\/killswitch\/policy$/,
-    upstream: () => '/policy',
   },
 ]
 

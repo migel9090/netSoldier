@@ -1,18 +1,10 @@
 import { sveltekit } from '@sveltejs/kit/vite'
 import { defineConfig } from 'vite'
 
+// No dev-server proxy: /api/* is served by hooks.server.ts in `vite dev` as
+// in production, so development exercises the same session, CSRF and route
+// allowlist checks. Configure it with the production env vars (see
+// src/lib/server/config.ts; a local .env works).
 export default defineConfig({
   plugins: [sveltekit()],
-  server: {
-    proxy: {
-      '/api/devices': {
-        target: 'http://localhost:8081',
-        rewrite: (path) => path.replace('/api/devices', '/devices'),
-      },
-      '/api/alerts': {
-        target: 'http://localhost:8080',
-        rewrite: (path) => path.replace('/api/alerts', '/alerts'),
-      },
-    },
-  },
 })

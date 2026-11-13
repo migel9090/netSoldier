@@ -1,8 +1,16 @@
 <script lang="ts">
+  import { onMount } from 'svelte'
+
   let password = $state('')
   let actor = $state('')
   let error = $state('')
   let busy = $state(false)
+  // The page is server-rendered; until the script has hydrated it, a click
+  // would fall through to a plain form submission that signs nobody in.
+  let ready = $state(false)
+  onMount(() => {
+    ready = true
+  })
 
   async function submit(e: Event) {
     e.preventDefault()
@@ -37,7 +45,7 @@
 <form onsubmit={submit}>
   <label>
     Who are you?
-    <input bind:value={actor} placeholder="household" autocomplete="username" />
+    <input bind:value={actor} placeholder="household" autocomplete="username" maxlength="64" />
   </label>
   <label>
     Password
@@ -50,11 +58,11 @@
       required
     />
   </label>
-  <button type="submit" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+  <button type="submit" disabled={busy || !ready}>{busy ? 'Signing in…' : 'Sign in'}</button>
 </form>
 
 {#if error}
-  <p class="error">{error}</p>
+  <p class="error" role="alert" data-testid="login-error">{error}</p>
 {/if}
 
 <style>
