@@ -2,7 +2,10 @@
 #
 # osv-scanner fails the build on *any* finding, so an advisory that cannot be
 # resolved by upgrading has to be recorded here with a reason. Never ignore an
-# advisory that has a fixed release: upgrade instead. Keep this list short.
+# advisory whose fix is an ordinary upgrade: upgrade instead. An entry is only
+# acceptable when no fixed release exists, or when the fix exists solely in a
+# breaking major version and the vulnerable feature is demonstrably unused.
+# Keep this list short.
 #
 # Every entry carries a reason and an `ignoreUntil` review date, after which
 # osv-scanner reports the advisory again and the entry has to be re-justified
@@ -13,6 +16,32 @@
 #   ignoreUntil = 2027-01-31
 #   reason = """Why there is no fix, and why it is not reachable here."""
 #
-# There are currently no exceptions. GO-2026-5932 (x/crypto/openpgp) was
-# ignored until x/crypto shipped a fixed release; tests/e2e now pins
-# golang.org/x/crypto v0.59.0, which is past it.
+# GO-2026-5932 (x/crypto/openpgp) was ignored until x/crypto shipped a fixed
+# release; tests/e2e now pins golang.org/x/crypto v0.59.0, which is past it.
+
+# ── apps/web-ui ─────────────────────────────────────────────────────────
+# All three are rated low. The two SvelteKit ones go away with the move to
+# SvelteKit 3 (which also needs adapter-node 6, vite 8 and TypeScript 6);
+# re-check them when that upgrade is done rather than extending the date.
+
+[[IgnoredVulns]]
+id = "GHSA-27mw-82g8-phjj"
+ignoreUntil = 2027-02-15
+reason = """@sveltejs/kit: XSS through an untrusted cache-control header in a
+prerendered page. Fixed only in 3.0.0. The web UI prerenders nothing: the root
+layout disables SSR and no route sets prerender = true."""
+
+[[IgnoredVulns]]
+id = "GHSA-pfhg-q3qv-9q6r"
+ignoreUntil = 2027-02-15
+reason = """@sveltejs/kit: open redirect through enhanced form submissions.
+Fixed only in 3.0.0. The web UI has no form actions and never uses
+use:enhance; sign-in and every mutation are JSON requests to /api."""
+
+[[IgnoredVulns]]
+id = "GHSA-gcqx-w48m-w2h4"
+ignoreUntil = 2027-02-15
+reason = """deepmerge: prototype poisoning of the object mergeObject() returns.
+No fixed release exists. It is a build-time dependency only, pulled in by
+@rollup/plugin-node-resolve and @sveltejs/vite-plugin-svelte; nothing in the
+running server imports it and it never sees request data."""
