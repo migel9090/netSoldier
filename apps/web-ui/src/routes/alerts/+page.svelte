@@ -1,6 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { fetchAlerts, formatTime, submitFeedback } from '$lib/api'
+  import {
+    alertClient,
+    alertClientText,
+    alertHeadline,
+    alertObservedDomain,
+    signalClasses,
+  } from '$lib/alerts'
+  import { fetchAlerts, formatTime, normaliseMac, submitFeedback } from '$lib/api'
+  import { newestFirst } from '$lib/order'
   import type { Alert } from '$lib/types'
 
   const SEVERITIES = ['critical', 'high', 'medium', 'low'] as const
@@ -23,7 +31,7 @@
 
     if (deviceFilter.trim()) {
       const q = deviceFilter.trim().toLowerCase()
-      result = result.filter((a) => a.client_ip.toLowerCase().includes(q))
+      result = result.filter((a) => alertClientText(a).includes(q))
     }
 
     if (sourceFilter) {
@@ -43,7 +51,7 @@
   })
 
   let sources: string[] = $derived(
-    [...new Set(allAlerts.map((a) => a.source).filter(Boolean))].sort(),
+    [...new Set(allAlerts.map((a) => a.source ?? '').filter(Boolean))].sort(),
   )
 
   function toggleSeverity(sev: string) {
@@ -75,7 +83,7 @@
   let marked: Set<string> = $state(new Set())
 
   function fpKey(a: Alert): string {
-    return `${a.matched_ioc}|${a.client_ip}`
+    return `${a.matched_ioc ?? ''}|${a.client_ip ?? ''}`
   }
 
   async function markFalsePositive(a: Alert) {
@@ -83,7 +91,7 @@
     try {
       await submitFeedback({
         alert_id: a.id,
-        matched_ioc: a.matched_ioc,
+        matched_ioc: a.matched_ioc ?? '',
         client_ip: a.client_ip,
         verdict: 'false_positive',
       })
@@ -97,7 +105,8 @@
 
   async function load() {
     try {
-      allAlerts = await fetchAlerts()
+      // The detection engine appends, so its list is oldest-first.
+      allAlerts = newestFirst(await fetchAlerts())
       error = ''
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load alerts'
@@ -149,7 +158,7 @@
         <input
           type="text"
           class="filter-input"
-          placeholder="Filter by IP…"
+          placeholder="Name, MAC or IP…"
           bind:value={deviceFilter}
         />
       </div>
@@ -191,7 +200,7 @@
         <tr>
           <th>Time</th>
           <th>Severity</th>
-          <th>Domain</th>
+          <th>Alert</th>
           <th>Client</th>
           <th>Matched IoC</th>
           <th>Threat</th>
@@ -202,15 +211,38 @@
       </thead>
       <tbody>
         {#each filtered as a}
-          <tr>
+          {@const client = alertClient(a)}
+          {@const mac = normaliseMac(client.mac)}
+          {@const observed = alertObservedDomain(a)}
+          {@const classes = signalClasses(a)}
+          <tr data-alert-id={a.id}>
             <td class="nowrap">{formatTime(a.timestamp)}</td>
             <td>
               <span class="badge badge-{a.severity}">{a.severity}</span>
               {#if a.confidence}<span class="confidence">{a.confidence}%</span>{/if}
             </td>
-            <td class="mono truncate" title={a.domain}>{a.domain}</td>
-            <td class="mono"><a href="/devices" class="ip-link">{a.client_ip}</a></td>
-            <td class="mono truncate" title={a.matched_ioc}>{a.matched_ioc}</td>
+            <td class="headline" data-testid="alert-headline">
+              <span class="headline-text" title={alertHeadline(a)}>{alertHeadline(a)}</span>
+              {#if observed || classes.length > 0}
+                <span class="secondary">
+                  {#if observed}<span class="mono" title={observed}>{observed}</span>{/if}
+                  {#if classes.length > 0}<span>{classes.join(' + ')}</span>{/if}
+                </span>
+              {/if}
+            </td>
+            <td class="client" data-testid="alert-client">
+              {#if client.name}<span class="client-name">{client.name}</span>{/if}
+              {#if client.mac}
+                {#if mac}
+                  <a href="/devices/{encodeURIComponent(mac)}" class="ip-link mono">{client.mac}</a>
+                {:else}
+                  <span class="mono">{client.mac}</span>
+                {/if}
+              {/if}
+              {#if client.ip}<span class="mono">{client.ip}</span>{/if}
+              {#if !client.name && !client.mac && !client.ip}—{/if}
+            </td>
+            <td class="mono truncate" title={a.matched_ioc}>{a.matched_ioc || '—'}</td>
             <td class="truncate">{a.threat || '—'}</td>
             <td class="truncate">
               {#if a.mitre_id}
@@ -219,7 +251,7 @@
                 —
               {/if}
             </td>
-            <td>{a.source}</td>
+            <td>{a.source || '—'}</td>
             <td class="nowrap">
               {#if marked.has(fpKey(a))}
                 <span class="fp-marked" title="Reported as false positive">✓ FP</span>
@@ -241,6 +273,30 @@
 {/if}
 
 <style>
+  .headline {
+    max-width: 320px;
+  }
+  .headline-text {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .client span,
+  .client a {
+    display: block;
+  }
+  .secondary span + span::before {
+    content: ' · ';
+  }
+  .secondary {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .client-name {
+    font-weight: 600;
+  }
   .alerts-header {
     display: flex;
     align-items: baseline;
