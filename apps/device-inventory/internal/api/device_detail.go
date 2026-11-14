@@ -2,25 +2,23 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
-	"net"
 	"net/http"
-	"regexp"
 	"time"
+
+	ch "github.com/migel9090/netSoldier/apps/device-inventory/internal/clickhouse"
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/metrics"
 )
 
-var macRe = regexp.MustCompile(`^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$`)
-
 type connectionRow struct {
-	Timestamp string `json:"timestamp"`
-	DstIP     string `json:"dst_ip"`
-	DstDomain string `json:"dst_domain"`
-	DstPort   uint16 `json:"dst_port"`
-	Protocol  uint8  `json:"protocol"`
-	BytesIn   uint64 `json:"bytes_in"`
-	BytesOut  uint64 `json:"bytes_out"`
-	Duration  uint32 `json:"duration_ms"`
+	Timestamp string    `json:"timestamp"`
+	DstIP     string    `json:"dst_ip"`
+	DstDomain string    `json:"dst_domain"`
+	DstPort   uint16    `json:"dst_port"`
+	Protocol  uint8     `json:"protocol"`
+	BytesIn   ch.UInt64 `json:"bytes_in"`
+	BytesOut  ch.UInt64 `json:"bytes_out"`
+	Duration  uint32    `json:"duration_ms"`
 }
 
 type dnsRow struct {
@@ -43,40 +41,8 @@ type alertRow struct {
 	Source     string `json:"source"`
 }
 
-func (h *Handler) DeviceConnections(w http.ResponseWriter, r *http.Request) {
-	mac := r.PathValue("mac")
-	if !macRe.MatchString(mac) {
-		http.Error(w, `{"error":"invalid mac"}`, http.StatusBadRequest)
-		return
-	}
-
-	device, err := h.store.GetDevice(mac)
-	if err != nil {
-		slog.Error("get device failed", "mac", mac, "error", err)
-		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
-		return
-	}
-	if device == nil || device.IP == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("[]"))
-		return
-	}
-	if net.ParseIP(device.IP) == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("[]"))
-		return
-	}
-
-	if h.ch == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("[]"))
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	query := `SELECT
+const (
+	connectionsQuery = `SELECT
 		timestamp, dst_ip, dst_domain, dst_port, protocol,
 		bytes_in, bytes_out, duration_ms
 	FROM connections
@@ -84,102 +50,63 @@ func (h *Handler) DeviceConnections(w http.ResponseWriter, r *http.Request) {
 	ORDER BY timestamp DESC
 	LIMIT 100`
 
-	var rows []connectionRow
-	if err := h.ch.Query(ctx, query, &rows, map[string]string{"ip": device.IP}); err != nil {
-		slog.Debug("device connections query failed", "mac", mac, "error", err)
-		rows = []connectionRow{}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(rows)
-}
-
-func (h *Handler) DeviceDNS(w http.ResponseWriter, r *http.Request) {
-	mac := r.PathValue("mac")
-	if !macRe.MatchString(mac) {
-		http.Error(w, `{"error":"invalid mac"}`, http.StatusBadRequest)
-		return
-	}
-
-	device, err := h.store.GetDevice(mac)
-	if err != nil {
-		slog.Error("get device failed", "mac", mac, "error", err)
-		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
-		return
-	}
-	if device == nil || device.IP == "" || net.ParseIP(device.IP) == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("[]"))
-		return
-	}
-
-	if h.ch == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("[]"))
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	query := `SELECT
+	dnsQuery = `SELECT
 		timestamp, domain, query_type, answer, status, response_ms, blocked
 	FROM dns_queries
 	WHERE client_ip = {ip:String}
 	ORDER BY timestamp DESC
 	LIMIT 100`
 
-	var rows []dnsRow
-	if err := h.ch.Query(ctx, query, &rows, map[string]string{"ip": device.IP}); err != nil {
-		slog.Debug("device dns query failed", "mac", mac, "error", err)
-		rows = []dnsRow{}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(rows)
-}
-
-func (h *Handler) DeviceAlerts(w http.ResponseWriter, r *http.Request) {
-	mac := r.PathValue("mac")
-	if !macRe.MatchString(mac) {
-		http.Error(w, `{"error":"invalid mac"}`, http.StatusBadRequest)
-		return
-	}
-
-	device, err := h.store.GetDevice(mac)
-	if err != nil {
-		slog.Error("get device failed", "mac", mac, "error", err)
-		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
-		return
-	}
-	if device == nil || device.IP == "" || net.ParseIP(device.IP) == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("[]"))
-		return
-	}
-
-	if h.ch == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("[]"))
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	query := `SELECT
+	alertsQuery = `SELECT
 		timestamp, id, domain, query_type, matched_ioc, severity, source
 	FROM alerts
 	WHERE client_ip = {ip:String}
 	ORDER BY timestamp DESC
 	LIMIT 50`
+)
 
-	var rows []alertRow
-	if err := h.ch.Query(ctx, query, &rows, map[string]string{"ip": device.IP}); err != nil {
-		slog.Debug("device alerts query failed", "mac", mac, "error", err)
-		rows = []alertRow{}
+func (h *Handler) DeviceConnections(w http.ResponseWriter, r *http.Request) {
+	rows := []connectionRow{}
+	h.deviceHistory(w, r, "connections", connectionsQuery, &rows)
+}
+
+func (h *Handler) DeviceDNS(w http.ResponseWriter, r *http.Request) {
+	rows := []dnsRow{}
+	h.deviceHistory(w, r, "dns_queries", dnsQuery, &rows)
+}
+
+func (h *Handler) DeviceAlerts(w http.ResponseWriter, r *http.Request) {
+	rows := []alertRow{}
+	h.deviceHistory(w, r, "alerts", alertsQuery, &rows)
+}
+
+// deviceHistory answers a per-device ClickHouse view keyed by the device's
+// current address. No device, no address or no ClickHouse configured is an
+// empty list; a failing ClickHouse is a 502, logged and counted, not an empty
+// list that looks like "nothing happened".
+func (h *Handler) deviceHistory(w http.ResponseWriter, r *http.Request, table, query string, rows any) {
+	mac, ok := pathMAC(w, r)
+	if !ok {
+		return
+	}
+	device, err := h.store.GetDevice(mac)
+	if err != nil {
+		slog.Error("get device failed", "mac", mac, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if device == nil || device.IP == "" || h.ch == nil {
+		writeJSON(w, http.StatusOK, rows)
+		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(rows)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	if err := h.ch.Query(ctx, query, rows, map[string]string{"ip": device.IP}); err != nil {
+		metrics.ClickHouseErrors.WithLabelValues("query", table).Inc()
+		slog.Warn("clickhouse query failed", "table", table, "mac", mac, "error", err)
+		writeError(w, http.StatusBadGateway, "clickhouse query failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
 }

@@ -58,6 +58,10 @@ func TestVerticalSlice(t *testing.T) {
 	stopInv := startProc(t, invBin, map[string]string{
 		"LISTEN_ADDR": invAddr,
 		"DB_PATH":     filepath.Join(t.TempDir(), "devices.db"),
+		// The API refuses to start without a key, and the capture listeners
+		// need CAP_NET_RAW, which a test process does not have.
+		"DEVICE_API_KEY":      e2eAPIKey,
+		"DISCOVERY_LISTENERS": "none",
 	})
 	t.Cleanup(stopInv)
 
@@ -120,7 +124,7 @@ func TestVerticalSlice(t *testing.T) {
 
 	// /devices API — valid but empty (no DHCP traffic in test).
 	var devices []json.RawMessage
-	httpGetJSON(t, "http://"+invAddr+"/devices", &devices)
+	httpGetJSONBearer(t, "http://"+invAddr+"/devices", e2eAPIKey, &devices)
 	t.Logf("/devices: %d entries (0 expected)", len(devices))
 }
 

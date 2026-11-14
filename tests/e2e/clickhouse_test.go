@@ -433,28 +433,18 @@ func TestClickHouseSchema(t *testing.T) {
 	})
 }
 
-// TestDeviceInventoryClickHouse verifies device-inventory starts and initializes
-// its ClickHouse schema when connected to a real ClickHouse server.
+// TestDeviceInventoryClickHouse verifies device-inventory runs against a real
+// ClickHouse whose schema was created by the migrations. The service used to
+// create its own tables at start-up; it no longer does — the schema belongs to
+// the migrations alone — so this test applies them first and then checks the
+// service comes up ready and serves its API.
 func TestDeviceInventoryClickHouse(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
 
 	chURL := startClickHouse(t)
-
-	root := repoRoot(t)
-	invBin := goBuild(t, root, "apps/device-inventory")
-
-	invAddr := freeAddr(t)
-	stopInv := startProc(t, invBin, map[string]string{
-		"LISTEN_ADDR":         invAddr,
-		"DB_PATH":             filepath.Join(t.TempDir(), "devices.db"),
-		"CLICKHOUSE_URL":      chURL,
-		"CLICKHOUSE_DATABASE": "netsoldier",
-	})
-	t.Cleanup(stopInv)
-
-	waitHealthy(t, "http://"+invAddr+"/healthz")
+	runMigrations(t, chURL)
 
 	type tableRow struct {
 		Name string `json:"name"`
@@ -465,7 +455,6 @@ func TestDeviceInventoryClickHouse(t *testing.T) {
 		&tables); err != nil {
 		t.Fatalf("query tables: %v", err)
 	}
-
 	want := map[string]bool{"devices": false, "device_events": false}
 	for _, tbl := range tables {
 		if _, ok := want[tbl.Name]; ok {
@@ -474,12 +463,28 @@ func TestDeviceInventoryClickHouse(t *testing.T) {
 	}
 	for name, found := range want {
 		if !found {
-			t.Errorf("InitSchema did not create table %q", name)
+			t.Fatalf("migrations did not create table %q", name)
 		}
 	}
 
-	// /devices should return valid (empty) response
+	root := repoRoot(t)
+	invBin := goBuild(t, root, "apps/device-inventory")
+
+	invAddr := freeAddr(t)
+	stopInv := startProc(t, invBin, map[string]string{
+		"LISTEN_ADDR":         invAddr,
+		"DB_PATH":             filepath.Join(t.TempDir(), "devices.db"),
+		"CLICKHOUSE_URL":      chURL,
+		"CLICKHOUSE_DATABASE": "netsoldier",
+		"DEVICE_API_KEY":      e2eAPIKey,
+		"DISCOVERY_LISTENERS": "none",
+	})
+	t.Cleanup(stopInv)
+
+	waitHealthy(t, "http://"+invAddr+"/healthz")
+	waitHealthy(t, "http://"+invAddr+"/readyz")
+
 	var devices []json.RawMessage
-	httpGetJSON(t, "http://"+invAddr+"/devices", &devices)
+	httpGetJSONBearer(t, "http://"+invAddr+"/devices", e2eAPIKey, &devices)
 	t.Logf("/devices: %d entries (0 expected)", len(devices))
 }

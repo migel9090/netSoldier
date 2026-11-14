@@ -1,286 +1,258 @@
 package store
 
 import (
+	"database/sql"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
 )
 
-func newTestStore(t *testing.T) *Store {
+// clock is a settable time source; sightings at one instant coalesce, so
+// tests that repeat a sighting move the clock past Options.Coalesce.
+type clock struct{ t time.Time }
+
+func (c *clock) now() time.Time          { return c.t }
+func (c *clock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
+func newTestStore(t *testing.T, opts ...func(*Options)) (*Store, *clock) {
 	t.Helper()
-	s, err := Open(filepath.Join(t.TempDir(), "devices.db"))
+	c := &clock{t: time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)}
+	o := Options{Now: c.now}
+	for _, f := range opts {
+		f(&o)
+	}
+	s, err := OpenWithOptions(filepath.Join(t.TempDir(), "devices.db"), o)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return s
+	return s, c
 }
 
-func TestIsRandomizedMAC(t *testing.T) {
-	randomized := []string{
-		"aa:bb:cc:dd:ee:ff", // 0xaa -> bit 1 set
-		"02:00:00:00:00:01",
-		"06-11-22-33-44-55",
-		"3a:1f:2b:00:00:01",
-	}
-	for _, m := range randomized {
-		if !IsRandomizedMAC(m) {
-			t.Errorf("IsRandomizedMAC(%q) = false, want true", m)
-		}
-	}
-
-	stable := []string{
-		"00:11:22:33:44:55", // real OUI
-		"b8:27:eb:00:00:01", // Raspberry Pi
-		"", "garbage", "zz:11:22:33:44:55", "0:11:22:33:44:55",
-	}
-	for _, m := range stable {
-		if IsRandomizedMAC(m) {
-			t.Errorf("IsRandomizedMAC(%q) = true, want false", m)
-		}
-	}
-}
-
-func TestUpsertAndGet(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.UpsertFull("00:11:22:33:44:55", "192.168.1.10", "nas",
-		"1,3,6", "MSFT 5.0", "Acme", "Linux", "nas"); err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-
-	d, err := s.GetDevice("00:11:22:33:44:55")
+func observe(t *testing.T, s *Store, o discovery.Sighting) Result {
+	t.Helper()
+	res, err := s.Observe(o)
 	if err != nil {
-		t.Fatalf("get: %v", err)
+		t.Fatalf("observe %+v: %v", o, err)
+	}
+	return res
+}
+
+func arpSeen(mac, ip string) discovery.Sighting {
+	return discovery.Sighting{Source: discovery.SourceARP, MAC: mac, IP: ip}
+}
+
+func dhcpSeen(mac, ip, host, fp, vc string) discovery.Sighting {
+	return discovery.Sighting{Source: discovery.SourceDHCP, MAC: mac, IP: ip, Name: host, Fingerprint: fp, VendorClass: vc}
+}
+
+func mustGet(t *testing.T, s *Store, mac string) *Device {
+	t.Helper()
+	d, err := s.GetDevice(mac)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if d == nil {
-		t.Fatal("device not found")
+		t.Fatalf("device %s not found", mac)
 	}
-	if d.Hostname != "nas" || d.IP != "192.168.1.10" || d.Vendor != "Acme" {
-		t.Errorf("unexpected device: %+v", d)
+	return d
+}
+
+// confirm makes a binding live: the claim, then a re-confirmation from ARP
+// after the coalescing window.
+func confirm(t *testing.T, s *Store, c *clock, mac, ip string) {
+	t.Helper()
+	observe(t, s, arpSeen(mac, ip))
+	c.advance(20 * time.Second)
+	observe(t, s, arpSeen(mac, ip))
+	if d := mustGet(t, s, mac); d.IP != ip || d.IPState != IPLive {
+		t.Fatalf("binding %s=%s not live: ip=%q state=%q", mac, ip, d.IP, d.IPState)
 	}
 }
 
-func TestUpsertDoesNotClearFieldsWithEmptyValues(t *testing.T) {
-	s := newTestStore(t)
-	mac := "00:11:22:33:44:55"
-	if err := s.UpsertFull(mac, "192.168.1.10", "nas", "1,3,6", "MSFT 5.0",
-		"Acme", "Linux", "nas"); err != nil {
-		t.Fatal(err)
+func TestObserveAndGet(t *testing.T) {
+	s, _ := newTestStore(t)
+	res := observe(t, s, dhcpSeen("00:11:22:33:44:55", "192.168.1.10", "nas", "1,3,6", "MSFT 5.0"))
+	if res.Outcome != Applied || !res.Created || !res.Changed {
+		t.Fatalf("unexpected result: %+v", res)
 	}
-	// A later sighting from ARP carries only the MAC.
-	if err := s.Upsert(mac, "", "", "", "", ""); err != nil {
-		t.Fatal(err)
+	d := mustGet(t, s, "00:11:22:33:44:55")
+	if d.Hostname != "nas" || d.HostnameSource != "dhcp" || d.IP != "192.168.1.10" ||
+		d.IPState != IPTentative || d.Fingerprint != "1,3,6" || d.VendorClass != "MSFT 5.0" {
+		t.Errorf("unexpected device: %+v", d)
 	}
+	if d.RandomizedMAC || d.Established || len(d.Labels) != 0 {
+		t.Errorf("flags: %+v", d)
+	}
+}
 
-	d, _ := s.GetDevice(mac)
-	if d.Hostname != "nas" || d.Vendor != "Acme" || d.IP != "192.168.1.10" {
+func TestPartialSightingDoesNotClearFields(t *testing.T) {
+	s, c := newTestStore(t)
+	mac := "00:11:22:33:44:55"
+	observe(t, s, dhcpSeen(mac, "192.168.1.10", "nas", "1,3,6", "MSFT 5.0"))
+	c.advance(time.Minute)
+	observe(t, s, discovery.Sighting{Source: discovery.SourceARP, MAC: mac}) // an ARP probe: MAC only
+
+	d := mustGet(t, s, mac)
+	if d.Hostname != "nas" || d.VendorClass != "MSFT 5.0" || d.IP != "192.168.1.10" {
 		t.Errorf("a partial sighting must not erase known fields: %+v", d)
 	}
 }
 
-// TestStableIDCannotHijackStableDevice is the regression test for the
-// inventory takeover. stable_id comes from DHCP options 60 and 12, which the
-// client chooses freely, and the correlating UPDATE rewrites a row's MAC. A
-// malicious device copying a neighbour's vendor class and hostname could
-// re-point that record at itself — inheriting its labels while the real
-// device disappeared from the inventory.
-func TestStableIDCannotHijackStableDevice(t *testing.T) {
-	s := newTestStore(t)
-
-	victimMAC := "b8:27:eb:11:22:33" // real OUI, not randomized
-	if err := s.UpsertFull(victimMAC, "192.168.1.10", "homeassistant",
-		"1,3,6,15", "udhcp 1.30", "Raspberry Pi", "Linux", "iot"); err != nil {
-		t.Fatal(err)
+func TestInvalidSightingsAreRefused(t *testing.T) {
+	s, _ := newTestStore(t)
+	for _, o := range []discovery.Sighting{
+		{Source: discovery.SourceARP, MAC: "01:00:5e:00:00:01", IP: "192.168.1.2"},   // multicast MAC
+		{Source: discovery.SourceARP, MAC: "00:00:00:00:00:00", IP: "192.168.1.2"},   // zero MAC
+		{Source: discovery.SourceARP, MAC: "aa:bb:cc:dd:ee:ff:00:11", IP: "1.2.3.4"}, // hlen 8
+		{Source: "bogus", MAC: "00:11:22:33:44:55"},
+		{Source: discovery.SourceMDNS, IP: "192.168.1.2"},                   // name missing
+		{Source: discovery.SourceMDNS, IP: "224.0.0.251", Name: "x"},        // not a host address
+		{Source: discovery.SourceSSDP, Name: "x"},                           // no address
+		{Source: discovery.SourceMDNS, IP: "192.168.1.2", Name: "\x00\x1b"}, // nothing printable
+	} {
+		if res := observe(t, s, o); res.Outcome != Invalid {
+			t.Errorf("%+v: outcome %s, want invalid", o, res.Outcome)
+		}
 	}
-	if err := s.SetLabels(victimMAC, []string{"critical", "trusted"}); err != nil {
-		t.Fatal(err)
+	// An unusable address on a MAC claim drops the address, not the MAC.
+	res := observe(t, s, arpSeen("00:11:22:33:44:55", "255.255.255.255"))
+	if res.Outcome != Applied || res.Device.IP != "" {
+		t.Errorf("unusable IP should be dropped: %+v", res.Device)
 	}
-
-	// Attacker uses a randomized MAC and copies the victim's DHCP identity.
-	attackerMAC := "aa:bb:cc:dd:ee:ff"
-	if err := s.UpsertFull(attackerMAC, "192.168.1.99", "homeassistant",
-		"1,3,6,15", "udhcp 1.30", "", "", ""); err != nil {
-		t.Fatal(err)
+	if s.Count() != 1 {
+		t.Errorf("Count() = %d, want 1", s.Count())
 	}
+}
 
-	victim, err := s.GetDevice(victimMAC)
+func TestNamesAreSanitizedAndBounded(t *testing.T) {
+	s, _ := newTestStore(t)
+	raw := "a\x00b\xff\x1b[31m\r\n<script>\u202e" + strings.Repeat("x", 300)
+	observe(t, s, dhcpSeen("02:00:00:00:00:01", "", raw, "", "vc\x07\x00"))
+	d := mustGet(t, s, "02:00:00:00:00:01")
+	if strings.ContainsAny(d.Hostname, "\x00\x1b\r\n\u202e") || len(d.Hostname) > discovery.MaxNameLen {
+		t.Errorf("hostname stored unsanitised: %q", d.Hostname)
+	}
+	if !strings.HasPrefix(d.Hostname, "ab[31m <script>") {
+		t.Errorf("hostname = %q", d.Hostname)
+	}
+	if d.VendorClass != "vc" {
+		t.Errorf("vendor class = %q", d.VendorClass)
+	}
+}
+
+func TestSetLabels(t *testing.T) {
+	s, _ := newTestStore(t)
+	observe(t, s, arpSeen("00:11:22:33:44:55", "192.168.1.2"))
+
+	d, err := s.SetLabels("00:11:22:33:44:55", []string{" critical ", "iot", "critical"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if victim == nil {
-		t.Fatal("the victim device was removed from the inventory — its record was hijacked")
-	}
-	if victim.IP != "192.168.1.10" {
-		t.Errorf("victim IP was rewritten to %q", victim.IP)
-	}
-	if len(victim.Labels) != 2 {
-		t.Errorf("victim labels were inherited by the attacker: %v", victim.Labels)
+	if strings.Join(d.Labels, ",") != "critical,iot" || !d.Established {
+		t.Errorf("labels trimmed and de-duplicated, device established: %+v", d)
 	}
 
-	attacker, err := s.GetDevice(attackerMAC)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := s.SetLabels("00:00:00:00:00:99", []string{"x"}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown device: err = %v", err)
 	}
-	if attacker == nil {
-		t.Fatal("the attacker should exist as its own separate record")
-	}
-	if len(attacker.Labels) != 0 {
-		t.Errorf("attacker must not inherit labels: %v", attacker.Labels)
-	}
-}
-
-// TestRandomizedMACRotationStillCorrelates: the legitimate feature must keep
-// working — one privacy MAC replacing another on the same physical device.
-func TestRandomizedMACRotationStillCorrelates(t *testing.T) {
-	s := newTestStore(t)
-
-	first := "aa:bb:cc:00:00:01"
-	if err := s.UpsertFull(first, "192.168.1.20", "iphone",
-		"1,3,6", "iPhone", "Apple", "iOS", "phone"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Same device after a MAC rotation.
-	second := "ae:bb:cc:00:00:02"
-	if err := s.UpsertFull(second, "192.168.1.21", "iphone",
-		"1,3,6", "iPhone", "Apple", "iOS", "phone"); err != nil {
-		t.Fatal(err)
-	}
-
-	devices, err := s.List()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(devices) != 1 {
-		t.Fatalf("a MAC rotation should update one record, got %d devices", len(devices))
-	}
-	if devices[0].MAC != second {
-		t.Errorf("record should carry the new MAC, got %q", devices[0].MAC)
-	}
-}
-
-func TestStableIDRequiresVendorClass(t *testing.T) {
-	s := newTestStore(t)
-	// Hostname alone must not be enough to move a device record.
-	if err := s.UpsertFull("aa:bb:cc:00:00:01", "192.168.1.20", "shared-name",
-		"", "", "", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.UpsertFull("ae:bb:cc:00:00:02", "192.168.1.21", "shared-name",
-		"", "", "", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	devices, _ := s.List()
-	if len(devices) != 2 {
-		t.Errorf("hostname-only correlation should not merge records, got %d", len(devices))
-	}
-}
-
-// TestEnrichByIPCannotRenameDevice: mDNS/SSDP are unauthenticated, so any
-// device can claim any IP. Enrichment may fill a blank, never overwrite.
-func TestEnrichByIPCannotRenameDevice(t *testing.T) {
-	s := newTestStore(t)
-	routerMAC := "00:11:22:33:44:01"
-	if err := s.UpsertFull(routerMAC, "192.168.1.1", "router",
-		"", "", "Vendor", "", "gateway"); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := s.EnrichByIP("192.168.1.1", "definitely-not-the-router"); err != nil {
-		t.Fatal(err)
-	}
-	d, _ := s.GetDevice(routerMAC)
-	if d.Hostname != "router" {
-		t.Errorf("hostname was overwritten by an unauthenticated announcement: %q", d.Hostname)
-	}
-}
-
-func TestEnrichByIPFillsMissingHostname(t *testing.T) {
-	s := newTestStore(t)
-	mac := "00:11:22:33:44:02"
-	if err := s.Upsert(mac, "192.168.1.30", "", "", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.EnrichByIP("192.168.1.30", "printer"); err != nil {
-		t.Fatal(err)
-	}
-	d, _ := s.GetDevice(mac)
-	if d.Hostname != "printer" {
-		t.Errorf("a blank hostname should be filled by enrichment, got %q", d.Hostname)
-	}
-}
-
-func TestSetLabelsRequiresKnownDevice(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.SetLabels("00:00:00:00:00:99", []string{"x"}); err == nil {
-		t.Error("labelling an unknown device should fail")
+	for _, bad := range [][]string{
+		make([]string, MaxLabels+1),
+		{strings.Repeat("a", MaxLabelLen+1)},
+		{""},
+		{"tab\there"},
+		{"bidi\u202eflip"},
+	} {
+		for i := range bad {
+			if bad[i] == "" && len(bad) > 1 {
+				bad[i] = "x" + strings.Repeat("y", i%5)
+			}
+		}
+		if _, err := s.SetLabels("00:11:22:33:44:55", bad); !errors.Is(err, ErrInvalidLabels) {
+			t.Errorf("labels %q: err = %v, want ErrInvalidLabels", bad, err)
+		}
 	}
 }
 
 func TestPruneRemovesStaleUnlabelledDevices(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.Upsert("00:11:22:33:44:01", "192.168.1.10", "old", "", "", ""); err != nil {
+	s, c := newTestStore(t)
+	observe(t, s, arpSeen("00:11:22:33:44:01", "192.168.1.10"))
+	observe(t, s, arpSeen("00:11:22:33:44:02", "192.168.1.11"))
+	if _, err := s.SetLabels("00:11:22:33:44:02", []string{"keep"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Upsert("00:11:22:33:44:02", "192.168.1.11", "labelled", "", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetLabels("00:11:22:33:44:02", []string{"keep"}); err != nil {
-		t.Fatal(err)
-	}
+	c.advance(48 * time.Hour)
+	observe(t, s, arpSeen("00:11:22:33:44:03", "192.168.1.12"))
 
-	// Everything is "now", so a negative age makes both rows stale.
-	removed, err := s.Prune(-time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if removed != 1 {
-		t.Fatalf("removed = %d, want 1 (labelled devices are kept)", removed)
-	}
-	if d, _ := s.GetDevice("00:11:22:33:44:02"); d == nil {
-		t.Error("a labelled device must survive pruning")
-	}
-}
-
-func TestPruneKeepsFreshDevices(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.Upsert("00:11:22:33:44:01", "192.168.1.10", "fresh", "", "", ""); err != nil {
-		t.Fatal(err)
-	}
 	removed, err := s.Prune(24 * time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed != 0 {
-		t.Errorf("removed = %d, want 0", removed)
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1 (labelled and fresh devices are kept)", removed)
+	}
+	if d, _ := s.GetDevice("00:11:22:33:44:02"); d == nil {
+		t.Error("a labelled device must survive pruning")
+	}
+	if s.Count() != 2 {
+		t.Errorf("Count() = %d after prune, want 2", s.Count())
 	}
 }
 
-func TestCount(t *testing.T) {
-	s := newTestStore(t)
-	for _, mac := range []string{"00:11:22:33:44:01", "00:11:22:33:44:02"} {
-		if err := s.Upsert(mac, "", "", "", "", ""); err != nil {
-			t.Fatal(err)
-		}
+func TestCountIsKeptInMemoryAndExact(t *testing.T) {
+	s, c := newTestStore(t, func(o *Options) { o.MaxDevices = 3 })
+	for _, mac := range []string{"00:11:22:33:44:01", "00:11:22:33:44:02", "00:11:22:33:44:03", "00:11:22:33:44:04"} {
+		observe(t, s, arpSeen(mac, ""))
+		c.advance(time.Second)
 	}
-	n, err := s.Count()
-	if err != nil {
+	c.advance(48 * time.Hour)
+	if _, err := s.Prune(24 * time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Errorf("Count() = %d, want 2", n)
+	observe(t, s, arpSeen("00:11:22:33:44:05", ""))
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM devices`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if s.Count() != n || n != 1 {
+		t.Errorf("Count() = %d, table has %d, want 1", s.Count(), n)
 	}
 }
 
-func TestStableIDDeterministic(t *testing.T) {
-	a := StableID("MSFT 5.0", "laptop")
-	b := StableID("MSFT 5.0", "laptop")
-	c := StableID("MSFT 5.0", "desktop")
-	if a != b {
-		t.Error("StableID should be deterministic")
-	}
-	if a == c {
-		t.Error("different hostnames should produce different IDs")
+// DI-7: the sighting path must not scan the table. Lookups by MAC, by
+// address and of a device's conflicts all use an index.
+func TestSightingPathUsesIndexes(t *testing.T) {
+	s, _ := newTestStore(t)
+	for _, q := range []string{
+		`SELECT mac FROM devices WHERE mac = 'x'`,
+		`SELECT mac FROM devices WHERE ` + byIP,
+		`SELECT id FROM conflicts WHERE (mac = 'x' OR (claimant = 'x' AND claimant != '')) AND last_seen >= ''`,
+	} {
+		rows, err := s.db.Query(`EXPLAIN QUERY PLAN `+q, "192.168.1.1")
+		if err != nil {
+			rows, err = s.db.Query(`EXPLAIN QUERY PLAN ` + q)
+		}
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		var plan []string
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan = append(plan, detail)
+		}
+		rows.Close()
+		joined := strings.Join(plan, "; ")
+		if strings.Contains(joined, "SCAN devices") || strings.Contains(joined, "SCAN conflicts") {
+			t.Errorf("%s: full scan: %s", q, joined)
+		}
 	}
 }
 
@@ -290,18 +262,67 @@ func TestOpenIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s1.Upsert("00:11:22:33:44:01", "10.0.0.1", "x", "", "", ""); err != nil {
+	if _, err := s1.Observe(arpSeen("00:11:22:33:44:01", "10.0.0.1")); err != nil {
 		t.Fatal(err)
 	}
 	_ = s1.Close()
 
-	// Re-opening runs the migrations again against an existing schema.
 	s2, err := Open(path)
 	if err != nil {
 		t.Fatalf("reopen should succeed: %v", err)
 	}
 	defer s2.Close()
-	if n, _ := s2.Count(); n != 1 {
+	if n := s2.Count(); n != 1 {
 		t.Errorf("data should survive reopen, Count() = %d", n)
+	}
+}
+
+// TestMigrationCleansV1Data opens a database written by the v1 code with
+// what it let in: several rows on one address, a key that is not a MAC
+// (DHCP hlen 16), raw control bytes in a hostname.
+func TestMigrationCleansV1Data(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v1.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE devices (mac TEXT PRIMARY KEY, ip TEXT NOT NULL DEFAULT '', hostname TEXT NOT NULL DEFAULT '',
+			fingerprint TEXT NOT NULL DEFAULT '', vendor_class TEXT NOT NULL DEFAULT '', vendor TEXT NOT NULL DEFAULT '',
+			os TEXT NOT NULL DEFAULT '', device_type TEXT NOT NULL DEFAULT '', stable_id TEXT NOT NULL DEFAULT '',
+			labels TEXT NOT NULL DEFAULT '[]', randomized_mac INTEGER NOT NULL DEFAULT 0,
+			first_seen TEXT NOT NULL, last_seen TEXT NOT NULL)`,
+		`CREATE INDEX idx_ip ON devices(ip) WHERE ip != ''`,
+		`INSERT INTO devices (mac, ip, hostname, first_seen, last_seen, stable_id) VALUES
+			('b8:27:eb:00:00:01', '192.168.1.50', 'old-holder', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'abc'),
+			('00:11:22:00:00:02', '192.168.1.50', 'new-holder', '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z', ''),
+			('aa:bb:cc:dd:ee:ff:01:02:03:04:05:06:07:08:09:0a', '', 'x', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', ''),
+			('02:00:00:00:00:01', '', 'a' || char(0) || 'b' || char(27) || '[31m', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	db.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	defer s.Close()
+	if s.Count() != 3 {
+		t.Errorf("Count() = %d, want 3 (the non-MAC key is gone)", s.Count())
+	}
+	if d := mustGet(t, s, "00:11:22:00:00:02"); d.IP != "192.168.1.50" {
+		t.Errorf("most recent holder should keep the address: %+v", d)
+	}
+	if d := mustGet(t, s, "b8:27:eb:00:00:01"); d.IP != "" {
+		t.Errorf("older holder should lose the address: %q", d.IP)
+	}
+	if d := mustGet(t, s, "02:00:00:00:00:01"); d.Hostname != "ab[31m" {
+		t.Errorf("hostname not sanitised: %q", d.Hostname)
+	}
+	if _, err := s.db.Exec(`UPDATE devices SET ip = '192.168.1.50' WHERE mac = 'b8:27:eb:00:00:01'`); err == nil {
+		t.Error("the unique index on ip should exist after migration")
 	}
 }
