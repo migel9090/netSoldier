@@ -135,6 +135,30 @@ func httpGetJSON(t *testing.T, url string, dst any) {
 	}
 }
 
+// httpGetJSONBearer is httpGetJSON with a bearer token. device-inventory
+// requires its API key on reads as well as writes, so even the "is the API
+// up" checks have to authenticate.
+func httpGetJSONBearer(t *testing.T, url, token string, dst any) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET %s: %d %s", url, resp.StatusCode, body)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+		t.Fatalf("GET %s: decode: %v", url, err)
+	}
+}
+
 func assertEq(t *testing.T, field, want, got string) {
 	t.Helper()
 	if got != want {

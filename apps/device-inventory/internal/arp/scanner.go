@@ -6,9 +6,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"syscall"
 	"time"
+
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/capture"
 )
+
+// maxScanHostBits bounds the subnet the scanner sweeps: a /16 is 65,534
+// requests, about five minutes at the sweep pace. Anything wider is a
+// configuration mistake, and enumerating it would allocate gigabytes.
+const maxScanHostBits = 16
 
 // Scanner sends ARP WHO-HAS requests for each IP in a subnet.
 // Replies are captured by the passive Listener running in parallel.
@@ -27,6 +33,13 @@ func NewScanner(cidr string, interval time.Duration) (*Scanner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse CIDR: %w", err)
 	}
+	ones, bits := subnet.Mask.Size()
+	if bits != 32 || bits-ones > maxScanHostBits {
+		return nil, fmt.Errorf("subnet %s: only IPv4 subnets of /%d or smaller can be scanned", cidr, 32-maxScanHostBits)
+	}
+	if interval <= 0 {
+		return nil, fmt.Errorf("scan interval must be positive, got %s", interval)
+	}
 
 	iface, ip, err := findInterface(subnet)
 	if err != nil {
@@ -41,17 +54,29 @@ func NewScanner(cidr string, interval time.Duration) (*Scanner, error) {
 	}, nil
 }
 
-func (s *Scanner) Run(ctx context.Context) error {
-	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(htons(ethPARP)))
+// FrameSender transmits one complete Ethernet frame. The scanner only builds
+// requests; how they reach the wire (a local AF_PACKET socket today) is
+// behind this interface.
+type FrameSender interface {
+	Send(frame []byte) error
+}
+
+// Run sweeps the subnet every interval until ctx is done. The socket only
+// transmits; replies arrive on the passive Listener's socket.
+func (s *Scanner) Run(ctx context.Context, up func()) error {
+	sender, err := capture.OpenSender(s.iface)
 	if err != nil {
-		return fmt.Errorf("raw socket: %w", err)
+		return err
 	}
-	defer syscall.Close(fd)
+	defer sender.Close()
+	up()
 
 	slog.Info("arp scanner started", "subnet", s.subnet, "iface", s.iface.Name, "interval", s.interval)
 
 	for {
-		s.sweep(fd)
+		if err := s.sweep(ctx, sender); err != nil {
+			return err
+		}
 
 		select {
 		case <-ctx.Done():
@@ -61,19 +86,33 @@ func (s *Scanner) Run(ctx context.Context) error {
 	}
 }
 
-func (s *Scanner) sweep(fd int) {
+func (s *Scanner) sweep(ctx context.Context, sender FrameSender) error {
 	ips := subnetIPs(s.subnet)
 	slog.Debug("arp scan starting", "hosts", len(ips))
 
+	failed := 0
+	var lastErr error
 	for _, ip := range ips {
-		if err := s.sendRequest(fd, ip); err != nil {
-			slog.Debug("arp send failed", "target", ip, "error", err)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err := sender.Send(s.request(ip)); err != nil {
+			failed++
+			lastErr = err
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	if failed > 0 && failed == len(ips) {
+		return fmt.Errorf("every ARP request in the sweep failed: %w", lastErr)
+	}
+	if failed > 0 {
+		slog.Warn("arp scan: some requests failed", "failed", failed, "of", len(ips), "error", lastErr)
+	}
+	return nil
 }
 
-func (s *Scanner) sendRequest(fd int, targetIP net.IP) error {
+// request builds a broadcast WHO-HAS for targetIP from this host.
+func (s *Scanner) request(targetIP net.IP) []byte {
 	frame := make([]byte, ethHdrLen+arpLen)
 
 	// Ethernet header
@@ -91,14 +130,7 @@ func (s *Scanner) sendRequest(fd int, targetIP net.IP) error {
 	copy(frame[28:32], s.localIP.To4())              // sender IP
 	// frame[32:38] target MAC stays zero
 	copy(frame[38:42], targetIP.To4()) // target IP
-
-	addr := syscall.SockaddrLinklayer{
-		Protocol: htons(ethPARP),
-		Ifindex:  s.iface.Index,
-		Halen:    6,
-		Addr:     [8]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
-	}
-	return syscall.Sendto(fd, frame, 0, &addr)
+	return frame
 }
 
 func findInterface(subnet *net.IPNet) (*net.Interface, net.IP, error) {

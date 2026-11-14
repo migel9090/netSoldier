@@ -3,87 +3,105 @@ package lldp
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
-	"log/slog"
+	"errors"
 	"net"
-	"syscall"
-	"time"
 
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/capture"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/metrics"
 )
 
 const (
-	ethPLLDP    = 0x88CC
-	ethHdrLen   = 14
-	tlvEnd      = 0
-	tlvChassis  = 1
-	tlvSysName  = 5
-	tlvSysDesc  = 6
-	tlvMgmtAddr = 8
-
-	chassisSubMAC = 4
+	ethPLLDP   = 0x88CC
+	ethHdrLen  = 14
+	tlvEnd     = 0
+	tlvSysName = 5
 )
 
-// Listener passively captures LLDP frames on the local network and
-// extracts system name, chassis MAC, and system description.
-// Requires CAP_NET_RAW.
+// The LLDP destination groups (IEEE 802.1AB). NICs drop them unless joined.
+var (
+	nearestBridge  = net.HardwareAddr{0x01, 0x80, 0xc2, 0x00, 0x00, 0x0e}
+	nonTPMRBridge  = net.HardwareAddr{0x01, 0x80, 0xc2, 0x00, 0x00, 0x03}
+	customerBridge = net.HardwareAddr{0x01, 0x80, 0xc2, 0x00, 0x00, 0x00}
+)
+
+// Listener passively captures LLDP frames on one interface and offers the
+// system name for the frame's source MAC. Requires CAP_NET_RAW.
+//
+// LLDP contributes a name only. The chassis ID and management address are
+// claims inside the payload: switches commonly send LLDP from per-port MACs
+// while managing themselves from another MAC and VLAN, so binding the
+// management address to the frame source would be wrong as often as right.
 type Listener struct {
-	ch chan<- discovery.Info
+	iface string
+	ch    chan<- discovery.Sighting
 }
 
-func NewListener(ch chan<- discovery.Info) *Listener {
-	return &Listener{ch: ch}
+// NewListener returns a listener for iface ("" = default-route interface).
+func NewListener(iface string, ch chan<- discovery.Sighting) *Listener {
+	return &Listener{iface: iface, ch: ch}
 }
 
-func (l *Listener) Run(ctx context.Context) error {
-	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(htons(ethPLLDP)))
+// Run reads until ctx is done or the socket fails.
+func (l *Listener) Run(ctx context.Context, up func()) error {
+	ifi, err := capture.ResolveInterface(l.iface)
 	if err != nil {
-		return fmt.Errorf("raw socket: %w", err)
+		return err
 	}
-	defer syscall.Close(fd)
-
-	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO,
-		&syscall.Timeval{Sec: 2}); err != nil {
-		return fmt.Errorf("set timeout: %w", err)
+	conn, err := capture.OpenPacket(ifi, ethPLLDP, nil, nearestBridge, nonTPMRBridge, customerBridge)
+	if err != nil {
+		return err
 	}
+	defer conn.Close()
+	up()
 
-	slog.Info("lldp listener started")
 	buf := make([]byte, 1518)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
+	for ctx.Err() == nil {
+		n, err := conn.Read(buf)
+		if errors.Is(err, capture.ErrTimeout) {
+			continue
 		}
-
-		n, _, err := syscall.Recvfrom(fd, buf, 0)
 		if err != nil {
-			if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
-				continue
-			}
-			return fmt.Errorf("recvfrom: %w", err)
+			return err
 		}
-		if n <= ethHdrLen {
+		metrics.FramesReceived.WithLabelValues("lldp").Inc()
+		s, err := ParseFrame(buf[:n])
+		if err != nil {
+			metrics.FramesRejected.WithLabelValues("lldp", discovery.RejectReason(err)).Inc()
 			continue
 		}
-
-		srcMAC := net.HardwareAddr(buf[6:12]).String()
-		info := parseLLDP(buf[ethHdrLen:n])
-		if info.Hostname == "" && info.Meta == "" {
-			continue
+		select {
+		case l.ch <- s:
+		case <-ctx.Done():
 		}
-		info.MAC = srcMAC
-		info.Protocol = "lldp"
-
-		l.ch <- info
 	}
+	return nil
 }
 
-func parseLLDP(data []byte) discovery.Info {
-	var info discovery.Info
-	offset := 0
+// ParseFrame returns the system name an LLDP frame announces for its own
+// Ethernet source.
+func ParseFrame(frame []byte) (discovery.Sighting, error) {
+	if len(frame) <= ethHdrLen {
+		return discovery.Sighting{}, discovery.ErrMalformed
+	}
+	if binary.BigEndian.Uint16(frame[12:14]) != ethPLLDP {
+		return discovery.Sighting{}, discovery.ErrIgnored
+	}
+	mac, ok := discovery.CanonicalMAC(frame[6:12])
+	if !ok {
+		return discovery.Sighting{}, discovery.ErrMalformed
+	}
+	name := discovery.SanitizeText(parseSysName(frame[ethHdrLen:]), discovery.MaxNameLen)
+	if name == "" {
+		return discovery.Sighting{}, discovery.ErrIgnored
+	}
+	return discovery.Sighting{Source: discovery.SourceLLDP, MAC: mac, Name: name}, nil
+}
 
+// parseSysName walks the TLV list and returns the System Name TLV's value.
+// Every step advances by at least the 2-byte header, so it terminates.
+func parseSysName(data []byte) string {
+	offset := 0
 	for offset+2 <= len(data) {
 		header := binary.BigEndian.Uint16(data[offset : offset+2])
 		tlvType := int(header >> 9)
@@ -93,45 +111,10 @@ func parseLLDP(data []byte) discovery.Info {
 		if tlvType == tlvEnd || offset+tlvLen > len(data) {
 			break
 		}
-
-		value := data[offset : offset+tlvLen]
-		switch tlvType {
-		case tlvChassis:
-			if tlvLen >= 7 && value[0] == chassisSubMAC {
-				info.MAC = net.HardwareAddr(value[1:7]).String()
-			}
-		case tlvSysName:
-			info.Hostname = string(value)
-		case tlvSysDesc:
-			info.Meta = string(value)
-		case tlvMgmtAddr:
-			if ip := parseMgmtAddr(value); ip != "" {
-				info.IP = ip
-			}
+		if tlvType == tlvSysName {
+			return string(data[offset : offset+tlvLen])
 		}
 		offset += tlvLen
 	}
-	return info
-}
-
-func parseMgmtAddr(value []byte) string {
-	if len(value) < 6 {
-		return ""
-	}
-	addrLen := int(value[0])
-	subtype := value[1]
-	if subtype == 1 && addrLen == 5 && len(value) >= 6 {
-		return net.IPv4(value[2], value[3], value[4], value[5]).String()
-	}
 	return ""
-}
-
-func htons(v uint16) uint16 {
-	return (v >> 8) | (v << 8)
-}
-
-// SetReadDeadline is unused but kept for documentation: raw sockets use
-// SO_RCVTIMEO set in Run() instead of per-read deadlines.
-func init() {
-	_ = time.Second
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	ch "github.com/migel9090/netSoldier/apps/device-inventory/internal/clickhouse"
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/metrics"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/store"
 )
 
@@ -47,12 +48,15 @@ type topoResponse struct {
 	Edges []topoEdge `json:"edges"`
 }
 
+// flowRow is one aggregate from ClickHouse. sum() and count() are UInt64,
+// which the JSON output quotes; decoding them as plain uint64 used to fail and
+// leave the topology without a single edge.
 type flowRow struct {
-	SrcIP        string `json:"src_ip"`
-	DstIP        string `json:"dst_ip"`
-	TotalBytes   uint64 `json:"total_bytes"`
-	TotalPackets uint64 `json:"total_packets"`
-	FlowCount    uint64 `json:"flow_count"`
+	SrcIP        string    `json:"src_ip"`
+	DstIP        string    `json:"dst_ip"`
+	TotalBytes   ch.UInt64 `json:"total_bytes"`
+	TotalPackets ch.UInt64 `json:"total_packets"`
+	FlowCount    ch.UInt64 `json:"flow_count"`
 }
 
 func (h *TopologyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +67,8 @@ func (h *TopologyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	devices, err := h.devices.List()
+	// Addresses are unique in the store, so each IP maps to its one holder.
+	devices, err := h.devices.ListBound()
 	if err != nil {
 		slog.Error("topology: list devices failed", "error", err)
 		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
@@ -77,9 +82,13 @@ func (h *TopologyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var edges []topoEdge
+	edges := []topoEdge{}
 	if h.ch != nil {
-		edges = h.queryFlows(r.Context(), hours)
+		var err error
+		if edges, err = h.queryFlows(r.Context(), hours); err != nil {
+			writeError(w, http.StatusBadGateway, "clickhouse query failed")
+			return
+		}
 	}
 
 	nodeMap := make(map[string]*topoNode)
@@ -122,7 +131,7 @@ func (h *TopologyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(topoResponse{Nodes: nodes, Edges: edges})
 }
 
-func (h *TopologyHandler) queryFlows(ctx context.Context, hours int) []topoEdge {
+func (h *TopologyHandler) queryFlows(ctx context.Context, hours int) ([]topoEdge, error) {
 	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -140,8 +149,9 @@ func (h *TopologyHandler) queryFlows(ctx context.Context, hours int) []topoEdge 
 
 	var rows []flowRow
 	if err := h.ch.Query(qctx, query, &rows, map[string]string{"hours": strconv.Itoa(hours)}); err != nil {
-		slog.Debug("topology: clickhouse query failed", "error", err)
-		return nil
+		metrics.ClickHouseErrors.WithLabelValues("query", "network_flows").Inc()
+		slog.Warn("topology: clickhouse query failed", "error", err)
+		return nil, err
 	}
 
 	edges := make([]topoEdge, 0, len(rows))
@@ -152,12 +162,12 @@ func (h *TopologyHandler) queryFlows(ctx context.Context, hours int) []topoEdge 
 		edges = append(edges, topoEdge{
 			Source:       r.SrcIP,
 			Target:       r.DstIP,
-			TotalBytes:   r.TotalBytes,
-			TotalPackets: r.TotalPackets,
-			FlowCount:    r.FlowCount,
+			TotalBytes:   uint64(r.TotalBytes),
+			TotalPackets: uint64(r.TotalPackets),
+			FlowCount:    uint64(r.FlowCount),
 		})
 	}
-	return edges
+	return edges, nil
 }
 
 func ensureNode(m map[string]*topoNode, ip string, devices map[string]*store.Device) {
