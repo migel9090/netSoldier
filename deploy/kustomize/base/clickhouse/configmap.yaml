@@ -2,11 +2,21 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: clickhouse-config
+  annotations:
+    # Same wave as the StatefulSet that mounts it (see statefulset.yaml).
+    argocd.argoproj.io/sync-wave: "-2"
 data:
+  # No background_pool_size here. It was set to 4, and 24.3 exits at
+  # startup with code 36: the merge-tree default
+  # number_of_free_entries_in_pool_to_execute_mutation (20) must not exceed
+  # background_pool_size x background_merges_mutations_concurrency_ratio
+  # (4 x 2 = 8). Shrinking the pool would mean lowering the merge-tree
+  # thresholds as well and starving mutations (TTL moves, the ALTERs in the
+  # migrations) on a box that is mostly idle, so the server keeps its
+  # default pool.
   memory-limits.xml: |
     <clickhouse>
         <max_server_memory_usage_ratio>0.5</max_server_memory_usage_ratio>
-        <background_pool_size>4</background_pool_size>
         <background_schedule_pool_size>2</background_schedule_pool_size>
         <mark_cache_size>536870912</mark_cache_size>
     </clickhouse>
@@ -53,6 +63,17 @@ data:
             </policies>
         </storage_configuration>
     </clickhouse>
+  # One account per client, each holding exactly the grants its code uses
+  # (the Go clients under apps/*/internal, the ml-anomaly Python, the Vector
+  # sinks, the Grafana dashboards, RITA). Two rules hold throughout:
+  #   - only `migrate` can change the netsoldier schema; every other
+  #     account is table-scoped INSERT and/or SELECT, so a compromised
+  #     service or sensor pod cannot drop, truncate or ALTER ... DELETE the
+  #     audit trail, and cannot read tables it has no use for;
+  #   - RITA reads and writes only its own databases, and only ml_beacon
+  #     reads RITA's output.
+  # A new client, or a new table for an existing one, gets its grant here in
+  # the same change.
   users-override.xml: |
     <clickhouse>
         <profiles>
@@ -60,6 +81,15 @@ data:
                 <max_memory_usage>1073741824</max_memory_usage>
                 <max_execution_time>60</max_execution_time>
             </default>
+            <!-- The migration runner copies whole tables when a key or a
+                 column type changes (020, 021, 023). On the Pi profile's
+                 µSD card that can take far longer than the 60 s every other
+                 account gets; the Job's activeDeadlineSeconds bounds it
+                 instead. -->
+            <migrate>
+                <profile>default</profile>
+                <max_execution_time>0</max_execution_time>
+            </migrate>
             <!-- RITA v5 emits SQL that the new ClickHouse analyzer rejects
                  (ARRAY JOIN aliases not in GROUP BY); scope the legacy
                  analyzer to RITA only so netSoldier's own queries keep the
@@ -73,55 +103,186 @@ data:
             <!-- Accounts are defined here with placeholders and their real
                  password hashes are substituted from the SOPS-encrypted
                  clickhouse-credentials Secret by the init container (see
-                 statefulset.yaml). Nothing in this repo carries a usable
-                 credential.
+                 statefulset.yaml), which refuses to start the server if any
+                 of them is missing, malformed or the hash of an empty
+                 password. Nothing in this repo carries a usable credential. -->
 
-                 Every account below previously did not exist, or existed
-                 with an EMPTY password: `default` was passwordless by
-                 ClickHouse's own default and `rita` was a passwordless
-                 account open to ::/0 with access_management, i.e. full
-                 administrative control of the database that holds the
-                 enforcement audit log and the S3 credentials in named
-                 collections. The only thing standing in front of it was a
-                 NetworkPolicy — and the pi-edge profile deploys none. -->
-
-            <!-- default: no longer passwordless, and not reachable off-pod.
-                 Nothing should use it; it exists because ClickHouse expects
-                 it to. -->
+            <!-- default: the local break-glass administrator for `kubectl
+                 exec ... clickhouse-client`. No service uses it.
+                 The stock users.xml gives it an empty <password> and
+                 ::/0, and both have to be removed explicitly: a
+                 password_sha256_hex next to the stock <password> is a
+                 startup error ("More than one field of 'password',
+                 'password_sha256_hex' ..."), and a plain <networks> block
+                 is merged into the stock one instead of replacing it. -->
             <default>
+                <password remove="1"/>
                 <password_sha256_hex>__DEFAULT_PASSWORD_SHA256__</password_sha256_hex>
-                <networks><ip>127.0.0.1</ip><ip>::1</ip></networks>
+                <networks replace="replace">
+                    <ip>127.0.0.1</ip>
+                    <ip>::1</ip>
+                </networks>
                 <profile>default</profile>
             </default>
 
-            <!-- writer: the services' ingest account. INSERT and SELECT on
-                 the netsoldier database, nothing else. No DDL, no DROP, so a
-                 compromised service pod cannot erase the audit trail. -->
-            <writer>
-                <password_sha256_hex>__WRITER_PASSWORD_SHA256__</password_sha256_hex>
+            <!-- migrate: the clickhouse-migrate Job (deploy/clickhouse/
+                 migrate.sh). The only account that can change the schema,
+                 and only inside netsoldier: no DROP DATABASE, no access
+                 management, nothing on RITA's databases. It also owns the
+                 runner's bookkeeping table, netsoldier.schema_migrations.
+                 A migration that needs more (views, dictionaries) extends
+                 this grant in the same change. -->
+            <migrate>
+                <password_sha256_hex>__MIGRATE_PASSWORD_SHA256__</password_sha256_hex>
+                <profile>migrate</profile>
+                <networks><ip>__POD_CIDR__</ip></networks>
+                <grants>
+                    <query>GRANT CREATE DATABASE, CREATE TABLE, DROP TABLE, ALTER TABLE, SELECT, INSERT ON netsoldier.*</query>
+                </grants>
+            </migrate>
+
+            <!-- killswitch: killswitch-controller's audit writer
+                 (internal/actions/audit.go). Append-only: it can add audit
+                 records and cannot read, rewrite or delete any. -->
+            <killswitch>
+                <password_sha256_hex>__KILLSWITCH_PASSWORD_SHA256__</password_sha256_hex>
                 <profile>default</profile>
                 <networks><ip>__POD_CIDR__</ip></networks>
                 <grants>
-                    <query>GRANT INSERT, SELECT ON netsoldier.*</query>
+                    <query>GRANT INSERT ON netsoldier.audit_log</query>
                 </grants>
-            </writer>
+            </killswitch>
 
-            <!-- reader: dashboards and the UI. SELECT only. -->
-            <reader>
-                <password_sha256_hex>__READER_PASSWORD_SHA256__</password_sha256_hex>
+            <!-- detection: detection-engine. Tails the sensor and ML tables
+                 (internal/ingest), persists and reloads analyst feedback
+                 (internal/feedback) and writes correlated flows
+                 (internal/correlator). -->
+            <detection>
+                <password_sha256_hex>__DETECTION_PASSWORD_SHA256__</password_sha256_hex>
+                <profile>default</profile>
+                <networks><ip>__POD_CIDR__</ip></networks>
+                <grants>
+                    <query>GRANT SELECT ON netsoldier.suricata_alerts</query>
+                    <query>GRANT SELECT ON netsoldier.zeek_intel</query>
+                    <query>GRANT SELECT ON netsoldier.zeek_ssl</query>
+                    <query>GRANT SELECT ON netsoldier.ml_beacons</query>
+                    <query>GRANT SELECT ON netsoldier.ml_anomalies</query>
+                    <query>GRANT SELECT, INSERT ON netsoldier.detection_feedback</query>
+                    <query>GRANT INSERT ON netsoldier.connections</query>
+                </grants>
+            </detection>
+
+            <!-- inventory: device-inventory. Writes sightings and the device
+                 snapshot (cmd/device-inventory pipeline) and reads per-device
+                 history for the detail and topology APIs (internal/api). Its
+                 start-up check looks both written tables up in system.tables,
+                 which only lists tables the account holds a grant on. -->
+            <inventory>
+                <password_sha256_hex>__INVENTORY_PASSWORD_SHA256__</password_sha256_hex>
+                <profile>default</profile>
+                <networks><ip>__POD_CIDR__</ip></networks>
+                <grants>
+                    <query>GRANT INSERT ON netsoldier.device_events</query>
+                    <query>GRANT INSERT ON netsoldier.devices</query>
+                    <query>GRANT SELECT ON netsoldier.connections</query>
+                    <query>GRANT SELECT ON netsoldier.dns_queries</query>
+                    <query>GRANT SELECT ON netsoldier.alerts</query>
+                    <query>GRANT SELECT ON netsoldier.network_flows</query>
+                </grants>
+            </inventory>
+
+            <!-- ml_beacon: ml-anomaly's beacon-sync container
+                 (ml_anomaly.sync). The one account that crosses pipelines:
+                 it reads RITA's threat_mixtape and writes ml_beacons. No
+                 account used to hold both, so every beacon sync was
+                 refused. -->
+            <ml_beacon>
+                <password_sha256_hex>__ML_BEACON_PASSWORD_SHA256__</password_sha256_hex>
+                <profile>default</profile>
+                <networks><ip>__POD_CIDR__</ip></networks>
+                <grants>
+                    <query>GRANT SELECT ON netsoldier_rita.threat_mixtape</query>
+                    <query>GRANT INSERT ON netsoldier.ml_beacons</query>
+                </grants>
+            </ml_beacon>
+
+            <!-- ml_flow: ml-anomaly's flow-anomaly container
+                 (ml_anomaly.flowsync, and ml_anomaly.train which it calls).
+                 Nothing on RITA's databases. -->
+            <ml_flow>
+                <password_sha256_hex>__ML_FLOW_PASSWORD_SHA256__</password_sha256_hex>
+                <profile>default</profile>
+                <networks><ip>__POD_CIDR__</ip></networks>
+                <grants>
+                    <query>GRANT SELECT ON netsoldier.connections</query>
+                    <query>GRANT INSERT ON netsoldier.ml_anomalies</query>
+                </grants>
+            </ml_flow>
+
+            <!-- zeek / suricata: the Vector sidecars next to each sensor.
+                 Separate accounts because each sensor parses hostile
+                 traffic: a compromised Zeek pod must not be able to forge
+                 the Suricata alerts detection-engine acts on, or the
+                 reverse. INSERT only. -->
+            <zeek>
+                <password_sha256_hex>__ZEEK_PASSWORD_SHA256__</password_sha256_hex>
+                <profile>default</profile>
+                <networks><ip>__POD_CIDR__</ip></networks>
+                <grants>
+                    <query>GRANT INSERT ON netsoldier.zeek_conn</query>
+                    <query>GRANT INSERT ON netsoldier.zeek_dns</query>
+                    <query>GRANT INSERT ON netsoldier.zeek_ssl</query>
+                    <query>GRANT INSERT ON netsoldier.zeek_x509</query>
+                    <query>GRANT INSERT ON netsoldier.zeek_http</query>
+                    <query>GRANT INSERT ON netsoldier.zeek_intel</query>
+                </grants>
+            </zeek>
+            <suricata>
+                <password_sha256_hex>__SURICATA_PASSWORD_SHA256__</password_sha256_hex>
+                <profile>default</profile>
+                <networks><ip>__POD_CIDR__</ip></networks>
+                <grants>
+                    <query>GRANT INSERT ON netsoldier.suricata_alerts</query>
+                    <query>GRANT INSERT ON netsoldier.suricata_dns</query>
+                    <query>GRANT INSERT ON netsoldier.suricata_tls</query>
+                </grants>
+            </suricata>
+
+            <!-- vector: the Vector aggregator (deploy/observability/vector,
+                 observability namespace), fed by the edge forwarders. -->
+            <vector>
+                <password_sha256_hex>__VECTOR_PASSWORD_SHA256__</password_sha256_hex>
+                <profile>default</profile>
+                <networks><ip>__POD_CIDR__</ip></networks>
+                <grants>
+                    <query>GRANT INSERT ON netsoldier.network_flows</query>
+                    <query>GRANT INSERT ON netsoldier.dns_queries</query>
+                    <query>GRANT INSERT ON netsoldier.alerts</query>
+                    <query>GRANT INSERT ON netsoldier.events</query>
+                </grants>
+            </vector>
+
+            <!-- grafana: the Grafana ClickHouse datasource
+                 (observability namespace). The dashboards span nearly every
+                 netsoldier table, so this grant is database-wide, but it is
+                 read-only and does not reach RITA's databases. -->
+            <grafana>
+                <password_sha256_hex>__GRAFANA_PASSWORD_SHA256__</password_sha256_hex>
                 <profile>default</profile>
                 <networks><ip>__POD_CIDR__</ip></networks>
                 <grants>
                     <query>GRANT SELECT ON netsoldier.*</query>
                 </grants>
-            </reader>
+            </grafana>
 
-            <!-- rita: the RITA importer owns its own databases and needs DDL
-                 there, but has no business touching netsoldier.* and no
-                 access_management. Dropping access_management and
-                 named_collection_control is the point: they granted the
-                 ability to create users and read the named collections that
-                 hold the Garage S3 credentials. -->
+            <!-- rita: the RITA importer manages its own schema (it creates,
+                 alters and truncates tables and materialized views on every
+                 import), so it keeps DDL, but only inside its own two
+                 databases: no access_management, no
+                 named_collection_control (which exposed the Garage S3
+                 credentials), nothing on netsoldier.*. ALL on a database
+                 includes CREATE DATABASE for that name, so the former
+                 CREATE DATABASE ON *.* is gone too. -->
             <rita>
                 <password_sha256_hex>__RITA_PASSWORD_SHA256__</password_sha256_hex>
                 <profile>rita</profile>
@@ -129,435 +290,7 @@ data:
                 <grants>
                     <query>GRANT ALL ON netsoldier_rita.*</query>
                     <query>GRANT ALL ON metadatabase.*</query>
-                    <query>GRANT CREATE DATABASE ON *.*</query>
                 </grants>
             </rita>
         </users>
     </clickhouse>
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: clickhouse-init
-data:
-  001_database.sql: |
-    CREATE DATABASE IF NOT EXISTS netsoldier;
-  002_devices.sql: |
-    CREATE TABLE IF NOT EXISTS netsoldier.devices (
-        mac          String,
-        ip           String,
-        hostname     String,
-        fingerprint  String,
-        vendor_class String,
-        vendor       String,
-        os           String,
-        device_type  String,
-        stable_id    String,
-        labels       Array(String),
-        first_seen   DateTime,
-        last_seen    DateTime,
-        updated_at   DateTime DEFAULT now()
-    ) ENGINE = ReplacingMergeTree(updated_at)
-    ORDER BY mac;
-    CREATE TABLE IF NOT EXISTS netsoldier.device_events (
-        timestamp    DateTime,
-        mac          String,
-        ip           String,
-        hostname     String,
-        vendor       String,
-        protocol     LowCardinality(String),
-        event_type   LowCardinality(String)
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, mac)
-    TTL timestamp + INTERVAL 30 DAY;
-  003_network_flows.sql: |
-    CREATE TABLE IF NOT EXISTS netsoldier.network_flows (
-        timestamp    DateTime,
-        src_ip       String,
-        src_port     UInt16,
-        dst_ip       String,
-        dst_port     UInt16,
-        protocol     UInt8,
-        bytes_in     UInt64,
-        bytes_out    UInt64,
-        packets_in   UInt32,
-        packets_out  UInt32,
-        duration_ms  UInt32,
-        tcp_flags    UInt8,
-        vlan_id      UInt16
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, src_ip, dst_ip)
-    TTL timestamp + INTERVAL 30 DAY;
-  004_dns_queries.sql: |
-    CREATE TABLE IF NOT EXISTS netsoldier.dns_queries (
-        timestamp    DateTime,
-        client_ip    String,
-        domain       String,
-        query_type   LowCardinality(String),
-        answer       String,
-        status       LowCardinality(String),
-        response_ms  UInt16,
-        blocked      UInt8
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, client_ip, domain)
-    TTL timestamp + INTERVAL 30 DAY;
-  005_alerts.sql: |
-    CREATE TABLE IF NOT EXISTS netsoldier.alerts (
-        timestamp    DateTime,
-        id           String,
-        domain       String,
-        client_ip    String,
-        query_type   LowCardinality(String),
-        matched_ioc  String,
-        severity     LowCardinality(String),
-        source       LowCardinality(String),
-        acknowledged UInt8 DEFAULT 0
-    ) ENGINE = ReplacingMergeTree()
-    ORDER BY (timestamp, id)
-    TTL timestamp + INTERVAL 90 DAY;
-  006_events.sql: |
-    CREATE TABLE IF NOT EXISTS netsoldier.events (
-        timestamp    DateTime,
-        source       LowCardinality(String),
-        level        LowCardinality(String),
-        message      String,
-        metadata     String
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, source)
-    TTL timestamp + INTERVAL 90 DAY;
-  007_connections.sql: |
-    CREATE TABLE IF NOT EXISTS netsoldier.connections (
-        timestamp       DateTime,
-        src_mac         String,
-        src_hostname    String,
-        src_vendor      String,
-        src_os          String,
-        src_device_type String,
-        src_ip          String,
-        src_port        UInt16,
-        dst_ip          String,
-        dst_domain      String,
-        dst_port        UInt16,
-        protocol        UInt8,
-        bytes_in        UInt64,
-        bytes_out       UInt64,
-        packets_in      UInt32,
-        packets_out     UInt32,
-        duration_ms     UInt32,
-        tcp_flags       UInt8,
-        vlan_id         UInt16
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, src_mac, dst_ip)
-    TTL timestamp + INTERVAL 30 DAY;
-  008_audit_log.sql: |
-    CREATE TABLE IF NOT EXISTS netsoldier.audit_log (
-        timestamp    DateTime,
-        action_id    String,
-        from_state   LowCardinality(String),
-        to_state     LowCardinality(String),
-        actor        String,
-        reason       String,
-        detection_id String,
-        target_mac   String,
-        target_ip    String,
-        action_type  LowCardinality(String)
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, action_id)
-    TTL timestamp + INTERVAL 180 DAY;
-  009_retention.sql: |
-    ALTER TABLE netsoldier.alerts MODIFY TTL timestamp + INTERVAL 90 DAY;
-    ALTER TABLE netsoldier.audit_log MODIFY TTL timestamp + INTERVAL 180 DAY;
-  010_suricata.sql: |
-    CREATE TABLE IF NOT EXISTS netsoldier.suricata_alerts (
-        timestamp    DateTime,
-        flow_id      UInt64,
-        src_ip       String,
-        src_port     UInt16,
-        dest_ip      String,
-        dest_port    UInt16,
-        proto        LowCardinality(String),
-        alert_action LowCardinality(String),
-        alert_gid    UInt32,
-        alert_signature_id UInt32,
-        alert_rev    UInt32,
-        alert_signature    String,
-        alert_category     LowCardinality(String),
-        alert_severity     UInt8,
-        app_proto    LowCardinality(String),
-        flow_pkts_toserver  UInt32 DEFAULT 0,
-        flow_pkts_toclient  UInt32 DEFAULT 0,
-        flow_bytes_toserver UInt64 DEFAULT 0,
-        flow_bytes_toclient UInt64 DEFAULT 0,
-        threat_intel String DEFAULT ''
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, alert_signature_id, src_ip)
-    TTL timestamp + INTERVAL 90 DAY;
-    ALTER TABLE netsoldier.suricata_alerts
-        ADD COLUMN IF NOT EXISTS threat_intel String DEFAULT '';
-    CREATE TABLE IF NOT EXISTS netsoldier.suricata_dns (
-        timestamp    DateTime,
-        flow_id      UInt64,
-        src_ip       String,
-        src_port     UInt16,
-        dest_ip      String,
-        dest_port    UInt16,
-        proto        LowCardinality(String),
-        dns_type     LowCardinality(String),
-        dns_rrtype   LowCardinality(String),
-        dns_rrname   String,
-        dns_rdata    String,
-        dns_rcode    LowCardinality(String),
-        dns_id       UInt16
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, src_ip, dns_rrname)
-    TTL timestamp + INTERVAL 30 DAY;
-    CREATE TABLE IF NOT EXISTS netsoldier.suricata_tls (
-        timestamp    DateTime,
-        flow_id      UInt64,
-        src_ip       String,
-        src_port     UInt16,
-        dest_ip      String,
-        dest_port    UInt16,
-        proto        LowCardinality(String),
-        tls_version  LowCardinality(String),
-        tls_sni      String,
-        tls_subject  String,
-        tls_issuerdn String,
-        tls_serial   String,
-        tls_ja3_hash  String,
-        tls_ja3s_hash String
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, src_ip, tls_sni)
-    TTL timestamp + INTERVAL 30 DAY;
-  011_zeek.sql: |
-    CREATE TABLE IF NOT EXISTS netsoldier.zeek_conn (
-        timestamp   DateTime,
-        uid         String,
-        src_ip      String,
-        src_port    UInt16,
-        dst_ip      String,
-        dst_port    UInt16,
-        proto       LowCardinality(String),
-        service     LowCardinality(String),
-        duration_ms UInt64,
-        orig_bytes  UInt64,
-        resp_bytes  UInt64,
-        conn_state  LowCardinality(String),
-        local_orig  UInt8,
-        local_resp  UInt8,
-        history     String,
-        orig_pkts   UInt64,
-        resp_pkts   UInt64
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, src_ip, dst_ip)
-    TTL timestamp + INTERVAL 30 DAY;
-    CREATE TABLE IF NOT EXISTS netsoldier.zeek_dns (
-        timestamp  DateTime,
-        uid        String,
-        src_ip     String,
-        src_port   UInt16,
-        dst_ip     String,
-        dst_port   UInt16,
-        proto      LowCardinality(String),
-        query      String,
-        qtype_name LowCardinality(String),
-        rcode_name LowCardinality(String),
-        answers    Array(String),
-        rejected   UInt8
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, src_ip, query)
-    TTL timestamp + INTERVAL 30 DAY;
-    CREATE TABLE IF NOT EXISTS netsoldier.zeek_ssl (
-        timestamp   DateTime,
-        uid         String,
-        src_ip      String,
-        src_port    UInt16,
-        dst_ip      String,
-        dst_port    UInt16,
-        version     LowCardinality(String),
-        cipher      LowCardinality(String),
-        curve       LowCardinality(String),
-        server_name String,
-        resumed     UInt8,
-        established UInt8,
-        subject     String,
-        issuer      String,
-        ja3           String DEFAULT '',
-        ja3s          String DEFAULT '',
-        tls_client_fp String DEFAULT ''
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, src_ip, server_name)
-    TTL timestamp + INTERVAL 30 DAY;
-    ALTER TABLE netsoldier.zeek_ssl ADD COLUMN IF NOT EXISTS ja3 String DEFAULT '';
-    ALTER TABLE netsoldier.zeek_ssl ADD COLUMN IF NOT EXISTS ja3s String DEFAULT '';
-    ALTER TABLE netsoldier.zeek_ssl ADD COLUMN IF NOT EXISTS tls_client_fp String DEFAULT '';
-    CREATE TABLE IF NOT EXISTS netsoldier.zeek_x509 (
-        timestamp        DateTime,
-        fingerprint      String,
-        serial           String,
-        subject          String,
-        issuer           String,
-        not_valid_before DateTime,
-        not_valid_after  DateTime,
-        key_alg          LowCardinality(String),
-        key_length       UInt16,
-        san_dns          Array(String)
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, fingerprint)
-    TTL timestamp + INTERVAL 30 DAY;
-    CREATE TABLE IF NOT EXISTS netsoldier.zeek_http (
-        timestamp         DateTime,
-        uid               String,
-        src_ip            String,
-        src_port          UInt16,
-        dst_ip            String,
-        dst_port          UInt16,
-        method            LowCardinality(String),
-        host              String,
-        uri               String,
-        referrer          String,
-        user_agent        String,
-        status_code       UInt16,
-        request_body_len  UInt64,
-        response_body_len UInt64
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, src_ip, host)
-    TTL timestamp + INTERVAL 30 DAY;
-  012_drop_foxio_fingerprints.sql: |
-    -- ADR-0003: the FoxIO-licensed JA4+ package was replaced by a
-    -- first-party JA4 (BSD spec) implementation; JA4S/JA4H are gone.
-    ALTER TABLE netsoldier.zeek_ssl DROP COLUMN IF EXISTS ja4s;
-    ALTER TABLE netsoldier.zeek_http DROP COLUMN IF EXISTS ja4h;
-  013_zeek_intel.sql: |
-    -- Zeek Intel framework hits (step 107): IoC observations on live
-    -- traffic (DOMAIN via SNI/DNS/cert, ADDR, JA3, first-party JA4, ...).
-    CREATE TABLE IF NOT EXISTS netsoldier.zeek_intel (
-        timestamp      DateTime,
-        uid            String,
-        src_ip         String,
-        src_port       UInt16,
-        dst_ip         String,
-        dst_port       UInt16,
-        indicator      String,
-        indicator_type LowCardinality(String),
-        seen_where     LowCardinality(String),
-        matched        Array(String),
-        sources        Array(String)
-    ) ENGINE = MergeTree()
-    ORDER BY (timestamp, indicator)
-    TTL timestamp + INTERVAL 30 DAY;
-  014_ml_beacons.sql: |
-    -- ml-anomaly beacon detections derived from RITA threat_mixtape
-    -- (step 112). detection-engine's unified ingest tails this table.
-    CREATE TABLE IF NOT EXISTS netsoldier.ml_beacons (
-        timestamp        DateTime DEFAULT now(),
-        src_ip           String,
-        dst_ip           String,
-        dst_domain       String DEFAULT '',
-        beacon_score     Float64,
-        connection_count UInt32,
-        confidence       UInt8,
-        severity         LowCardinality(String),
-        beacon_type      LowCardinality(String) DEFAULT '',
-        tags             Array(String)
-    ) ENGINE = ReplacingMergeTree(timestamp)
-    ORDER BY (src_ip, dst_ip)
-    TTL timestamp + INTERVAL 30 DAY;
-  015_rename_ja4_column.sql: |
-    -- ADR-0003: our produced TLS client fingerprint is renamed off the FoxIO
-    -- trademark "JA4" to the neutral, descriptive tls_client_fp. The values
-    -- stay JA4-format-compatible. Rename the column for existing databases
-    -- (the fresh CREATE above already uses the new name; guard so re-runs and
-    -- fresh installs are both no-ops).
-    ALTER TABLE netsoldier.zeek_ssl
-        RENAME COLUMN IF EXISTS ja4 TO tls_client_fp;
-  016_ml_anomalies.sql: |
-    -- ml-anomaly Isolation Forest flow anomalies (step 113): per-source
-    -- window aggregates that deviate from the household baseline. Feature
-    -- snapshot is stored alongside the score so an analyst can see *why*
-    -- a window was flagged. detection-engine's unified ingest tails this
-    -- table as the volumetric signal for composite-confidence (step 116).
-    CREATE TABLE IF NOT EXISTS netsoldier.ml_anomalies (
-        timestamp       DateTime DEFAULT now(),
-        window_start    DateTime,
-        src_ip          String,
-        anomaly_score   Float64,
-        confidence      UInt8,
-        severity        LowCardinality(String),
-        conn_count      UInt32,
-        bytes_out       UInt64,
-        bytes_in        UInt64,
-        dst_fanout      UInt32,
-        port_fanout     UInt32,
-        avg_duration_ms Float64,
-        model_version   LowCardinality(String),
-        tags            Array(String)
-    ) ENGINE = ReplacingMergeTree(timestamp)
-    ORDER BY (src_ip, window_start)
-    TTL timestamp + INTERVAL 30 DAY;
-  017_detection_feedback.sql: |
-    -- Analyst false-positive feedback (step 118). detection-engine records
-    -- each verdict here and, on restart, rebuilds active suppressions with
-    -- argMax(verdict, timestamp) per (matched_ioc, client_ip). An empty
-    -- client_ip scopes the verdict to the indicator on every device.
-    CREATE TABLE IF NOT EXISTS netsoldier.detection_feedback (
-        timestamp   DateTime DEFAULT now(),
-        alert_id    String DEFAULT '',
-        matched_ioc String,
-        client_ip   String DEFAULT '',
-        verdict     LowCardinality(String),
-        reason      String DEFAULT '',
-        analyst     String DEFAULT ''
-    ) ENGINE = ReplacingMergeTree(timestamp)
-    ORDER BY (matched_ioc, client_ip, timestamp)
-    TTL timestamp + INTERVAL 365 DAY;
-  018_cold_tier.sql: |
-    -- Cold tier (step 119): move aged parts to the Garage-backed `cold`
-    -- volume (storage.xml `tiered` policy) and extend total retention.
-    -- Append-only time-series tables only; ReplacingMergeTree state
-    -- tables (ml_beacons, ml_anomalies, detection_feedback) stay
-    -- hot-only and are archived by the daily Parquet cold-export.
-    ALTER TABLE netsoldier.network_flows MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.network_flows MODIFY TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.dns_queries MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.dns_queries MODIFY TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.connections MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.connections MODIFY TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.device_events MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.device_events MODIFY TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.alerts MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.alerts MODIFY TTL timestamp + INTERVAL 90 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.events MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.events MODIFY TTL timestamp + INTERVAL 90 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.suricata_alerts MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.suricata_alerts MODIFY TTL timestamp + INTERVAL 90 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.suricata_dns MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.suricata_dns MODIFY TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.suricata_tls MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.suricata_tls MODIFY TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.zeek_conn MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.zeek_conn MODIFY TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.zeek_dns MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.zeek_dns MODIFY TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.zeek_ssl MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.zeek_ssl MODIFY TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.zeek_x509 MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.zeek_x509 MODIFY TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.zeek_http MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.zeek_http MODIFY TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.zeek_intel MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.zeek_intel MODIFY TTL timestamp + INTERVAL 30 DAY TO VOLUME 'cold', timestamp + INTERVAL 365 DAY DELETE;
-    ALTER TABLE netsoldier.audit_log MODIFY SETTING storage_policy = 'tiered';
-    ALTER TABLE netsoldier.audit_log MODIFY TTL timestamp + INTERVAL 180 DAY TO VOLUME 'cold', timestamp + INTERVAL 730 DAY DELETE;
-  019_flow_enrichment.sql: |
-    -- Vector aggregator enrichment (step 120): geo/ASN (DB-IP Lite),
-    -- threat-intel tags (threat-intel-sync /export/csv) and reverse-DNS
-    -- on alerts.
-    ALTER TABLE netsoldier.network_flows ADD COLUMN IF NOT EXISTS dst_country LowCardinality(String) DEFAULT '';
-    ALTER TABLE netsoldier.network_flows ADD COLUMN IF NOT EXISTS dst_asn UInt32 DEFAULT 0;
-    ALTER TABLE netsoldier.network_flows ADD COLUMN IF NOT EXISTS dst_as_org String DEFAULT '';
-    ALTER TABLE netsoldier.network_flows ADD COLUMN IF NOT EXISTS threat_source LowCardinality(String) DEFAULT '';
-    ALTER TABLE netsoldier.network_flows ADD COLUMN IF NOT EXISTS threat_name String DEFAULT '';
-    ALTER TABLE netsoldier.dns_queries ADD COLUMN IF NOT EXISTS threat_source LowCardinality(String) DEFAULT '';
-    ALTER TABLE netsoldier.dns_queries ADD COLUMN IF NOT EXISTS threat_name String DEFAULT '';
-    ALTER TABLE netsoldier.alerts ADD COLUMN IF NOT EXISTS rdns String DEFAULT '';

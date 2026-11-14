@@ -20,6 +20,19 @@ service:
       port: 8686
       protocol: TCP
 
+# ClickHouse credentials for the sinks below (the `vector` account). This
+# release runs in the observability namespace, so the password comes from
+# the clickhouse-credentials Secret there, not the one in netsoldier
+# (deploy/kustomize/base/clickhouse/observability-secret.example.yaml).
+env:
+  - name: CLICKHOUSE_USER
+    value: "vector"
+  - name: CLICKHOUSE_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: clickhouse-credentials
+        key: vector-password
+
 # --watch-config (step 120): the ioc-refresh sidecar atomically swaps
 # ioc.csv and then rewrites the trigger file under /etc/vector-dynamic/.
 # The trigger change fires a config reload; the reload re-reads every file
@@ -370,6 +383,10 @@ customConfig:
         if ._edge_host == null { ._edge_host = "unknown" }
 
   # ── Sinks ───────────────────────────────────────────────────
+  # The ClickHouse sinks authenticate as the `vector` account (INSERT on
+  # network_flows, dns_queries, alerts, events). Credentials come from the
+  # env block at the top of this file; `:?` makes Vector refuse to start
+  # without them instead of retrying unauthenticated inserts forever.
   sinks:
     clickhouse_flows:
       type: clickhouse
@@ -378,6 +395,10 @@ customConfig:
       database: netsoldier
       table: network_flows
       skip_unknown_fields: true
+      auth:
+        strategy: basic
+        user: "${CLICKHOUSE_USER:?CLICKHOUSE_USER must be set}"
+        password: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
       batch:
         max_bytes: 1048576
         timeout_secs: 5
@@ -389,6 +410,10 @@ customConfig:
       database: netsoldier
       table: dns_queries
       skip_unknown_fields: true
+      auth:
+        strategy: basic
+        user: "${CLICKHOUSE_USER:?CLICKHOUSE_USER must be set}"
+        password: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
       batch:
         max_bytes: 1048576
         timeout_secs: 5
@@ -400,6 +425,10 @@ customConfig:
       database: netsoldier
       table: alerts
       skip_unknown_fields: true
+      auth:
+        strategy: basic
+        user: "${CLICKHOUSE_USER:?CLICKHOUSE_USER must be set}"
+        password: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
       batch:
         max_bytes: 524288
         timeout_secs: 3
@@ -411,6 +440,10 @@ customConfig:
       database: netsoldier
       table: events
       skip_unknown_fields: true
+      auth:
+        strategy: basic
+        user: "${CLICKHOUSE_USER:?CLICKHOUSE_USER must be set}"
+        password: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
       batch:
         max_bytes: 1048576
         timeout_secs: 10

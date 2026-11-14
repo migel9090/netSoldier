@@ -9,6 +9,7 @@ resources:
   - threat-intel-sync.yaml
   - web-ui.yaml
   - clickhouse.yaml
+  - clickhouse-migrate.yaml
   - clickhouse-cold-export.yaml
   - misp-core.yaml
   - misp-mariadb.yaml

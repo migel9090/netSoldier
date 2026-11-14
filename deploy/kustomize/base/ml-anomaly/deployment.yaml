@@ -30,6 +30,16 @@ spec:
               value: "http://clickhouse.netsoldier.svc:8123"
             - name: CLICKHOUSE_DATABASE
               value: "netsoldier"
+            # The only account that may read RITA's output (threat_mixtape)
+            # and write ml_beacons. Contract name CLICKHOUSE_USER; the code
+            # still reading CLICKHOUSE_USERNAME is being changed to match.
+            - name: CLICKHOUSE_USER
+              value: "ml_beacon"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: ml-beacon-password
             - name: RITA_DATABASE
               value: "netsoldier_rita"
             - name: BEACON_SYNC_INTERVAL_SECONDS
@@ -59,6 +69,15 @@ spec:
               value: "http://clickhouse.netsoldier.svc:8123"
             - name: CLICKHOUSE_DATABASE
               value: "netsoldier"
+            # SELECT on connections, INSERT on ml_anomalies; no access to
+            # RITA's databases.
+            - name: CLICKHOUSE_USER
+              value: "ml_flow"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: ml-flow-password
             - name: FLOW_WINDOW_MINUTES
               value: "10"
             - name: FLOW_BASELINE_DAYS

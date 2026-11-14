@@ -2,6 +2,10 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-clickhouse
+  annotations:
+    # Created with the server (wave -2) so the migrate Job (wave -1) is
+    # admitted on the first sync that introduces it, not one sync later.
+    argocd.argoproj.io/sync-wave: "-2"
 spec:
   podSelector:
     matchLabels:
@@ -37,6 +41,15 @@ spec:
               app.kubernetes.io/name: zeek
       ports:
         - port: 8123
+          protocol: TCP
+    # The schema migration Job (migrate-job.yaml): clickhouse-client only.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: clickhouse
+              app.kubernetes.io/component: migrate
+      ports:
+        - port: 9000
           protocol: TCP
     - from:
         - podSelector:

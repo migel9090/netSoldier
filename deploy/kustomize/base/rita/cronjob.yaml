@@ -38,10 +38,18 @@ spec:
               env:
                 - name: DB_ADDRESS
                   value: "clickhouse.netsoldier.svc:9000"
+                # RITA is upstream code and reads CLICKHOUSE_USERNAME (not
+                # the contract's CLICKHOUSE_USER): v5.1.2 exits with
+                # "environment variable CLICKHOUSE_USERNAME not set"
+                # without it. The password used to be an empty literal; no
+                # account accepts an empty password any more.
                 - name: CLICKHOUSE_USERNAME
                   value: "rita"
                 - name: CLICKHOUSE_PASSWORD
-                  value: ""
+                  valueFrom:
+                    secretKeyRef:
+                      name: clickhouse-credentials
+                      key: rita-password
                 - name: CONFIG_DIR
                   value: "/work"
                 - name: CONFIG_FILE

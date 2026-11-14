@@ -36,16 +36,15 @@ spec:
               value: "http://clickhouse.netsoldier.svc:8123"
             - name: CLICKHOUSE_DATABASE
               value: "netsoldier"
+            # Own account: SELECT on the sensor/ML/feedback tables it tails,
+            # INSERT on detection_feedback and connections, no DDL.
             - name: CLICKHOUSE_USER
-              valueFrom:
-                secretKeyRef:
-                  name: clickhouse-credentials
-                  key: writer-username
+              value: "detection"
             - name: CLICKHOUSE_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: clickhouse-credentials
-                  key: writer-password
+                  key: detection-password
             - name: DEVICE_INVENTORY_URL
               value: "http://device-inventory:8081"
             # Base URL only: iocmatch.SyncLoop appends /export/json. This

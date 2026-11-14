@@ -12,6 +12,10 @@ resources:
   - configmap.yaml
   - statefulset.yaml
   - service.yaml
+  # The migration runner and the migrations themselves, generated from
+  # deploy/clickhouse/ (the only copy), and the Job that applies them.
+  - ../../../clickhouse
+  - migrate-job.yaml
   - cold-export-cm.yaml
   - cold-export-cronjob.yaml
   - pdb.yaml
