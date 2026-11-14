@@ -1,0 +1,163 @@
+# Workloads for infra/lab/smoke.sh. Every pod meets the "restricted" Pod
+# Security Standard and the ADR-0004 defaults: non-root, no capabilities,
+# read-only root filesystem, RuntimeDefault seccomp.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: netsoldier-smoke
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    app.kubernetes.io/part-of: netsoldier-smoke
+---
+# The same image and command twice: in gVisor, and on the default runtime.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kernel-gvisor
+  namespace: netsoldier-smoke
+spec:
+  runtimeClassName: gvisor
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+      command:
+        - sh
+        - -c
+        - |
+          echo "uname-r: $(uname -r)"
+          echo "proc-version: $(cat /proc/version)"
+          echo "seccomp: $(grep '^Seccomp:' /proc/self/status | tr -s '\t ' ' ')"
+          echo "dmesg: $(dmesg 2>&1 | head -n 1)"
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kernel-runc
+  namespace: netsoldier-smoke
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+      command:
+        - sh
+        - -c
+        - |
+          echo "uname-r: $(uname -r)"
+          echo "proc-version: $(cat /proc/version)"
+          echo "seccomp: $(grep '^Seccomp:' /proc/self/status | tr -s '\t ' ' ')"
+          echo "dmesg: $(dmesg 2>&1 | head -n 1)"
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+---
+# One of the project's own Go services, in gVisor. It has no configuration
+# here and says so in its log; the point is that the binary runs under runsc
+# far enough to serve /healthz.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: detection-engine
+  namespace: netsoldier-smoke
+  labels:
+    app: detection-engine
+spec:
+  runtimeClassName: gvisor
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: detection-engine
+      image: ghcr.io/migel9090/detection-engine:main
+      ports:
+        - name: http
+          containerPort: 8080
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: http
+        periodSeconds: 3
+      resources:
+        requests: { cpu: 50m, memory: 32Mi }
+        limits: { memory: 256Mi }
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: detection-engine
+  namespace: netsoldier-smoke
+spec:
+  selector:
+    app: detection-engine
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# Asks the service over the cluster network (CoreDNS, kube-proxy, then
+# gVisor's network stack in the detection-engine sandbox).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: healthz-client
+  namespace: netsoldier-smoke
+spec:
+  runtimeClassName: gvisor
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: client
+      image: docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+      command:
+        - sh
+        - -c
+        - |
+          for i in $(seq 1 30); do
+            if out=$(wget -q -T 5 -O - http://detection-engine.netsoldier-smoke.svc:8080/healthz); then
+              echo "healthz: $out"; exit 0
+            fi
+            sleep 2
+          done
+          echo "healthz: no answer"; exit 1
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]

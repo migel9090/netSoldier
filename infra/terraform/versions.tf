@@ -1,33 +1,17 @@
 terraform {
-  required_version = ">= 1.7"
+  # Run through `task lab:*`, which uses the hashicorp/terraform image pinned
+  # in infra/lab/tf.sh. Keep the two in step.
+  required_version = "~> 1.17.2"
 
   required_providers {
     proxmox = {
       source  = "bpg/proxmox"
-      version = ">= 0.66.0"
+      version = "0.121.0"
     }
   }
 
-  backend "local" {
-    path = "terraform.tfstate"
-  }
-
-  # To migrate state to S3-compatible object storage, uncomment the block
-  # below and run:
-  #   terraform init -migrate-state
-  #
-  # backend "s3" {
-  #   bucket = "terraform-state"
-  #   key    = "netsoldier/terraform.tfstate"
-  #   region = "us-east-1"
-  #
-  #   endpoints = {
-  #     s3 = "http://garage.local:3900"
-  #   }
-  #
-  #   skip_credentials_validation = true
-  #   skip_metadata_api_check     = true
-  #   skip_requesting_account_id  = true
-  #   use_path_style              = true
-  # }
+  # Local state, kept outside the repository so it outlives any checkout.
+  # The path is given at init time (task lab:init does this):
+  #   terraform init -backend-config=path=<state dir>/terraform.tfstate
+  backend "local" {}
 }
