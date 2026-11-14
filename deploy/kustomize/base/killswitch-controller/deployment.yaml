@@ -36,17 +36,14 @@ spec:
               value: "netsoldier"
             # The audit log is the accountability record for every
             # enforcement decision; the account writing it is authenticated
-            # and holds INSERT on audit_log only.
+            # and holds INSERT on audit_log only (base/clickhouse/configmap.yaml).
             - name: CLICKHOUSE_USER
-              valueFrom:
-                secretKeyRef:
-                  name: clickhouse-credentials
-                  key: writer-username
+              value: "killswitch"
             - name: CLICKHOUSE_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: clickhouse-credentials
-                  key: writer-password
+                  key: killswitch-password
             # Authenticates every mutating endpoint. Without it the
             # controller serves approve/revert to anything that can reach it.
             - name: KILLSWITCH_API_KEY

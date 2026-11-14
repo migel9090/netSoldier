@@ -40,6 +40,10 @@ grafana:
       jsonData:
         nodeGraph:
           enabled: true
+    # Authenticates as the read-only `grafana` account (SELECT on
+    # netsoldier.*). Grafana expands ${CLICKHOUSE_PASSWORD} from its own
+    # environment when it loads the provisioning file (envValueFrom below),
+    # so the password is never written into the datasource ConfigMap.
     - name: ClickHouse
       type: grafana-clickhouse-datasource
       access: proxy
@@ -49,6 +53,16 @@ grafana:
         port: 9000
         protocol: native
         server: clickhouse.netsoldier.svc
+        username: grafana
+      secureJsonData:
+        password: "${CLICKHOUSE_PASSWORD}"
+  # From the clickhouse-credentials Secret in the observability namespace
+  # (deploy/kustomize/base/clickhouse/observability-secret.example.yaml).
+  envValueFrom:
+    CLICKHOUSE_PASSWORD:
+      secretKeyRef:
+        name: clickhouse-credentials
+        key: grafana-password
   persistence:
     enabled: true
     size: 1Gi

@@ -12,6 +12,16 @@ spec:
               value: "http://clickhouse.netsoldier.svc:8123"
             - name: CLICKHOUSE_DATABASE
               value: "netsoldier"
+            # Own account: INSERT on device_events, SELECT on the flow, DNS
+            # and alert tables the detail/topology APIs read. No DDL, so the
+            # schema comes from the clickhouse-migrate Job, not from here.
+            - name: CLICKHOUSE_USER
+              value: "inventory"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: inventory-password
           securityContext:
             runAsNonRoot: true
             readOnlyRootFilesystem: true

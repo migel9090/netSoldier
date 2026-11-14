@@ -137,6 +137,15 @@ spec:
           args:
             - "--config-yaml"
             - /etc/vector/vector.yaml
+          # Substituted into the sinks' auth blocks (vector-cm.yaml).
+          env:
+            - name: CLICKHOUSE_USER
+              value: "zeek"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: zeek-password
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534

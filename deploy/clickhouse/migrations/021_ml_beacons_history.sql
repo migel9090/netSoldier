@@ -9,6 +9,10 @@
 --
 -- Including timestamp in the sort key keeps each observation, and the
 -- partition key makes the 30-day TTL a partition drop.
+--
+-- Each block first drops a staging table left by an earlier attempt, so the
+-- file is safe to re-run from the top after failing part-way (see 020).
+DROP TABLE IF EXISTS netsoldier.ml_beacons_v2;
 CREATE TABLE IF NOT EXISTS netsoldier.ml_beacons_v2
 (
     timestamp        DateTime DEFAULT now(),
@@ -36,6 +40,7 @@ DROP TABLE IF EXISTS netsoldier.ml_beacons_v2;
 -- ml_anomalies keeps its (src_ip, window_start) key: one verdict per flow
 -- window is the correct semantic there, and window_start already spreads
 -- rows over time. It only needs the partition key.
+DROP TABLE IF EXISTS netsoldier.ml_anomalies_v2;
 CREATE TABLE IF NOT EXISTS netsoldier.ml_anomalies_v2 AS netsoldier.ml_anomalies
 ENGINE = ReplacingMergeTree(timestamp)
 PARTITION BY toYYYYMM(timestamp)

@@ -250,6 +250,16 @@ data:
           .tls_ja3s_hash = to_string(.tls.ja3s.hash) ?? ""
           .proto = to_string(.proto) ?? ""
 
+    # Every sink authenticates as the `suricata` account (INSERT on the
+    # suricata_* tables only). The credentials come from the vector
+    # container's env (deployment.yaml); `:?` makes Vector refuse to start
+    # without them instead of retrying unauthenticated inserts forever.
+    #
+    # date_time_best_effort: `timestamp` is passed through as EVE writes it
+    # ("2026-11-16T12:56:28.123456+0000"), which ClickHouse's default
+    # DateTime parser rejects, so once authentication worked every insert
+    # was refused with 400 CANNOT_PARSE_INPUT. best_effort parses ISO 8601
+    # with the offset.
     sinks:
       clickhouse_alerts:
         type: clickhouse
@@ -259,6 +269,11 @@ data:
         database: netsoldier
         table: suricata_alerts
         skip_unknown_fields: true
+        date_time_best_effort: true
+        auth:
+          strategy: basic
+          user: "${CLICKHOUSE_USER:?CLICKHOUSE_USER must be set}"
+          password: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
         encoding:
           timestamp_format: unix
 
@@ -270,6 +285,11 @@ data:
         database: netsoldier
         table: suricata_dns
         skip_unknown_fields: true
+        date_time_best_effort: true
+        auth:
+          strategy: basic
+          user: "${CLICKHOUSE_USER:?CLICKHOUSE_USER must be set}"
+          password: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
         encoding:
           timestamp_format: unix
 
@@ -281,5 +301,10 @@ data:
         database: netsoldier
         table: suricata_tls
         skip_unknown_fields: true
+        date_time_best_effort: true
+        auth:
+          strategy: basic
+          user: "${CLICKHOUSE_USER:?CLICKHOUSE_USER must be set}"
+          password: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
         encoding:
           timestamp_format: unix

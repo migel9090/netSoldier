@@ -179,6 +179,10 @@ data:
           .matched = array(.matched) ?? []
           .sources = array(.sources) ?? []
 
+    # Every sink authenticates as the `zeek` account (INSERT on the zeek_*
+    # tables only). The credentials come from the vector container's env
+    # (deployment.yaml); `:?` makes Vector refuse to start without them
+    # instead of retrying unauthenticated inserts forever.
     sinks:
       clickhouse_conn:
         type: clickhouse
@@ -188,6 +192,10 @@ data:
         database: netsoldier
         table: zeek_conn
         skip_unknown_fields: true
+        auth:
+          strategy: basic
+          user: "${CLICKHOUSE_USER:?CLICKHOUSE_USER must be set}"
+          password: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
         encoding:
           timestamp_format: unix
 
@@ -199,6 +207,10 @@ data:
         database: netsoldier
         table: zeek_dns
         skip_unknown_fields: true
+        auth:
+          strategy: basic
+          user: "${CLICKHOUSE_USER:?CLICKHOUSE_USER must be set}"
+          password: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
         encoding:
           timestamp_format: unix
 
@@ -210,6 +222,10 @@ data:
         database: netsoldier
         table: zeek_ssl
         skip_unknown_fields: true
+        auth:
+          strategy: basic
+          user: "${CLICKHOUSE_USER:?CLICKHOUSE_USER must be set}"
+          password: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
         encoding:
           timestamp_format: unix
 
@@ -221,6 +237,10 @@ data:
         database: netsoldier
         table: zeek_x509
         skip_unknown_fields: true
+        auth:
+          strategy: basic
+          user: "${CLICKHOUSE_USER:?CLICKHOUSE_USER must be set}"
+          password: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
         encoding:
           timestamp_format: unix
 
@@ -232,6 +252,10 @@ data:
         database: netsoldier
         table: zeek_http
         skip_unknown_fields: true
+        auth:
+          strategy: basic
+          user: "${CLICKHOUSE_USER:?CLICKHOUSE_USER must be set}"
+          password: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
         encoding:
           timestamp_format: unix
 
@@ -243,5 +267,9 @@ data:
         database: netsoldier
         table: zeek_intel
         skip_unknown_fields: true
+        auth:
+          strategy: basic
+          user: "${CLICKHOUSE_USER:?CLICKHOUSE_USER must be set}"
+          password: "${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}"
         encoding:
           timestamp_format: unix

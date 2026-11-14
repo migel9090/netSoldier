@@ -1,0 +1,37 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-clickhouse-migrate
+  annotations:
+    # Must exist before the migrate Job runs (wave -1). On an upgrade
+    # default-deny-all is already in place, and a policy left in wave 0
+    # would only be created after the Job had already been cut off.
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: clickhouse
+      app.kubernetes.io/component: migrate
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    # Native protocol only: migrate.sh drives clickhouse-client.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: clickhouse
+              app.kubernetes.io/component: server
+      ports:
+        - port: 9000
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

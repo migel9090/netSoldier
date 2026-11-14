@@ -1,0 +1,105 @@
+# Owns the netsoldier schema: runs deploy/clickhouse/migrate.sh against the
+# server with the dedicated `migrate` account. The script and the SQL come
+# from ConfigMaps generated from deploy/clickhouse/ itself (see the
+# kustomization there), so the files in deploy/clickhouse/migrations/ are the
+# only copy of the schema.
+#
+# Ordering under ArgoCD: a Sync hook in wave -1, after the server, its
+# config and its Service (wave -2) are healthy and before the services
+# (wave 0) roll out. A failed migration fails the sync, so nothing that
+# depends on the new schema is deployed on top of a half-migrated database.
+# BeforeHookCreation replaces the previous run's Job on every sync; the
+# runner is a no-op when nothing is pending, so that costs seconds.
+#
+# Without ArgoCD (`kubectl apply -k`) the Job is an ordinary resource. The
+# runner waits for the server itself, and a completed Job is immutable:
+# delete it before re-applying when the migrations changed
+# (docs/runbooks/data-maintenance.md, DM-11).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: clickhouse-migrate
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  # Retry covers a server restart or a network blip mid-run; the runner
+  # re-applies an unrecorded file from the top, which every migration is
+  # written to survive. A real failure (bad SQL, changed applied file,
+  # refused login) fails the same way each time and ends the Job.
+  backoffLimit: 2
+  # 020, 021 and 023 copy whole tables. Bounded here rather than per query
+  # (the migrate profile has no max_execution_time).
+  activeDeadlineSeconds: 21600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: migrate
+    spec:
+      serviceAccountName: clickhouse
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          # The server image, for its clickhouse-client: no extra image to
+          # pin, and client and server versions always match.
+          image: clickhouse/clickhouse-server:24.3-alpine
+          command: ["/bin/sh", "/opt/migrate/migrate.sh", "apply"]
+          # clickhouse-client creates scratch directories (user_defined/)
+          # in its working directory when it parses data client-side; the
+          # image's is / on a read-only root filesystem.
+          workingDir: /tmp
+          env:
+            - name: CLICKHOUSE_HOST
+              value: "clickhouse"
+            - name: CLICKHOUSE_PORT
+              value: "9000"
+            - name: CLICKHOUSE_USER
+              value: "migrate"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: migrate-password
+            - name: MIGRATIONS_DIR
+              value: "/opt/migrate/migrations"
+            - name: MIGRATE_WAIT_SECONDS
+              value: "300"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 20m
+              memory: 64Mi
+          volumeMounts:
+            - name: script
+              mountPath: /opt/migrate/migrate.sh
+              subPath: migrate.sh
+              readOnly: true
+            - name: migrations
+              mountPath: /opt/migrate/migrations
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: script
+          configMap:
+            name: clickhouse-migrate-script
+        - name: migrations
+          configMap:
+            name: clickhouse-migrations
+        - name: tmp
+          emptyDir: {}

@@ -140,6 +140,15 @@ spec:
           args:
             - "--config-yaml"
             - /etc/vector/vector.yaml
+          # Substituted into the sinks' auth blocks (configmap.yaml).
+          env:
+            - name: CLICKHOUSE_USER
+              value: "suricata"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: suricata-password
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
