@@ -1,6 +1,0 @@
----
-- name: Bootstrap OS
-  hosts: all
-  become: true
-  roles:
-    - bootstrap

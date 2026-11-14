@@ -1,7 +1,13 @@
 ---
-- ansible.builtin.include_tasks: user.yml
-- ansible.builtin.include_tasks: ssh.yml
-- ansible.builtin.include_tasks: firewall.yml
-- ansible.builtin.include_tasks: fail2ban.yml
-- ansible.builtin.include_tasks: unattended.yml
-- ansible.builtin.include_tasks: cis.yml
+- name: Accounts and sudo
+  ansible.builtin.include_tasks: user.yml
+- name: SSH daemon
+  ansible.builtin.include_tasks: ssh.yml
+- name: Firewall
+  ansible.builtin.include_tasks: firewall.yml
+- name: Fail2ban
+  ansible.builtin.include_tasks: fail2ban.yml
+- name: Unattended security upgrades
+  ansible.builtin.include_tasks: unattended.yml
+- name: CIS-style kernel and filesystem settings
+  ansible.builtin.include_tasks: cis.yml

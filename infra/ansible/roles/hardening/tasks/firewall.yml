@@ -1,27 +1,65 @@
 ---
-- name: Install UFW
+- name: Install ufw
   ansible.builtin.apt:
     name: ufw
     state: present
 
-- name: Set default deny incoming
+- name: Deny incoming by default
   community.general.ufw:
     default: deny
     direction: incoming
 
-- name: Set default allow outgoing
+- name: Allow outgoing by default
   community.general.ufw:
     default: allow
     direction: outgoing
 
-- name: Allow required services
+- name: Start the list of wanted allow rules
+  ansible.builtin.set_fact:
+    hardening_ufw_wanted: []
+
+# ufw prints /32 sources without the prefix, so compare them that way.
+- name: Work out the allow rules ufw should hold
+  ansible.builtin.set_fact:
+    hardening_ufw_wanted: >-
+      {{ hardening_ufw_wanted | default([]) +
+         ['allow from ' ~ (item.1 | regex_replace('/32$', '')) ~ ' to any port ' ~ item.0.port ~ ' proto ' ~ item.0.proto] }}
+  loop: "{{ hardening_ufw_rules | subelements('from') }}"
+  loop_control:
+    label: "{{ item.0.port }}/{{ item.0.proto }} from {{ item.1 }}"
+
+- name: Read the allow rules ufw holds
+  ansible.builtin.command: ufw show added
+  register: hardening_ufw_added
+  changed_when: false
+
+# Before adding, so that a mismatch in this comparison could only cause a
+# delete-and-re-add, never a missing rule.
+- name: Remove allow rules that are no longer wanted
+  ansible.builtin.command: "ufw delete {{ item }}"
+  loop: >-
+    {{ hardening_ufw_added.stdout_lines
+       | select('match', '^ufw allow ')
+       | map('regex_replace', '^ufw ', '')
+       | map('regex_replace', " comment '.*'$", '')
+       | reject('in', hardening_ufw_wanted)
+       | list }}
+  changed_when: true
+  when: hardening_ufw_prune
+
+- name: Allow each service from its sources only
   community.general.ufw:
     rule: allow
-    port: "{{ item.port }}"
-    proto: "{{ item.proto }}"
-    comment: "{{ item.comment }}"
-  loop: "{{ hardening_ufw_rules }}"
+    from_ip: "{{ item.1 }}"
+    to_ip: any
+    to_port: "{{ item.0.port }}"
+    proto: "{{ item.0.proto }}"
+    comment: "{{ item.0.comment }}"
+  loop: "{{ hardening_ufw_rules | subelements('from') }}"
+  loop_control:
+    label: "{{ item.0.port }}/{{ item.0.proto }} from {{ item.1 }}"
 
-- name: Enable UFW
+- name: Enable ufw
   community.general.ufw:
     state: enabled
+    logging: "low"

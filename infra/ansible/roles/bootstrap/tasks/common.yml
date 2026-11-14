@@ -1,4 +1,19 @@
 ---
+- name: Check for cloud-init
+  ansible.builtin.stat:
+    path: /usr/bin/cloud-init
+  register: bootstrap_cloud_init
+
+# On a fresh cloud image cloud-init may still be upgrading packages; apt
+# would fail on its lock.
+- name: Wait for cloud-init to finish first boot
+  ansible.builtin.command: cloud-init status --wait
+  register: bootstrap_cloud_init_status
+  changed_when: false
+  # 0 = done, 2 = done with recoverable errors (still worth carrying on).
+  failed_when: bootstrap_cloud_init_status.rc not in [0, 2]
+  when: bootstrap_cloud_init.stat.exists
+
 - name: Update apt cache
   ansible.builtin.apt:
     update_cache: true
@@ -13,6 +28,23 @@
   ansible.builtin.apt:
     name: "{{ bootstrap_packages }}"
     state: present
+
+- name: Find installed kernels
+  ansible.builtin.find:
+    paths: /boot
+    patterns: "vmlinuz-*"
+  register: bootstrap_kernels
+  when: bootstrap_reboot_for_kernel
+
+- name: Reboot into the newest kernel
+  ansible.builtin.reboot:
+    reboot_timeout: 600
+    msg: "Rebooting into the newly installed kernel (Ansible bootstrap)"
+  when:
+    - bootstrap_reboot_for_kernel
+    - bootstrap_kernels.files | length > 0
+    - (bootstrap_kernels.files | map(attribute='path') | map('regex_replace', '^/boot/vmlinuz-', '')
+       | community.general.version_sort | last) != ansible_facts.kernel
 
 - name: Set timezone symlink
   ansible.builtin.file:
@@ -32,13 +64,7 @@
     path: /etc/locale.gen
     regexp: '^#?\s*{{ bootstrap_locale }}'
     line: "{{ bootstrap_locale }} UTF-8"
-  register: locale_gen
-
-- name: Regenerate locales
-  ansible.builtin.command:
-    cmd: locale-gen
-  when: locale_gen.changed
-  changed_when: true
+  notify: Regenerate locales
 
 - name: Set default locale
   ansible.builtin.copy:

@@ -1,0 +1,12 @@
+{% raw %}{{ template "base" . }}{% endraw %}
+
+# Added by Ansible (infra/ansible/roles/gvisor) for gVisor {{ gvisor_version }}.
+# k3s renders this file into config.toml on every start; the base template
+# above is k3s's own, so only tables it does not define may be added here.
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.'{{ gvisor_runtime_handler }}']
+  runtime_type = "io.containerd.runsc.v1"
+  runtime_path = "{{ gvisor_install_dir }}/containerd-shim-runsc-v1"
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.'{{ gvisor_runtime_handler }}'.options]
+  TypeUrl = "io.containerd.runsc.v1.options"
+  ConfigPath = "{{ gvisor_config_path }}"

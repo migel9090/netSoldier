@@ -1,0 +1,31 @@
+---
+# gVisor, pinned to one point release. Since July 2026 a release is one
+# tarball (runsc, containerd-shim-runsc-v1 and the gvisor-bin/ helpers runsc
+# needs next to itself); the two loose binaries are no longer published.
+# The SHA-512 is the same in both official places:
+#   https://storage.googleapis.com/gvisor/releases/release/20261102.0/x86_64/gvisor.tar.zstd.sha512
+#   https://github.com/google/gvisor/releases/download/release-20261102.0/SHA512SUMS (gvisor-x86_64.tar.zstd)
+gvisor_version: "20261102.0"
+gvisor_sha512:
+  x86_64: "3c400f72be459b57b99b1c4f69be96bcd67eef3caf2078e595fc98e688b6b9a3af7802646b3dde7da8a9aba96d34f86be303e0430c7868ab2d13becdd403c0c1"
+gvisor_release_url: "https://storage.googleapis.com/gvisor/releases/release/{{ gvisor_version }}"
+
+gvisor_install_dir: "/opt/gvisor/{{ gvisor_version }}"
+gvisor_config_path: /etc/gvisor/runsc.toml
+
+# Kubernetes side: pods ask for `runtimeClassName: gvisor`, which maps to the
+# containerd runtime handler `runsc`.
+gvisor_runtime_handler: runsc
+gvisor_runtimeclass_name: gvisor
+
+# Flags passed to runsc ([runsc_config] in the shim config).
+gvisor_runsc_flags:
+  # runsc ignores the pod's seccomp profile unless told otherwise; apply it
+  # inside the sandbox as well (pods use RuntimeDefault, ADR-0004).
+  oci-seccomp: "true"
+
+# k3s renders containerd's config from this template on every start. k3s
+# v1.37 embeds containerd 2.x, for which the k3s docs name
+# config-v3.toml.tmpl ("Configuring containerd", docs.k3s.io/advanced).
+gvisor_k3s_containerd_dir: /var/lib/rancher/k3s/agent/etc/containerd
+gvisor_k3s_manifests_dir: /var/lib/rancher/k3s/server/manifests

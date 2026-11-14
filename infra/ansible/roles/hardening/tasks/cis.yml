@@ -28,7 +28,7 @@
       net.ipv4.icmp_echo_ignore_broadcasts = 1
     dest: /etc/sysctl.d/90-cis-hardening.conf
     mode: "0644"
-  notify: reload sysctl
+  notify: Reload sysctl
 
 - name: Restrict /etc/shadow permissions
   ansible.builtin.file:

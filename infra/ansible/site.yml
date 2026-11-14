@@ -1,0 +1,56 @@
+---
+# Whole-site playbook, in order. For the lab VM:
+#   task lab:provision   (inventory from Terraform, known_hosts from lab:trust-host)
+#
+# 1. OS base and hardening: the firewall is up before k3s opens any port.
+# 2. k3s, pinned and checksum-verified.
+# 3. gVisor on top of k3s's containerd, and the `gvisor` RuntimeClass.
+
+- name: "Lab node (k3s): OS base and hardening"
+  hosts: proxmox_soc
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Wait until the node answers over SSH (first boot takes a while)
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather facts
+      ansible.builtin.setup:
+
+    # Unless the inventory names admin sources for the Kubernetes API, open
+    # it only to the address this controller is seen from.
+    - name: Find the address the node sees this controller at
+      ansible.builtin.command: printenv SSH_CONNECTION
+      become: false
+      register: lab_ssh_connection
+      changed_when: false
+      when: k3s_api_allowed_cidrs | default([]) | length == 0
+
+    - name: Allow the Kubernetes API from this controller only
+      ansible.builtin.set_fact:
+        k3s_api_allowed_cidrs: >-
+          {{ [lab_controller ~ ('/128' if ':' in lab_controller else '/32')] }}
+      vars:
+        lab_controller: "{{ lab_ssh_connection.stdout.split()[0] }}"
+      when: k3s_api_allowed_cidrs | default([]) | length == 0
+  roles:
+    - bootstrap
+    - hardening
+
+- name: "Lab node (k3s): k3s and gVisor"
+  hosts: proxmox_soc
+  become: true
+  roles:
+    - k3s_server
+    - gvisor
+
+# Raspberry Pi profile. Not exercised by the lab; podman_edge still lacks
+# the Quadlet units (audit finding CI-14).
+- name: "Raspberry Pi edge: OS base, hardening, Podman"
+  hosts: pi_edge
+  become: true
+  roles:
+    - bootstrap
+    - hardening
+    - podman_edge

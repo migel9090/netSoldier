@@ -1,13 +1,14 @@
 ---
 bootstrap_timezone: "Europe/Warsaw"
 bootstrap_locale: "en_US.UTF-8"
+# Present on Debian 12/13 and Raspberry Pi OS. (software-properties-common
+# no longer exists in Debian 13; apt-transport-https is an empty package.)
 bootstrap_packages:
-  - curl
-  - wget
-  - gnupg
   - ca-certificates
-  - apt-transport-https
-  - software-properties-common
-  - python3-apt
+  - curl
+  - gnupg
   - jq
   - locales
+  - python3-apt
+# Reboot when the upgrade installed a kernel newer than the running one.
+bootstrap_reboot_for_kernel: true
