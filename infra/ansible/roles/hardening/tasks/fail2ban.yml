@@ -1,24 +1,30 @@
 ---
+# Debian 13 has no /var/log/auth.log (journald only), so the jail reads the
+# journal; python3-systemd provides that backend.
 - name: Install fail2ban
   ansible.builtin.apt:
-    name: fail2ban
+    name:
+      - fail2ban
+      - python3-systemd
     state: present
 
 - name: Configure SSH jail
   ansible.builtin.copy:
     content: |
+      # Managed by Ansible (infra/ansible/roles/hardening).
       [sshd]
       enabled = true
+      backend = systemd
       port = {{ hardening_ssh_port }}
       maxretry = {{ hardening_fail2ban_maxretry }}
       bantime = {{ hardening_fail2ban_bantime }}
       findtime = {{ hardening_fail2ban_findtime }}
     dest: /etc/fail2ban/jail.d/sshd.conf
     mode: "0644"
-  notify: restart fail2ban
+  notify: Restart fail2ban
 
 - name: Enable fail2ban
-  ansible.builtin.systemd:
+  ansible.builtin.systemd_service:
     name: fail2ban
     enabled: true
     state: started

@@ -1,9 +1,27 @@
 ---
-hardening_user: netsoldier
+# The account Ansible connects as. It is the only login sshd accepts, by key
+# only. Its sudo rights come from provisioning (cloud-init on the lab VM),
+# not from this role; see infra/README.md ("Who can become root").
+hardening_admin_user: "{{ ansible_user | default('netsoldier') }}"
+hardening_ssh_allow_users:
+  - "{{ hardening_admin_user }}"
 hardening_ssh_port: 22
+# Debian and Raspberry Pi OS name the unit ssh.service.
+hardening_ssh_service: ssh
 
+# Sources that may reach SSH. Default: private address space only.
+hardening_ssh_allowed_cidrs:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+
+# Incoming allow rules; everything else is denied. Each rule lists the
+# source CIDRs it is open to; there is no "from anywhere".
 hardening_ufw_rules:
-  - { port: "22", proto: tcp, comment: "SSH" }
+  - { port: "{{ hardening_ssh_port }}", proto: tcp, from: "{{ hardening_ssh_allowed_cidrs }}", comment: "SSH" }
+# Delete ufw allow rules that are not in hardening_ufw_rules, so a source
+# that is dropped from the list is closed again.
+hardening_ufw_prune: true
 
 hardening_fail2ban_maxretry: 5
 hardening_fail2ban_bantime: 3600

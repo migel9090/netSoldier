@@ -1,0 +1,22 @@
+# Managed by Ansible (infra/ansible/roles/k3s_server) for k3s {{ k3s_version }}.
+# Local edits are lost.
+
+# The kubeconfig on the node holds cluster-admin credentials: root only.
+write-kubeconfig-mode: "0600"
+
+node-ip: {{ k3s_node_ip }}
+tls-san:
+{% for san in k3s_tls_san %}
+  - {{ san }}
+{% endfor %}
+
+cluster-cidr: {{ k3s_cluster_cidr }}
+service-cidr: {{ k3s_service_cidr }}
+
+disable:
+{% for component in k3s_disable %}
+  - {{ component }}
+{% endfor %}
+
+# Encrypt Secrets at rest in the datastore.
+secrets-encryption: true

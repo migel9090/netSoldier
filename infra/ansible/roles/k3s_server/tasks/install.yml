@@ -1,25 +1,94 @@
 ---
-- name: Download k3s install script
+- name: Map the CPU architecture to a k3s release asset
+  ansible.builtin.set_fact:
+    k3s_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts.architecture] | default('unsupported') }}"
+
+- name: Check that a checksum is pinned for this architecture
+  ansible.builtin.assert:
+    that: k3s_arch in k3s_sha256
+    fail_msg: "No pinned k3s checksum for {{ ansible_facts.architecture }}; add it to k3s_sha256."
+    quiet: true
+
+# Instead of `curl https://get.k3s.io | sh`: one pinned binary, checked
+# against a checksum kept in this repository, plus a unit and a config file
+# Ansible owns.
+- name: Install the pinned k3s binary (checksum verified)
   ansible.builtin.get_url:
-    url: https://get.k3s.io
-    dest: /tmp/k3s-install.sh
+    url: "{{ k3s_release_url }}/k3s{{ '' if k3s_arch == 'amd64' else '-' ~ k3s_arch }}"
+    dest: /usr/local/bin/k3s
+    checksum: "sha256:{{ k3s_sha256[k3s_arch] }}"
+    owner: root
+    group: root
     mode: "0755"
+  notify: Restart k3s
 
-- name: Install k3s server
-  ansible.builtin.command:
-    cmd: /tmp/k3s-install.sh
-    creates: /usr/local/bin/k3s
-  environment:
-    INSTALL_K3S_VERSION: "{{ k3s_version }}"
-    INSTALL_K3S_EXEC: >-
-      server
-      --disable traefik
-      --disable servicelb
-      --write-kubeconfig-mode 644
-      --tls-san {{ k3s_tls_san }}
+- name: Link kubectl, crictl and ctr to k3s
+  ansible.builtin.file:
+    src: /usr/local/bin/k3s
+    dest: "/usr/local/bin/{{ item }}"
+    state: link
+  loop: [kubectl, crictl, ctr]
 
-- name: Ensure k3s is running
-  ansible.builtin.systemd:
+- name: Create the k3s config directory
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Write the k3s config
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart k3s
+
+- name: Write the k3s systemd unit
+  ansible.builtin.template:
+    src: k3s.service.j2
+    dest: /etc/systemd/system/k3s.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart k3s
+
+- name: Create the (empty) k3s environment file
+  ansible.builtin.copy:
+    content: ""
+    dest: /etc/systemd/system/k3s.service.env
+    force: false
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Remove the world-readable kubeconfig copy older versions wrote
+  ansible.builtin.file:
+    path: /etc/rancher/k3s/k3s-external.yaml
+    state: absent
+
+- name: Start k3s (or restart it after a change)
+  ansible.builtin.meta: flush_handlers
+
+- name: Keep k3s enabled and running
+  ansible.builtin.systemd_service:
     name: k3s
     enabled: true
     state: started
+
+- name: Wait for the node to be Ready
+  ansible.builtin.command:
+    cmd: k3s kubectl wait --for=condition=Ready node --all --timeout=30s
+  register: k3s_node_ready
+  until: k3s_node_ready.rc == 0
+  retries: 20
+  delay: 6
+  changed_when: false
+
+- name: Check the kubeconfig on the node is readable by root only
+  ansible.builtin.stat:
+    path: /etc/rancher/k3s/k3s.yaml
+  register: k3s_kubeconfig_stat
+  failed_when: k3s_kubeconfig_stat.stat.mode != "0600"

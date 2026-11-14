@@ -1,0 +1,151 @@
+---
+- name: Check that a checksum is pinned for this architecture
+  ansible.builtin.assert:
+    that: ansible_facts.architecture in gvisor_sha512
+    fail_msg: "No pinned gVisor checksum for {{ ansible_facts.architecture }}; add it to gvisor_sha512."
+    quiet: true
+
+- name: Install zstd (the release tarball is zstd-compressed)
+  ansible.builtin.apt:
+    name: zstd
+    state: present
+
+- name: Create the download cache
+  ansible.builtin.file:
+    path: /var/cache/gvisor
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download the pinned gVisor release (checksum verified)
+  ansible.builtin.get_url:
+    url: "{{ gvisor_release_url }}/{{ ansible_facts.architecture }}/gvisor.tar.zstd"
+    dest: "/var/cache/gvisor/gvisor-{{ gvisor_version }}-{{ ansible_facts.architecture }}.tar.zstd"
+    checksum: "sha512:{{ gvisor_sha512[ansible_facts.architecture] }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create the install directory for this release
+  ansible.builtin.file:
+    path: "{{ gvisor_install_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Unpack runsc, the containerd shim and gvisor-bin/
+  ansible.builtin.unarchive:
+    src: "/var/cache/gvisor/gvisor-{{ gvisor_version }}-{{ ansible_facts.architecture }}.tar.zstd"
+    dest: "{{ gvisor_install_dir }}"
+    remote_src: true
+    owner: root
+    group: root
+    creates: "{{ gvisor_install_dir }}/runsc"
+  notify: Restart k3s to load the runsc runtime
+
+- name: Put runsc and the shim on PATH (for operators; containerd uses absolute paths)
+  ansible.builtin.file:
+    src: "{{ gvisor_install_dir }}/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    state: link
+    force: true
+  loop: [runsc, containerd-shim-runsc-v1]
+
+- name: Find gVisor releases other than the pinned one
+  ansible.builtin.find:
+    paths: /opt/gvisor
+    file_type: directory
+    excludes: ["{{ gvisor_version }}"]
+  register: gvisor_old_releases
+
+- name: Remove gVisor releases other than the pinned one
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ gvisor_old_releases.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Create the shim config directory
+  ansible.builtin.file:
+    path: "{{ gvisor_config_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write the shim config (runsc binary and flags)
+  ansible.builtin.template:
+    src: runsc.toml.j2
+    dest: "{{ gvisor_config_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart k3s to load the runsc runtime
+
+- name: Create the k3s containerd template directory
+  ansible.builtin.file:
+    path: "{{ gvisor_k3s_containerd_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Register runsc with k3s's containerd (extends the k3s base template)
+  ansible.builtin.template:
+    src: config-v3.toml.tmpl.j2
+    dest: "{{ gvisor_k3s_containerd_dir }}/config-v3.toml.tmpl"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart k3s to load the runsc runtime
+
+# k3s applies every file in this directory at start and on change, and
+# re-creates the object if it is deleted.
+- name: Publish the RuntimeClass through the k3s manifests directory
+  ansible.builtin.template:
+    src: runtimeclass.yaml.j2
+    dest: "{{ gvisor_k3s_manifests_dir }}/gvisor-runtimeclass.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Restart k3s now if the runtime changed
+  ansible.builtin.meta: flush_handlers
+
+- name: Check k3s rendered the runsc runtime into containerd's config
+  ansible.builtin.wait_for:
+    path: "{{ gvisor_k3s_containerd_dir }}/config.toml"
+    search_regex: "containerd\\.runtimes\\.'?{{ gvisor_runtime_handler }}'?\\]"
+    timeout: 120
+
+- name: Check containerd serves the runsc runtime handler
+  ansible.builtin.command:
+    cmd: k3s crictl info
+  register: gvisor_crictl_info
+  until: >-
+    gvisor_crictl_info.rc == 0 and
+    (gvisor_crictl_info.stdout | from_json).config.containerd.runtimes[gvisor_runtime_handler] is defined
+  retries: 20
+  delay: 3
+  changed_when: false
+
+- name: Wait for the RuntimeClass
+  ansible.builtin.command:
+    cmd: k3s kubectl get runtimeclass {{ gvisor_runtimeclass_name }} -o jsonpath={.handler}
+  register: gvisor_runtimeclass
+  until: gvisor_runtimeclass.rc == 0 and gvisor_runtimeclass.stdout == gvisor_runtime_handler
+  retries: 30
+  delay: 4
+  changed_when: false
+
+- name: Wait for the node to be Ready again
+  ansible.builtin.command:
+    cmd: k3s kubectl wait --for=condition=Ready node --all --timeout=30s
+  register: gvisor_node_ready
+  until: gvisor_node_ready.rc == 0
+  retries: 20
+  delay: 6
+  changed_when: false

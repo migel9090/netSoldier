@@ -1,0 +1,17 @@
+# Managed by Ansible (infra/ansible/roles/hardening). Local edits are lost.
+Port {{ hardening_ssh_port }}
+PermitRootLogin no
+AuthenticationMethods publickey
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+AllowUsers {{ hardening_ssh_allow_users | join(' ') }}
+MaxAuthTries 3
+LoginGraceTime 60
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+PermitTunnel no
+ClientAliveInterval 300
+ClientAliveCountMax 2

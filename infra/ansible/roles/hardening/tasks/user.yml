@@ -1,17 +1,11 @@
 ---
-- name: Ensure service user has sudo
-  ansible.builtin.user:
-    name: "{{ hardening_user }}"
-    shell: /bin/bash
-    groups: sudo
-    append: true
-
-- name: Grant passwordless sudo
-  ansible.builtin.copy:
-    content: "{{ hardening_user }} ALL=(ALL) NOPASSWD:ALL\n"
-    dest: "/etc/sudoers.d/{{ hardening_user }}"
-    mode: "0440"
-    validate: "visudo -cf %s"
+# Earlier versions of this role wrote "<user> ALL=(ALL) NOPASSWD:ALL" for a
+# named login. That made any process running as that user root without a
+# password. The role no longer grants sudo; remove what it used to write.
+- name: Remove the passwordless-sudo rule earlier versions of this role wrote
+  ansible.builtin.file:
+    path: "/etc/sudoers.d/{{ hardening_admin_user }}"
+    state: absent
 
 - name: Lock root password
   ansible.builtin.user:

@@ -1,0 +1,16 @@
+---
+# ansible-lint for infra/ansible (run by `task lab:validate`).
+profile: production
+
+exclude_paths:
+  # Not changed by the lab work and owned by later roadmap steps (ArgoCD,
+  # Kyverno, the Podman profile); lint them when they are reworked.
+  - playbooks/
+  - roles/argocd/
+  - roles/podman_edge/
+
+skip_list:
+  # k3s_* variables are the shared interface of the k3s node (inventory,
+  # group_vars, the hardening and gvisor roles use them), not internals of
+  # the k3s_server role.
+  - var-naming[no-role-prefix]

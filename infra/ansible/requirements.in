@@ -1,0 +1,6 @@
+# Controller-side tools for infra/ansible (installed into .venv by
+# `task lab:tools`). Edit here, then regenerate the hashed lock file:
+#   pip-compile --generate-hashes --strip-extras \
+#     --output-file infra/ansible/requirements.txt infra/ansible/requirements.in
+ansible-core==2.21.6
+ansible-lint==26.11.0

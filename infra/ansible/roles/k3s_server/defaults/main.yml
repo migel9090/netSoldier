@@ -1,4 +1,25 @@
 ---
-k3s_version: ""
-k3s_tls_san: "{{ ansible_host }}"
-k3s_kubeconfig_local_path: "{{ playbook_dir }}/../kubeconfig"
+# k3s, pinned. The checksum is the "k3s" line of sha256sum-amd64.txt in the
+# same GitHub release:
+#   https://github.com/k3s-io/k3s/releases/download/v1.37.2%2Bk3s1/sha256sum-amd64.txt
+# v1.37.2+k3s1 is the k3s "stable" channel on 2026-11-16 and embeds
+# containerd v2.3.7 (config version 3; see roles/gvisor).
+k3s_version: "v1.37.2+k3s1"
+k3s_sha256:
+  amd64: "265b3ee6a3198ef14033c63ef46cbb32370d83795199fb6d1b01f21575eddbda"
+k3s_release_url: "https://github.com/k3s-io/k3s/releases/download/{{ k3s_version | urlencode }}"
+
+# Address the node advertises and the API certificate covers.
+k3s_node_ip: "{{ ansible_host }}"
+k3s_tls_san:
+  - "{{ k3s_node_ip }}"
+k3s_api_endpoint: "https://{{ k3s_node_ip }}:6443"
+
+k3s_cluster_cidr: 10.42.0.0/16
+k3s_service_cidr: 10.43.0.0/16
+k3s_disable:
+  - traefik
+  - servicelb
+
+# Name of cluster, user and context in the kubeconfig handed out.
+k3s_kubeconfig_name: netsoldier-lab
