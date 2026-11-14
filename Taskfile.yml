@@ -1,5 +1,10 @@
 version: '3'
 
+includes:
+  # Proxmox lab VM with k3s and gVisor (infra/README.md): lab:plan, lab:up,
+  # lab:down, lab:kubeconfig, lab:smoke, ...
+  lab: ./infra/lab/Taskfile.yml
+
 vars:
   REGISTRY: ghcr.io/migel9090
   IMAGE: detection-engine

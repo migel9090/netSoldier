@@ -1,0 +1,87 @@
+version: '3'
+
+# Lab targets, included from the root Taskfile as `lab:`. Locations default
+# to ~/.config/netsoldier-lab (token, Proxmox CA, kubeconfig) and
+# ~/.local/state/netsoldier-lab (Terraform state, inventory, known_hosts);
+# override with LAB_CONFIG / LAB_STATE / LAB_KUBECONFIG / LAB_SSH_KEY.
+# See infra/README.md.
+
+vars:
+  LAB: '{{.ROOT_DIR}}/infra/lab'
+
+tasks:
+  tools:
+    desc: Install the pinned lab tools into .venv (Ansible, collections, kubectl)
+    cmds:
+      - '{{.LAB}}/lab.sh tools'
+
+  init:
+    desc: terraform init with the lab state outside the repository
+    internal: true
+    cmds:
+      - '{{.LAB}}/lab.sh init'
+
+  plan:
+    desc: Show what Terraform would change in the lab
+    deps: [tools]
+    cmds:
+      - task: init
+      - '{{.LAB}}/tf.sh plan -var vm_enabled=true'
+
+  up:
+    desc: Create or update the lab VM, configure k3s + gVisor, fetch the kubeconfig
+    deps: [tools]
+    cmds:
+      - task: init
+      - '{{.LAB}}/tf.sh apply -auto-approve -var vm_enabled=true'
+      - task: inventory
+      - task: trust-host
+      - task: provision
+      - task: kubeconfig
+
+  down:
+    desc: Destroy the lab VM (the cloud image stays on the Proxmox storage)
+    deps: [tools]
+    cmds:
+      - task: init
+      - '{{.LAB}}/trust-host.sh --forget || true'
+      - '{{.LAB}}/tf.sh apply -auto-approve -var vm_enabled=false'
+      - task: inventory
+      - rm -f "${LAB_KUBECONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/netsoldier-lab/kubeconfig}"
+
+  inventory:
+    desc: Write the Ansible inventory from Terraform's outputs
+    cmds:
+      - '{{.LAB}}/lab.sh inventory'
+
+  trust-host:
+    desc: First contact with a new VM - record its SSH host key in the lab known_hosts
+    cmds:
+      - '{{.LAB}}/trust-host.sh'
+
+  provision:
+    desc: Run infra/ansible/site.yml against the lab VM (extra args after --)
+    cmds:
+      - '{{.LAB}}/lab.sh provision {{.CLI_ARGS}}'
+
+  kubeconfig:
+    desc: Fetch the lab kubeconfig to ~/.config/netsoldier-lab/kubeconfig (mode 0600)
+    cmds:
+      - '{{.LAB}}/lab.sh kubeconfig'
+
+  smoke:
+    desc: Check the node is Ready and that gVisor really sandboxes pods
+    cmds:
+      - '{{.LAB}}/smoke.sh'
+
+  ssh:
+    desc: SSH to the lab VM (command after --)
+    interactive: true
+    cmds:
+      - '{{.LAB}}/lab.sh ssh {{.CLI_ARGS}}'
+
+  validate:
+    desc: Static checks of infra/ (no credentials, no VM)
+    deps: [tools]
+    cmds:
+      - '{{.LAB}}/lab.sh validate'
