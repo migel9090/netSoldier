@@ -219,6 +219,51 @@ func TestIngestAssignsID(t *testing.T) {
 	}
 }
 
+// TestResolveClientEnrichesEveryAlert: the hook existed but nothing set it,
+// so every detection went out without a MAC. With it set, querylog and
+// sensor detections both carry the device identity.
+func TestResolveClientEnrichesEveryAlert(t *testing.T) {
+	f := &fakeQueryLog{}
+	e, got := newTestEngine(t, f, []iocmatch.IoC{{Value: "evil-ioc.com", Type: "domain", Confidence: 95}})
+	var asked []string
+	e.ResolveClient = func(ip string) (string, string) {
+		asked = append(asked, ip)
+		return "aa:bb:cc:dd:ee:66", "kids-tablet"
+	}
+	f.add("evil-ioc.com", "::ffff:192.168.1.66", time.Now().Add(time.Second))
+	e.poll(context.Background())
+	e.Ingest(Alert{ClientIP: "192.168.1.67", SignalClass: SignalBeacon})
+	e.Ingest(Alert{ClientIP: "192.168.1.68", ClientMAC: "aa:bb:cc:dd:ee:68", SignalClass: SignalBeacon})
+
+	if len(*got) != 3 {
+		t.Fatalf("alerts = %d", len(*got))
+	}
+	for _, a := range (*got)[:2] {
+		if a.ClientMAC != "aa:bb:cc:dd:ee:66" || a.ClientName != "kids-tablet" {
+			t.Errorf("alert %s for %s carries mac=%q name=%q", a.ID, a.ClientIP, a.ClientMAC, a.ClientName)
+		}
+	}
+	if got := strings.Join(asked, ","); got != "192.168.1.66,192.168.1.67" {
+		t.Errorf("looked up %s; want canonical addresses, and no lookup when the sensor knew the MAC", got)
+	}
+}
+
+// TestDNSAnswersCarryTheClient: the TLS heuristics need to know which
+// device resolved an address, not just that some device did.
+func TestDNSAnswersCarryTheClient(t *testing.T) {
+	f := &fakeQueryLog{}
+	e, _ := newTestEngine(t, f, nil)
+	var seen []string
+	e.OnDNSAnswer = func(client, ip, domain string, ttl int) {
+		seen = append(seen, client+" "+ip+" "+domain)
+	}
+	f.add("cdn.example.", "192.168.1.66", time.Now().Add(time.Second), "203.0.113.5", "2001:db8::5")
+	e.poll(context.Background())
+	if got := strings.Join(seen, "|"); got != "192.168.1.66 203.0.113.5 cdn.example|192.168.1.66 2001:db8::5 cdn.example" {
+		t.Errorf("answers seen: %q", got)
+	}
+}
+
 func TestClampConfidence(t *testing.T) {
 	for in, want := range map[int]int{-5: 0, 0: 0, 55: 55, 100: 100, 250: 100} {
 		if got := ClampConfidence(in); got != want {

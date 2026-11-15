@@ -42,7 +42,8 @@ type delivery struct {
 // TestRetryIsResignedWithFreshTimestamp: the receiver rejects a signature
 // older than its tolerance, so a signature computed once and reused would
 // turn a slow retry into a rejection. Here the clock moves six minutes per
-// attempt — past the five-minute window — and the retry must still verify.
+// attempt — past the five-minute window — and the retry, made by the
+// dispatcher from the outbox, must still verify.
 func TestRetryIsResignedWithFreshTimestamp(t *testing.T) {
 	clock := &fakeClock{t: time.Unix(1_800_000_000, 0), step: 6 * time.Minute}
 	verifier := &events.SignatureVerifier{Secret: "wh-secret", Now: clock.peek}
@@ -64,9 +65,12 @@ func TestRetryIsResignedWithFreshTimestamp(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	s := NewSender(srv.URL, "wh-secret", "tok", 3)
+	s := NewSender(srv.URL, "wh-secret", "tok")
 	s.now = clock.now
-	s.deliver(context.Background(), map[string]any{"id": "DET-abc-1"})
+	ob := newOutbox(t)
+	enqueue(t, ob, testEvent(1, events.SeverityHigh))
+	d := fastDispatcher(ob, s)
+	runUntil(t, d, func() bool { return ob.Pending() == 0 })
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -94,8 +98,10 @@ func TestSignedDeliveryVerifies(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	NewSender(srv.URL, "wh-secret", "tok", 0).deliver(context.Background(), map[string]string{"id": "DET-abc-2"})
-
+	res, err := NewSender(srv.URL, "wh-secret", "tok").Send(context.Background(), []byte(`{"id":"DET-abc-2"}`))
+	if res != ResultSuccess || err != nil {
+		t.Fatalf("Send = %s, %v", res, err)
+	}
 	if err := events.VerifyPayload("wh-secret", sig, body); err != nil {
 		t.Fatalf("delivery must verify under signature v2: %v", err)
 	}
@@ -111,29 +117,40 @@ func TestUnsignedWithoutSecret(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	NewSender(srv.URL, "", "", 0).deliver(context.Background(), map[string]string{})
+	_, _ = NewSender(srv.URL, "", "").Send(context.Background(), []byte(`{}`))
 	if sig != "" {
 		t.Errorf("no secret configured should mean no signature header, got %q", sig)
 	}
 }
 
-// TestClientErrorIsNotRetried: a 4xx (an event the receiver refuses as
-// invalid, say) cannot be fixed by sending it again.
-func TestClientErrorIsNotRetried(t *testing.T) {
-	var mu sync.Mutex
-	calls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		calls++
-		mu.Unlock()
-		w.WriteHeader(http.StatusUnprocessableEntity)
-	}))
-	t.Cleanup(srv.Close)
+func TestSendClassifiesAnswers(t *testing.T) {
+	for code, want := range map[int]string{
+		http.StatusOK:                    ResultSuccess,
+		http.StatusAccepted:              ResultSuccess,
+		http.StatusUnauthorized:          ResultUnauthorized,
+		http.StatusForbidden:             ResultUnauthorized,
+		http.StatusBadRequest:            ResultRejected,
+		http.StatusUnprocessableEntity:   ResultRejected,
+		http.StatusRequestEntityTooLarge: ResultRejected,
+		http.StatusNotFound:              ResultFailure, // wrong URL: fixable, keep the event
+		http.StatusTooManyRequests:       ResultFailure,
+		http.StatusServiceUnavailable:    ResultFailure,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(code)
+		}))
+		got, _ := NewSender(srv.URL, "s", "t").Send(context.Background(), []byte(`{}`))
+		srv.Close()
+		if got != want {
+			t.Errorf("status %d classified as %s, want %s", code, got, want)
+		}
+	}
 
-	NewSender(srv.URL, "s", "t", 3).deliver(context.Background(), map[string]string{})
-	mu.Lock()
-	defer mu.Unlock()
-	if calls != 1 {
-		t.Errorf("a 422 was attempted %d times, want 1", calls)
+	// Nothing listening: transient.
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close()
+	if got, err := NewSender(url, "", "").Send(context.Background(), []byte(`{}`)); got != ResultFailure || err == nil {
+		t.Errorf("unreachable receiver = %s, %v; want failure", got, err)
 	}
 }

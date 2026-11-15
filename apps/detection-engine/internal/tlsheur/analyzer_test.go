@@ -13,7 +13,7 @@ import (
 
 type fakeResolver map[string]string
 
-func (f fakeResolver) Get(ip string) string { return f[ip] }
+func (f fakeResolver) Get(_, ip string) string { return f[ip] }
 
 func tlsEvent(src, dst, sni, ja3, fp string) ingest.SensorEvent {
 	return ingest.SensorEvent{

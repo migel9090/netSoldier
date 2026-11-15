@@ -1,0 +1,387 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime/debug"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
+	"github.com/migel9090/netSoldier/libs/events"
+)
+
+const (
+	testSecret = "wh-secret"
+	testToken  = "wh-token"
+	testDevKey = "dev-key"
+	testAPIKey = "api-key"
+)
+
+// These tests run the service's real wiring — run() — against stub
+// neighbours. Unit tests that hand-built alerts with MACs are how an
+// enrichment hook nobody assigned went unnoticed.
+
+// querylog serves AdGuard's /control/querylog with one lookup of a listed
+// name, until serving is switched off.
+type querylog struct {
+	u       string
+	serving atomic.Bool
+}
+
+func startQuerylog(t *testing.T, client string) *querylog {
+	entries := []map[string]any{{
+		"question": map[string]string{"host": "evil.example.com", "type": "A"},
+		"client":   client, "time": time.Now().Add(time.Minute),
+	}}
+	q := &querylog{}
+	q.serving.Store(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		data := []map[string]any{}
+		if q.serving.Load() {
+			data = entries
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	t.Cleanup(srv.Close)
+	q.u = srv.URL
+	return q
+}
+
+func (q *querylog) url() string { return q.u }
+
+type inventoryStub struct {
+	url   string
+	auths atomic.Int32
+}
+
+// startInventory serves device-inventory's GET /devices/by-ip/{ip}
+// (contract §5) for one device.
+func startInventory(t *testing.T, ip, mac, hostname string) *inventoryStub {
+	inv := &inventoryStub{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /devices/by-ip/{ip}", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+testDevKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		inv.auths.Add(1)
+		if r.PathValue("ip") != ip {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"mac": mac, "ip": ip, "hostname": hostname})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	inv.url = srv.URL
+	return inv
+}
+
+type receiverStub struct {
+	url    string
+	status atomic.Int32
+	tries  atomic.Int32
+	mu     sync.Mutex
+	got    []events.DetectionEvent
+}
+
+func startReceiver(t *testing.T) *receiverStub {
+	rx := &receiverStub{}
+	rx.status.Store(http.StatusOK)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rx.tries.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		if r.Header.Get("Authorization") != "Bearer "+testToken ||
+			events.VerifyPayload(testSecret, r.Header.Get(events.SignatureHeader), body) != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		code := int(rx.status.Load())
+		if code == http.StatusOK {
+			var ev events.DetectionEvent
+			_ = json.Unmarshal(body, &ev)
+			rx.mu.Lock()
+			rx.got = append(rx.got, ev)
+			rx.mu.Unlock()
+		}
+		w.WriteHeader(code)
+	}))
+	t.Cleanup(srv.Close)
+	rx.url = srv.URL
+	return rx
+}
+
+func (rx *receiverStub) events() []events.DetectionEvent {
+	rx.mu.Lock()
+	defer rx.mu.Unlock()
+	return append([]events.DetectionEvent(nil), rx.got...)
+}
+
+func baseEnv(t *testing.T, q *querylog, rx *receiverStub, invURL, dbPath string) map[string]string {
+	tl := filepath.Join(t.TempDir(), "domains.txt")
+	if err := os.WriteFile(tl, []byte("evil.example.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{
+		"LISTEN_ADDR":          "127.0.0.1:0",
+		"ADGUARD_URL":          q.url(),
+		"ADGUARD_USER":         "admin",
+		"ADGUARD_PASSWORD":     "test",
+		"THREATLIST_PATH":      tl,
+		"POLL_INTERVAL":        "100ms",
+		"WEBHOOK_URL":          rx.url,
+		"WEBHOOK_SECRET":       testSecret,
+		"WEBHOOK_TOKEN":        testToken,
+		"DEVICE_INVENTORY_URL": invURL,
+		"DEVICE_API_KEY":       testDevKey,
+		"DETECTION_API_KEY":    testAPIKey,
+		"DB_PATH":              dbPath,
+	}
+}
+
+// start runs the service; the returned stop cancels it and returns run's
+// error once it has shut down.
+func start(t *testing.T, env map[string]string) (addr string, stop func() error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	addrCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, func(k string) string { return env[k] }, func(a string) { addrCh <- a })
+	}()
+	select {
+	case addr = <-addrCh:
+	case err := <-errCh:
+		cancel()
+		t.Fatalf("run exited before listening: %v", err)
+	case <-time.After(10 * time.Second):
+		cancel()
+		t.Fatal("run did not start listening")
+	}
+	var once sync.Once
+	var runErr error
+	stop = func() error {
+		once.Do(func() {
+			cancel()
+			select {
+			case runErr = <-errCh:
+			case <-time.After(20 * time.Second):
+				t.Fatal("run did not shut down")
+			}
+		})
+		return runErr
+	}
+	t.Cleanup(func() { _ = stop() })
+	return addr, stop
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func getAlerts(t *testing.T, addr string) []detection.Alert {
+	t.Helper()
+	resp, err := http.Get("http://" + addr + "/alerts?limit=10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out []detection.Alert
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestRunEnrichesDetectionsWithDeviceIdentity: what the killswitch receives,
+// and what GET /alerts shows, carries the MAC and name device-inventory
+// reports for the client address.
+func TestRunEnrichesDetectionsWithDeviceIdentity(t *testing.T) {
+	q := startQuerylog(t, "192.168.1.42")
+	inv := startInventory(t, "192.168.1.42", "AA:BB:CC:00:00:42", "kids-tablet")
+	rx := startReceiver(t)
+	addr, stop := start(t, baseEnv(t, q, rx, inv.url, filepath.Join(t.TempDir(), "de.db")))
+
+	waitFor(t, "a delivered detection", func() bool { return len(rx.events()) > 0 })
+	ev := rx.events()[0]
+	if ev.ClientMAC != "aa:bb:cc:00:00:42" || ev.ClientName != "kids-tablet" {
+		t.Errorf("delivered client_mac=%q client_name=%q, want the inventory's device", ev.ClientMAC, ev.ClientName)
+	}
+	if err := ev.Validate(); err != nil {
+		t.Errorf("delivered event breaks the contract: %v", err)
+	}
+	if inv.auths.Load() == 0 {
+		t.Error("the inventory was never asked with DEVICE_API_KEY")
+	}
+
+	alerts := getAlerts(t, addr)
+	if len(alerts) == 0 || alerts[0].ClientMAC != "aa:bb:cc:00:00:42" || alerts[0].ID != ev.ID {
+		t.Errorf("GET /alerts = %+v, want the delivered detection with its MAC", alerts)
+	}
+	if err := stop(); err != nil {
+		t.Errorf("clean shutdown returned %v", err)
+	}
+}
+
+// TestRunKeepsHistoryAndBacklogAcrossRestart: a detection made while the
+// killswitch is down is delivered by the next process, and the history
+// still lists it.
+func TestRunKeepsHistoryAndBacklogAcrossRestart(t *testing.T) {
+	q := startQuerylog(t, "192.168.1.42")
+	inv := startInventory(t, "192.168.1.42", "aa:bb:cc:00:00:42", "kids-tablet")
+	rx := startReceiver(t)
+	rx.status.Store(http.StatusServiceUnavailable)
+	env := baseEnv(t, q, rx, inv.url, filepath.Join(t.TempDir(), "de.db"))
+
+	addr, stop := start(t, env)
+	waitFor(t, "a recorded alert", func() bool { return len(getAlerts(t, addr)) > 0 })
+	waitFor(t, "a refused delivery attempt", func() bool { return rx.tries.Load() > 0 })
+	id := getAlerts(t, addr)[0].ID
+	q.serving.Store(false) // the querylog has nothing new for the next process
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(rx.events()); n != 0 {
+		t.Fatalf("receiver accepted %d events while refusing", n)
+	}
+
+	rx.status.Store(http.StatusOK)
+	addr2, _ := start(t, env)
+	waitFor(t, "the backlog to be delivered", func() bool { return len(rx.events()) > 0 })
+	if got := rx.events(); len(got) != 1 || got[0].ID != id || got[0].ClientMAC != "aa:bb:cc:00:00:42" {
+		t.Fatalf("after restart delivered %+v, want exactly the earlier detection %s", got, id)
+	}
+	if alerts := getAlerts(t, addr2); len(alerts) != 1 || alerts[0].ID != id {
+		t.Errorf("history after restart = %+v, want the earlier alert", alerts)
+	}
+}
+
+// TestRunWithoutInventoryStillDelivers: identity is best effort. An
+// unreachable inventory costs the MAC, never the detection, and is counted.
+func TestRunWithoutInventoryStillDelivers(t *testing.T) {
+	gone := httptest.NewServer(http.NotFoundHandler())
+	goneURL := gone.URL
+	gone.Close()
+
+	q := startQuerylog(t, "192.168.1.42")
+	rx := startReceiver(t)
+	addr, _ := start(t, baseEnv(t, q, rx, goneURL, filepath.Join(t.TempDir(), "de.db")))
+
+	waitFor(t, "a delivered detection", func() bool { return len(rx.events()) > 0 })
+	if ev := rx.events()[0]; ev.ClientMAC != "" {
+		t.Errorf("client_mac = %q with no inventory", ev.ClientMAC)
+	}
+	if n := metric(t, addr, `detection_engine_device_lookup_failures_total{reason="unreachable"}`); n < 1 {
+		t.Errorf("unreachable lookups counted %v, want >= 1", n)
+	}
+	if n := metric(t, addr, `detection_engine_store_durable`); n != 1 {
+		t.Errorf("store_durable = %v with DB_PATH set", n)
+	}
+}
+
+// TestRunFeedbackTakesClassFromStoredAlert: the web UI posts alert_id,
+// matched_ioc and client_ip; the verdict is scoped to the class of the
+// alert the analyst looked at, which the store still has.
+func TestRunFeedbackTakesClassFromStoredAlert(t *testing.T) {
+	q := startQuerylog(t, "192.168.1.42")
+	rx := startReceiver(t)
+	inv := startInventory(t, "192.168.1.42", "aa:bb:cc:00:00:42", "kids-tablet")
+	addr, _ := start(t, baseEnv(t, q, rx, inv.url, filepath.Join(t.TempDir(), "de.db")))
+	waitFor(t, "a recorded alert", func() bool { return len(getAlerts(t, addr)) > 0 })
+	a := getAlerts(t, addr)[0]
+
+	body, _ := json.Marshal(map[string]string{"alert_id": a.ID, "matched_ioc": a.MatchedIoC,
+		"client_ip": a.ClientIP, "verdict": "false_positive", "timestamp": "2099-01-01T00:00:00Z"})
+	req, _ := http.NewRequest(http.MethodPost, "http://"+addr+"/feedback", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	req.Header.Set("X-Netsoldier-Actor", "analyst")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /feedback = %d", resp.StatusCode)
+	}
+
+	resp, err = http.Get("http://" + addr + "/feedback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var active []map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&active)
+	if len(active) != 1 || active[0]["signal_class"] != "ioc" {
+		t.Fatalf("active suppressions = %v, want one scoped to class ioc", active)
+	}
+	if ts, _ := time.Parse(time.RFC3339Nano, active[0]["timestamp"].(string)); ts.Year() != time.Now().Year() {
+		t.Errorf("verdict timestamp %v: the caller's 2099 was used", ts)
+	}
+}
+
+func TestRunRefusesUnusableDBPath(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"DB_PATH": filepath.Join(blocker, "de.db"), "LISTEN_ADDR": "127.0.0.1:0"}
+	err := run(context.Background(), func(k string) string { return env[k] }, nil)
+	if err == nil || !strings.Contains(err.Error(), "DB_PATH") {
+		t.Fatalf("run = %v, want a DB_PATH error: an explicitly configured store must not silently become memory", err)
+	}
+}
+
+// TestNoPacketCaptureInTheBinary: the in-process capture derived flow
+// direction from the sort order of address strings, kept an unbounded flow
+// table and needed raw-socket capability. It is gone; flows come from Zeek
+// conn.log. Nothing linked into the service may bring it back.
+func TestNoPacketCaptureInTheBinary(t *testing.T) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		t.Skip("no build info in this test binary")
+	}
+	for _, dep := range info.Deps {
+		if strings.Contains(dep.Path, "gopacket") || strings.Contains(dep.Path, "pcap") {
+			t.Errorf("the service links %s: packet capture belongs to the sensors, not here", dep.Path)
+		}
+	}
+	if len(info.Deps) == 0 {
+		t.Error("build info lists no dependencies; the check proves nothing")
+	}
+}
+
+// metric scrapes one sample from /metrics (0 when absent).
+func metric(t *testing.T, addr, series string) float64 {
+	t.Helper()
+	resp, err := http.Get("http://" + addr + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		if v, ok := strings.CutPrefix(sc.Text(), series+" "); ok {
+			f, _ := strconv.ParseFloat(v, 64)
+			return f
+		}
+	}
+	return 0
+}

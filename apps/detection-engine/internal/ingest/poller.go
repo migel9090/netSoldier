@@ -29,6 +29,12 @@ func init() {
 	prometheus.MustRegister(rowsIngested, ingestErrors)
 }
 
+// Querier runs a JSONEachRow SELECT and hands back each row
+// (*clickhouse.Client in production).
+type Querier interface {
+	QueryJSONEachRow(ctx context.Context, query string, fn func(json.RawMessage) error) error
+}
+
 // Source describes one ClickHouse-backed sensor stream.
 type Source interface {
 	Name() string
@@ -43,7 +49,7 @@ type Source interface {
 // second precision, so the query uses >= and rows in the cursor second are
 // deduplicated by key across polls.
 type Poller struct {
-	ch       *CHClient
+	ch       Querier
 	src      Source
 	interval time.Duration
 	emit     func(SensorEvent)
@@ -52,7 +58,7 @@ type Poller struct {
 	seen   map[string]struct{}
 }
 
-func NewPoller(ch *CHClient, src Source, interval time.Duration, emit func(SensorEvent)) *Poller {
+func NewPoller(ch Querier, src Source, interval time.Duration, emit func(SensorEvent)) *Poller {
 	return &Poller{
 		ch:       ch,
 		src:      src,
