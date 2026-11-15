@@ -1,9 +1,15 @@
-"""Flow feature extraction for volumetric/exfil anomaly detection (step 113).
+"""Flow feature extraction for volumetric/exfil anomaly detection (steps 113, 125.23).
 
-The detection-engine correlator writes one ``connections`` row per flow
-(who→where→how much). This module aggregates those rows into per-source
-time windows and turns each window into a numeric feature vector for the
-Isolation Forest in :mod:`ml_anomaly.iforest`.
+EXPERIMENTAL: the volumetric signal works end to end, but its calibration
+(score -> confidence, health gate, poisoning resistance) is roadmap step 129.
+Treat its rows as a hint for a human, not as evidence.
+
+Flows come from Zeek's ``conn.log`` (``netsoldier.zeek_conn``), which records
+originator and responder explicitly. Each window aggregates the connections a
+source *originated*: ``bytes_out`` is what the originator sent
+(``orig_bytes``), ``bytes_in`` what it received (``resp_bytes``). How rows are
+placed into windows (by arrival, so long flows count) is described in
+:meth:`ml_anomaly.clickhouse.ClickHouseClient.fetch_flow_windows`.
 
 Everything here is pure and unit-tested; ClickHouse I/O lives in
 :mod:`ml_anomaly.clickhouse`.
@@ -13,6 +19,7 @@ from __future__ import annotations
 
 import ipaddress
 import math
+import time
 from dataclasses import dataclass
 
 # Feature order is part of the model contract: a persisted model is only
@@ -32,13 +39,21 @@ class FlowWindow:
     """Aggregated flow activity of one source IP over one time window."""
 
     src_ip: str
-    window_start: str  # "YYYY-MM-DD HH:MM:SS" (ClickHouse DateTime text)
+    window_start: str  # "YYYY-MM-DD HH:MM:SS", UTC
     conn_count: int
     bytes_out: int
     bytes_in: int
     dst_fanout: int
     port_fanout: int
     avg_duration_ms: float
+    # rows placed in this window because they arrived more than the allowed
+    # lateness after they ended (e.g. a backlog flushed after an outage)
+    late_rows: int = 0
+
+
+def utc_text(ts: int) -> str:
+    """Unix seconds -> 'YYYY-MM-DD HH:MM:SS' in UTC."""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(ts))
 
 
 # Mirrors detection-engine's DefaultLocalCIDRs: explicit RFC1918 + ULA +

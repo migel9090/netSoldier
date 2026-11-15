@@ -1,0 +1,26 @@
+<!-- Stand-in for the cluster's storage policy so migration 018 applies:
+     same policy and volume names as deploy/kustomize/base/clickhouse,
+     but the cold volume is a local disk instead of Garage S3. -->
+<clickhouse>
+    <storage_configuration>
+        <disks>
+            <s3_cold>
+                <type>local</type>
+                <path>/var/lib/clickhouse/it-cold/</path>
+            </s3_cold>
+        </disks>
+        <policies>
+            <tiered>
+                <volumes>
+                    <default>
+                        <disk>default</disk>
+                    </default>
+                    <cold>
+                        <disk>s3_cold</disk>
+                        <perform_ttl_move_on_insert>false</perform_ttl_move_on_insert>
+                    </cold>
+                </volumes>
+            </tiered>
+        </policies>
+    </storage_configuration>
+</clickhouse>
