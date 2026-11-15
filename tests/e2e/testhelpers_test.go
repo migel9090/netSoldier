@@ -23,7 +23,8 @@ import (
 // untagged helper file, because the helpers below reference them and both the
 // e2e and integration builds compile this file.
 const (
-	e2eAPIKey        = "e2e-api-key"
+	e2eAPIKey        = "e2e-api-key" // the killswitch operator token, and the other services' keys
+	e2eIngestToken   = "e2e-ingest-token"
 	e2eWebhookSecret = "e2e-webhook-secret"
 )
 
@@ -121,7 +122,12 @@ func waitHealthy(t *testing.T, url string) {
 
 func httpGetJSON(t *testing.T, url string, dst any) {
 	t.Helper()
-	resp, err := http.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+e2eAPIKey)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
@@ -171,7 +177,11 @@ func assertEq(t *testing.T, field, want, got string) {
 // the production posture, which no earlier run exercised.
 func httpPostJSON(t *testing.T, url string, body any, dst any) {
 	t.Helper()
-	postAuthedJSON(t, url, e2eAPIKey, body, dst)
+	token := e2eAPIKey
+	if strings.HasSuffix(url, "/evaluate") {
+		token = e2eIngestToken
+	}
+	postAuthedJSON(t, url, token, body, dst)
 }
 
 // postAuthedJSON posts a JSON body with a bearer token and, when the target
@@ -223,7 +233,7 @@ func postEvaluateRaw(t *testing.T, ksAddr string, body []byte, sig string) (int,
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+e2eAPIKey)
+	req.Header.Set("Authorization", "Bearer "+e2eIngestToken)
 	if sig != "" {
 		req.Header.Set(events.SignatureHeader, sig)
 	}

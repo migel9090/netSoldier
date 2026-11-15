@@ -35,14 +35,20 @@ func newEvalEnv(t *testing.T, drv drivers.Driver) *evalEnv {
 	if err := pol.Allowlist.AddIP("192.168.1.1"); err != nil {
 		t.Fatal(err)
 	}
+	return newEvalEnvWith(t, pol, func(string) (drivers.Driver, error) { return drv, nil })
+}
+
+func newEvalEnvWith(t *testing.T, pol *policy.Policy, resolve driverResolver) *evalEnv {
+	t.Helper()
 	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
-	resolve := func(string) (drivers.Driver, error) { return drv, nil }
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true,
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve,
 		newEvaluationLedger(ledgerRetention(0))))
+	// key is the ingest token: these tests only submit events.
 	env := &evalEnv{store: store, key: "k", secret: "whsec"}
-	env.srv = httptest.NewServer(authMiddleware(env.key, &events.SignatureVerifier{Secret: env.secret}, mux))
+	env.srv = httptest.NewServer(authMiddleware(credentials{operator: "operator-key", ingest: env.key},
+		&events.SignatureVerifier{Secret: env.secret}, mux))
 	t.Cleanup(env.srv.Close)
 	return env
 }

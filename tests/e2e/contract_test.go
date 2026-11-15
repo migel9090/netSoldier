@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,13 +51,14 @@ func TestDetectionToKillswitchContract(t *testing.T) {
 	// The killswitch IS the webhook receiver here: that is the real contract.
 	ksAddr := freeAddr(t)
 	stopKs := startProc(t, ksBin, map[string]string{
-		"LISTEN_ADDR":        ksAddr,
-		"ADGUARD_URL":        ag.url,
-		"ADGUARD_USER":       "admin",
-		"ADGUARD_PASSWORD":   "test",
-		"KILLSWITCH_API_KEY": e2eAPIKey,
-		"WEBHOOK_SECRET":     e2eWebhookSecret,
-		"ALLOWLIST_IPS":      "192.168.1.1",
+		"LISTEN_ADDR":             ksAddr,
+		"ADGUARD_URL":             ag.url,
+		"ADGUARD_USER":            "admin",
+		"ADGUARD_PASSWORD":        "test",
+		"KILLSWITCH_API_KEY":      e2eAPIKey,
+		"KILLSWITCH_INGEST_TOKEN": e2eIngestToken,
+		"WEBHOOK_SECRET":          e2eWebhookSecret,
+		"ALLOWLIST_IPS":           "192.168.1.1",
 	})
 	t.Cleanup(stopKs)
 	waitHealthy(t, "http://"+ksAddr+"/healthz")
@@ -71,7 +73,7 @@ func TestDetectionToKillswitchContract(t *testing.T) {
 		"POLL_INTERVAL":               "1s",
 		"WEBHOOK_URL":                 "http://" + ksAddr + "/evaluate",
 		"WEBHOOK_SECRET":              e2eWebhookSecret,
-		"WEBHOOK_TOKEN":               e2eAPIKey,
+		"WEBHOOK_TOKEN":               e2eIngestToken,
 		"DETECTION_API_KEY":           e2eAPIKey,
 		"OTEL_EXPORTER_OTLP_ENDPOINT": "localhost:1",
 	})
@@ -122,13 +124,14 @@ func TestKillswitchRejectsUnauthenticated(t *testing.T) {
 
 	ksAddr := freeAddr(t)
 	stopKs := startProc(t, ksBin, map[string]string{
-		"LISTEN_ADDR":        ksAddr,
-		"ADGUARD_URL":        ag.url,
-		"ADGUARD_USER":       "admin",
-		"ADGUARD_PASSWORD":   "test",
-		"KILLSWITCH_API_KEY": e2eAPIKey,
-		"WEBHOOK_SECRET":     e2eWebhookSecret,
-		"ALLOWLIST_IPS":      "192.168.1.1",
+		"LISTEN_ADDR":             ksAddr,
+		"ADGUARD_URL":             ag.url,
+		"ADGUARD_USER":            "admin",
+		"ADGUARD_PASSWORD":        "test",
+		"KILLSWITCH_API_KEY":      e2eAPIKey,
+		"KILLSWITCH_INGEST_TOKEN": e2eIngestToken,
+		"WEBHOOK_SECRET":          e2eWebhookSecret,
+		"ALLOWLIST_IPS":           "192.168.1.1",
 	})
 	t.Cleanup(stopKs)
 	waitHealthy(t, "http://"+ksAddr+"/healthz")
@@ -148,15 +151,17 @@ func TestKillswitchRejectsUnauthenticated(t *testing.T) {
 		sig   string
 	}{
 		{"no credentials at all", "", ""},
-		{"token but no signature", e2eAPIKey, ""},
-		{"valid token, wrong signature", e2eAPIKey, events.SignPayload("wrong-secret", body)},
+		{"token but no signature", e2eIngestToken, ""},
+		{"valid token, wrong signature", e2eIngestToken, events.SignPayload("wrong-secret", body)},
 		{"valid signature, wrong token", "wrong-token", events.SignPayload(e2eWebhookSecret, body)},
+		// The operator token approves actions; it cannot submit them.
+		{"valid signature, operator token", e2eAPIKey, events.SignPayload(e2eWebhookSecret, body)},
 		// A genuine signature captured ten minutes ago: outside the window.
-		{"stale signature", e2eAPIKey,
+		{"stale signature", e2eIngestToken,
 			events.SignPayloadAt(e2eWebhookSecret, time.Now().Add(-10*time.Minute), body)},
 		// The 1.x body-only scheme has no timestamp; accepting it would
 		// reopen the replay hole.
-		{"legacy body-only signature", e2eAPIKey, "sha256=" + hex.EncodeToString(legacy.Sum(nil))},
+		{"legacy body-only signature", e2eIngestToken, "sha256=" + hex.EncodeToString(legacy.Sum(nil))},
 	}
 
 	for _, tc := range cases {
@@ -207,11 +212,13 @@ func TestEmptyAllowlistDisablesAutoBlock(t *testing.T) {
 
 	ksAddr := freeAddr(t)
 	stopKs := startProc(t, ksBin, map[string]string{
-		"LISTEN_ADDR":        ksAddr,
-		"ADGUARD_URL":        ag.url,
-		"ADGUARD_USER":       "admin",
-		"ADGUARD_PASSWORD":   "test",
-		"KILLSWITCH_API_KEY": e2eAPIKey,
+		"LISTEN_ADDR":             ksAddr,
+		"ADGUARD_URL":             ag.url,
+		"ADGUARD_USER":            "admin",
+		"ADGUARD_PASSWORD":        "test",
+		"KILLSWITCH_API_KEY":      e2eAPIKey,
+		"KILLSWITCH_INGEST_TOKEN": e2eIngestToken,
+		"WEBHOOK_SECRET":          e2eWebhookSecret,
 		// No ALLOWLIST_* at all: nothing is protected.
 	})
 	t.Cleanup(stopKs)
@@ -226,7 +233,7 @@ func TestEmptyAllowlistDisablesAutoBlock(t *testing.T) {
 		} `json:"decision"`
 		Action *events.EnforcementAction `json:"action"`
 	}
-	postAuthedJSON(t, "http://"+ksAddr+"/evaluate", e2eAPIKey, ev, &result)
+	postAuthedJSON(t, "http://"+ksAddr+"/evaluate", e2eIngestToken, ev, &result)
 
 	if result.Decision.Action != "pending" {
 		t.Fatalf("decision = %q, want pending: with an empty allowlist the target could "+
@@ -261,11 +268,13 @@ func TestHeuristicsNeverAutoBlockE2E(t *testing.T) {
 
 	ksAddr := freeAddr(t)
 	stopKs := startProc(t, ksBin, map[string]string{
-		"LISTEN_ADDR":        ksAddr,
-		"ADGUARD_URL":        ag.url,
-		"ADGUARD_USER":       "admin",
-		"ADGUARD_PASSWORD":   "test",
-		"KILLSWITCH_API_KEY": e2eAPIKey,
+		"LISTEN_ADDR":             ksAddr,
+		"ADGUARD_URL":             ag.url,
+		"ADGUARD_USER":            "admin",
+		"ADGUARD_PASSWORD":        "test",
+		"KILLSWITCH_API_KEY":      e2eAPIKey,
+		"KILLSWITCH_INGEST_TOKEN": e2eIngestToken,
+		"WEBHOOK_SECRET":          e2eWebhookSecret,
 		// Match the proxmox-soc overlay: corroboration required.
 		"POLICY_AUTO_MIN_SIGNALS": "2",
 		"ALLOWLIST_IPS":           "192.168.1.1",
@@ -298,7 +307,7 @@ func TestHeuristicsNeverAutoBlockE2E(t *testing.T) {
 	heuristics.Signals = []events.Signal{beacon, volumetric}
 
 	var got evalResult
-	postAuthedJSON(t, "http://"+ksAddr+"/evaluate", e2eAPIKey, heuristics, &got)
+	postAuthedJSON(t, "http://"+ksAddr+"/evaluate", e2eIngestToken, heuristics, &got)
 	if got.Decision.Action != "pending" {
 		t.Fatalf("beacon+volumetric must stay human-in-the-loop, got %q (reason: %s)",
 			got.Decision.Action, got.Decision.Reason)
@@ -311,7 +320,8 @@ func TestHeuristicsNeverAutoBlockE2E(t *testing.T) {
 		t.Fatalf("no sinkhole rule should exist for a heuristic-only detection: %v", rules)
 	}
 
-	// The same client corroborated by an IDS signature IS known-bad.
+	// An IDS signature that names a rule id attests nothing about the
+	// beacon's destination: still a human's call (KS-2).
 	withSignature := base
 	withSignature.ID = "DET-e2e-9002"
 	withSignature.SignalClass = events.SignalComposite
@@ -319,10 +329,26 @@ func TestHeuristicsNeverAutoBlockE2E(t *testing.T) {
 		{Class: events.SignalIDS, Confidence: 70, Indicator: "2013028", IndicatorType: events.IndicatorSID}}
 
 	var signed evalResult
-	postAuthedJSON(t, "http://"+ksAddr+"/evaluate", e2eAPIKey, withSignature, &signed)
-	if signed.Decision.Action != "auto_block" {
-		t.Fatalf("heuristics corroborated by an IDS signature should auto-block, got %q (reason: %s)",
+	postAuthedJSON(t, "http://"+ksAddr+"/evaluate", e2eIngestToken, withSignature, &signed)
+	if signed.Decision.Action != "pending" ||
+		!strings.Contains(signed.Decision.Reason, "no known-bad signal names the target updates.vendor.example") {
+		t.Fatalf("an IDS hit on a rule id must not unlock a block of the beacon's destination, got %q (reason: %s)",
 			signed.Decision.Action, signed.Decision.Reason)
+	}
+
+	// A signature that matched the destination itself, strongly, does.
+	attested := base
+	attested.ID = "DET-e2e-9003"
+	attested.SignalClass = events.SignalComposite
+	attested.Signals = []events.Signal{beacon, volumetric,
+		{Class: events.SignalIDS, Confidence: 95, Indicator: "updates.vendor.example",
+			IndicatorType: events.IndicatorDomain, Source: "suricata-dataset"}}
+
+	var blocked evalResult
+	postAuthedJSON(t, "http://"+ksAddr+"/evaluate", e2eIngestToken, attested, &blocked)
+	if blocked.Decision.Action != "auto_block" {
+		t.Fatalf("a strong signature on the destination itself should auto-block, got %q (reason: %s)",
+			blocked.Decision.Action, blocked.Decision.Reason)
 	}
 }
 
@@ -342,11 +368,13 @@ func TestAllowlistProtectsGatewayE2E(t *testing.T) {
 
 	ksAddr := freeAddr(t)
 	stopKs := startProc(t, ksBin, map[string]string{
-		"LISTEN_ADDR":        ksAddr,
-		"ADGUARD_URL":        ag.url,
-		"ADGUARD_USER":       "admin",
-		"ADGUARD_PASSWORD":   "test",
-		"KILLSWITCH_API_KEY": e2eAPIKey,
+		"LISTEN_ADDR":             ksAddr,
+		"ADGUARD_URL":             ag.url,
+		"ADGUARD_USER":            "admin",
+		"ADGUARD_PASSWORD":        "test",
+		"KILLSWITCH_API_KEY":      e2eAPIKey,
+		"KILLSWITCH_INGEST_TOKEN": e2eIngestToken,
+		"WEBHOOK_SECRET":          e2eWebhookSecret,
 		// Spelled the way a router UI shows it, to prove normalization
 		// works: the detection pipeline emits lowercase colon form.
 		"ALLOWLIST_MACS": "AA-BB-CC-DD-EE-FF",
@@ -376,7 +404,7 @@ func TestAllowlistProtectsGatewayE2E(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var got evalResult
-			postAuthedJSON(t, "http://"+ksAddr+"/evaluate", e2eAPIKey, tc.ev, &got)
+			postAuthedJSON(t, "http://"+ksAddr+"/evaluate", e2eIngestToken, tc.ev, &got)
 			if got.Decision.Action != "ignore" {
 				t.Fatalf("an allowlisted device must never be enforced against, got %q (reason: %s)",
 					got.Decision.Action, got.Decision.Reason)

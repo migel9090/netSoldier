@@ -1,8 +1,11 @@
 package policy
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -16,47 +19,91 @@ type Decision struct {
 	ActionType string // events.ActionDNSSinkhole, etc.
 	TTLSeconds int
 	Reason     string
+	// Withheld is set when the event met every per-event condition for
+	// auto-block and only the service-wide state kept it pending (one of the
+	// Withheld* labels). The caller counts and logs these: an operator who
+	// started the service in a degraded mode has to be able to see what it
+	// is costing them.
+	Withheld string `json:",omitempty"`
 }
+
+// Labels for Decision.Withheld, also used as metric label values.
+const (
+	WithheldEmptyAllowlist    = "empty_allowlist"
+	WithheldInvalidProtection = "invalid_protection_config"
+)
+
+// OnInvalidPendingOnly is the ALLOWLIST_ON_INVALID value that lets the
+// service start with rejected protection entries, auto-block disabled.
+const OnInvalidPendingOnly = "pending-only"
 
 // Policy defines thresholds for automated and pending enforcement,
 // plus an allowlist of critical devices that are never blocked.
+//
+// The auto-block rule lives here and nowhere else. An event is enforced
+// without a human only when ALL of these hold:
+//
+//  1. its target is a domain;
+//  2. a known-bad signal (feed match or IDS signature) names exactly that
+//     domain and on its own clears AutoMinConfidence (AttestedSignal);
+//  3. the event clears AutoMinConfidence / AutoMinSeverity and carries at
+//     least AutoMinSignals distinct signal classes when it is a composite;
+//  4. the client is neither allowlisted nor protected infrastructure;
+//  5. auto-block is enabled service-wide (AutoBlockHold).
+//
+// The automatic path always enforces through the DNS sinkhole. Everything
+// else that clears the thresholds becomes a pending action whose
+// policy_rule names the conditions that failed.
 type Policy struct {
 	AutoMinConfidence int
 	AutoMinSeverity   string
 	PendMinConfidence int
 	PendMinSeverity   string
 	DefaultTTL        int
-	DefaultAction     string
-	// AutoMinSignals is the composite-confidence gate (step 117): auto-block
-	// requires at least this many corroborating signal classes.
+	// DefaultAction is the enforcement type a PENDING action is created
+	// with, i.e. what a human approves. It never changes what the automatic
+	// path does: that is always a DNS sinkhole.
+	DefaultAction string
+	// AutoMinSignals is the composite-confidence gate (step 117): a
+	// composite must carry at least this many distinct signal classes.
 	AutoMinSignals int
-	// AutoRequireKnownBad gates auto-block on at least one externally
-	// attested known-bad signal class (threat-feed match or IDS signature).
-	//
-	// Why this exists (step 124): composite confidence combines signals with
-	// a noisy-OR, so a lone beacon (max 75) plus a lone volumetric anomaly
-	// (max 70) combine to 93 → severity "critical" → it cleared the 90 /
-	// critical auto-block bar with TWO signal classes and therefore also
-	// satisfied AutoMinSignals=2. Two local heuristics could quarantine a
-	// household device with no human in the loop and nothing external
-	// saying the destination was malicious — and NTP, telemetry and update
-	// checks all look like beaconing. Counting signals is not enough; their
-	// KIND is what separates "known bad" from "unusual".
-	AutoRequireKnownBad bool
+
+	// Allowlist is the operator's list of devices that must never be
+	// enforced against. While it is empty auto-block is disabled, unless
+	// AllowEmptyAllowlist says otherwise.
 	Allowlist           Allowlist
+	AllowEmptyAllowlist bool
+
+	// Infrastructure holds the devices the service protects on its own
+	// account — the configured gateway, the DNS server it enforces through,
+	// the sensor's own interfaces. Events from them are ignored like
+	// allowlisted ones, but they do not count towards "the allowlist is not
+	// empty": discovering the sensor's own address says nothing about
+	// whether the operator has protected the router.
+	Infrastructure Allowlist
+
+	// GatewayIP / GatewayMAC are the pinned gateway identity from
+	// GATEWAY_IP / GATEWAY_MAC (zero / empty when not configured).
+	GatewayIP  netip.Addr
+	GatewayMAC string
+
+	// RejectedEntries lists protection settings that did not parse. It is
+	// only ever non-empty when the service was told to start anyway
+	// (ALLOWLIST_ON_INVALID=pending-only), and while it is, auto-block is
+	// disabled: the device the operator meant to protect is not protected.
+	RejectedEntries []string
 }
 
 // DefaultPolicy returns a production-safe policy with conservative thresholds.
 func DefaultPolicy() *Policy {
 	return &Policy{
-		AutoMinConfidence:   90,
-		AutoMinSeverity:     events.SeverityCritical,
-		PendMinConfidence:   50,
-		PendMinSeverity:     events.SeverityMedium,
-		DefaultTTL:          3600,
-		DefaultAction:       events.ActionDNSSinkhole,
-		AutoMinSignals:      1,
-		AutoRequireKnownBad: true,
+		AutoMinConfidence: 90,
+		AutoMinSeverity:   events.SeverityCritical,
+		PendMinConfidence: 50,
+		PendMinSeverity:   events.SeverityMedium,
+		DefaultTTL:        3600,
+		DefaultAction:     events.ActionDNSSinkhole,
+		AutoMinSignals:    1,
 	}
 }
 
@@ -79,11 +126,16 @@ var validActions = map[string]struct{}{
 	events.ActionSwitchACL:   {},
 }
 
-// LoadFromEnv reads policy parameters from environment variables,
-// falling back to defaults for any missing OR INVALID value. Every rejected
-// value is logged at warn level: silently running a weaker policy than the
-// operator believes they configured is the failure mode to avoid.
-func LoadFromEnv() *Policy {
+// LoadFromEnv reads policy parameters from environment variables.
+//
+// Thresholds fall back to their defaults on a missing or invalid value, with
+// a warning: every such fallback is at least as strict as what was asked
+// for. Protection settings are different. A rejected ALLOWLIST_* entry or
+// GATEWAY_* value means a device the operator believes is protected is not,
+// so it is an error that names the entry and stops the service — unless
+// ALLOWLIST_ON_INVALID=pending-only, in which case the policy loads with
+// auto-block disabled and RejectedEntries says why.
+func LoadFromEnv() (*Policy, error) {
 	p := DefaultPolicy()
 
 	if v := os.Getenv("POLICY_AUTO_CONFIDENCE"); v != "" {
@@ -130,43 +182,115 @@ func LoadFromEnv() *Policy {
 				"value", v, "default", p.AutoMinSignals)
 		}
 	}
-	// Opt-out exists for lab/tuning use only, and says so loudly.
+	// The opt-out let corroborated heuristics auto-block. Auto-block now
+	// always rests on a known-bad signal that names the blocked domain, so
+	// there is nothing left to opt out of; say so rather than ignore it.
 	if v := os.Getenv("POLICY_AUTO_REQUIRE_KNOWN_BAD"); v != "" {
-		switch strings.ToLower(v) {
-		case "0", "false", "no":
-			p.AutoRequireKnownBad = false
-			slog.Warn("POLICY_AUTO_REQUIRE_KNOWN_BAD disabled — corroborated heuristics " +
-				"(beaconing + volumetric) can now auto-block with no human in the loop")
-		case "1", "true", "yes":
-			p.AutoRequireKnownBad = true
+		slog.Warn("POLICY_AUTO_REQUIRE_KNOWN_BAD is no longer read: auto-block always requires "+
+			"a known-bad signal that attests the blocked domain", "value", v)
+	}
+	switch strings.ToLower(os.Getenv("POLICY_ALLOW_EMPTY_ALLOWLIST")) {
+	case "1", "true", "yes":
+		p.AllowEmptyAllowlist = true
+	}
+
+	var rejected []string
+	reject := func(key, entry string, err error) {
+		rejected = append(rejected, fmt.Sprintf("%s entry %q: %v", key, entry, err))
+	}
+	for _, m := range splitList(os.Getenv("ALLOWLIST_MACS")) {
+		if err := p.Allowlist.AddMAC(m); err != nil {
+			reject("ALLOWLIST_MACS", m, err)
+		}
+	}
+	for _, ip := range splitList(os.Getenv("ALLOWLIST_IPS")) {
+		if err := p.Allowlist.AddIP(ip); err != nil {
+			reject("ALLOWLIST_IPS", ip, err)
+		}
+	}
+	if v := os.Getenv("GATEWAY_IP"); v != "" {
+		if addr, err := ParseHostAddr(v); err != nil {
+			reject("GATEWAY_IP", v, err)
+		} else {
+			p.GatewayIP = addr
+			_ = p.Infrastructure.AddIP(addr.String())
+		}
+	}
+	if v := os.Getenv("GATEWAY_MAC"); v != "" {
+		if mac, err := ParseUnicastMAC(v); err != nil {
+			reject("GATEWAY_MAC", v, err)
+		} else {
+			p.GatewayMAC = mac
+			_ = p.Infrastructure.AddMAC(mac)
+		}
+	}
+	// The old name enabled the ARP driver and trusted whatever MAC the
+	// neighbour table reported for that address. Ignoring it would leave the
+	// gateway unprotected while the operator believes it is configured.
+	if v := os.Getenv("ARP_GATEWAY_IP"); v != "" {
+		reject("ARP_GATEWAY_IP", v, errors.New("renamed: set GATEWAY_IP and pin the gateway's MAC with GATEWAY_MAC"))
+	}
+
+	if len(rejected) > 0 {
+		switch mode := os.Getenv("ALLOWLIST_ON_INVALID"); mode {
+		case OnInvalidPendingOnly:
+			p.RejectedEntries = rejected
+			for _, r := range rejected {
+				slog.Error("protection entry rejected — this device is NOT protected; "+
+					"auto-block is disabled (ALLOWLIST_ON_INVALID=pending-only)", "entry", r)
+			}
+		case "", "fail":
+			return nil, fmt.Errorf("%s; the device would NOT be protected — fix the entry, or set "+
+				"ALLOWLIST_ON_INVALID=%s to start with auto-block disabled",
+				strings.Join(rejected, "; "), OnInvalidPendingOnly)
 		default:
-			slog.Warn("invalid POLICY_AUTO_REQUIRE_KNOWN_BAD, keeping default",
-				"value", v, "default", p.AutoRequireKnownBad)
+			return nil, fmt.Errorf("%s; and ALLOWLIST_ON_INVALID=%q is not %q",
+				strings.Join(rejected, "; "), mode, OnInvalidPendingOnly)
 		}
 	}
 
-	if v := os.Getenv("ALLOWLIST_MACS"); v != "" {
-		for _, m := range strings.Split(v, ",") {
-			if m = strings.TrimSpace(m); m != "" {
-				if err := p.Allowlist.AddMAC(m); err != nil {
-					slog.Error("ALLOWLIST_MACS entry rejected — this device is NOT protected",
-						"entry", m, "error", err)
-				}
-			}
-		}
-	}
-	if v := os.Getenv("ALLOWLIST_IPS"); v != "" {
-		for _, ip := range strings.Split(v, ",") {
-			if ip = strings.TrimSpace(ip); ip != "" {
-				if err := p.Allowlist.AddIP(ip); err != nil {
-					slog.Error("ALLOWLIST_IPS entry rejected — this device is NOT protected",
-						"entry", ip, "error", err)
-				}
-			}
-		}
-	}
+	return p, nil
+}
 
-	return p
+func splitList(v string) []string {
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// ParseHostAddr parses one device address strictly: no prefix, no zone,
+// and none of the spellings netip refuses (leading zeros, hex, octal).
+// IPv4-mapped IPv6 is unmapped.
+func ParseHostAddr(s string) (netip.Addr, error) {
+	addr, err := netip.ParseAddr(strings.TrimSpace(s))
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("not a single IP address: %w", err)
+	}
+	if addr.Zone() != "" {
+		return netip.Addr{}, fmt.Errorf("zoned address names a local interface, not a device")
+	}
+	return addr.Unmap(), nil
+}
+
+// ParseUnicastMAC normalizes a MAC like NormalizeMAC and refuses group
+// (broadcast/multicast) and all-zero addresses, which cannot be one device.
+func ParseUnicastMAC(s string) (string, error) {
+	mac, err := NormalizeMAC(s)
+	if err != nil {
+		return "", err
+	}
+	hw, _ := net.ParseMAC(mac)
+	if hw[0]&1 == 1 {
+		return "", fmt.Errorf("%s is a group (broadcast/multicast) address, not a device", mac)
+	}
+	if mac == "00:00:00:00:00:00" {
+		return "", fmt.Errorf("all-zero MAC is not a device")
+	}
+	return mac, nil
 }
 
 func parseConfidence(key, v string) (int, bool) {
@@ -187,52 +311,59 @@ func parseSeverity(key, v string) (string, bool) {
 	return s, true
 }
 
+// AutoBlockHold returns why auto-block is disabled for every event, with the
+// matching Withheld label, or two empty strings when it is enabled.
+func (p *Policy) AutoBlockHold() (reason, label string) {
+	if n := len(p.RejectedEntries); n > 0 {
+		reason = fmt.Sprintf("auto-block disabled: %d protection entr%s rejected at start-up, ALLOWLIST_ON_INVALID=%s",
+			n, plural(n, "y was", "ies were"), OnInvalidPendingOnly)
+		return reason, WithheldInvalidProtection
+	}
+	if p.Allowlist.Len() == 0 && !p.AllowEmptyAllowlist {
+		return "auto-block disabled: allowlist is empty", WithheldEmptyAllowlist
+	}
+	return "", ""
+}
+
+// AutoBlockEnabled reports whether any event can be enforced without a human.
+func (p *Policy) AutoBlockEnabled() bool {
+	reason, _ := p.AutoBlockHold()
+	return reason == ""
+}
+
 // Evaluate decides what enforcement action (if any) should be taken
-// for a detection event. Allowlisted devices always return "ignore".
+// for a detection event. Protected devices always return "ignore".
 func (p *Policy) Evaluate(ev events.DetectionEvent) Decision {
-	if p.Allowlist.Contains(ev.ClientMAC, ev.ClientIP) {
-		return Decision{
-			Action: "ignore",
-			Reason: fmt.Sprintf("allowlisted device %s / %s", ev.ClientMAC, ev.ClientIP),
-		}
+	if who := p.protectedClient(ev); who != "" {
+		return Decision{Action: "ignore", Reason: who}
 	}
 
 	evRank := severityRank(ev.Severity)
 
-	if ev.Confidence >= p.AutoMinConfidence && evRank >= severityRank(p.AutoMinSeverity) {
-		// Two independent gates stand between "confident" and "cut this
-		// device off without asking": enough distinct corroborating signal
-		// classes (step 117), and at least one of them being externally
-		// attested known-bad rather than a local heuristic (step 124).
-		if reason, ok := p.autoBlockBlockedBy(ev); !ok {
-			return Decision{
-				Action:     "pending",
-				ActionType: p.DefaultAction,
-				TTLSeconds: p.DefaultTTL,
-				Reason: fmt.Sprintf("pending (%s): confidence=%d severity=%s signals=%d",
-					reason, ev.Confidence, ev.Severity, signalCount(ev)),
-			}
+	if ev.Confidence >= p.AutoMinConfidence && evRank >= autoSeverityBar(p.AutoMinSeverity) {
+		if refusals := p.autoBlockRefusals(ev); len(refusals) > 0 {
+			return p.pending(ev, "pending ("+strings.Join(refusals, "; ")+")", "")
+		}
+		attested, _ := ev.AttestedSignal(p.AutoMinConfidence)
+		if hold, label := p.AutoBlockHold(); hold != "" {
+			return p.pending(ev, "pending ("+hold+"; every other auto-block condition held)", label)
 		}
 		return Decision{
 			Action:     "auto_block",
-			ActionType: p.DefaultAction,
+			ActionType: events.ActionDNSSinkhole,
 			TTLSeconds: p.DefaultTTL,
-			Reason: fmt.Sprintf("auto: confidence=%d severity=%s signals=%d known_bad=%v target=%s",
-				ev.Confidence, ev.Severity, signalCount(ev), ev.KnownBadSignals(), ev.Target.Value),
+			Reason: fmt.Sprintf("auto: confidence=%d severity=%s signals=%d attested_by=%s:%s@%d target=%s",
+				ev.Confidence, ev.Severity, signalCount(ev), attested.Class, attested.Source,
+				attested.Confidence, ev.Target.Value),
 		}
 	}
 
 	if ev.Confidence >= p.PendMinConfidence && evRank >= severityRank(p.PendMinSeverity) {
-		reason := fmt.Sprintf("pending: confidence=%d severity=%s", ev.Confidence, ev.Severity)
+		reason := "pending"
 		if problem := targetProblem(ev); problem != "" {
 			reason += " (" + problem + ")"
 		}
-		return Decision{
-			Action:     "pending",
-			ActionType: p.DefaultAction,
-			TTLSeconds: p.DefaultTTL,
-			Reason:     reason,
-		}
+		return p.pending(ev, reason, "")
 	}
 
 	return Decision{
@@ -241,31 +372,48 @@ func (p *Policy) Evaluate(ev events.DetectionEvent) Decision {
 	}
 }
 
-// autoBlockBlockedBy reports whether the event may auto-block. On refusal it
-// returns the human-readable reason that goes into the pending action's
-// policy_rule, so an operator reviewing the queue sees WHY it needed them.
-func (p *Policy) autoBlockBlockedBy(ev events.DetectionEvent) (string, bool) {
-	if p.AutoRequireKnownBad && !ev.HasKnownBadSignal() {
-		return "no known-bad signal: heuristics alone never auto-block", false
+func (p *Policy) pending(ev events.DetectionEvent, reason, withheld string) Decision {
+	return Decision{
+		Action:     "pending",
+		ActionType: p.DefaultAction,
+		TTLSeconds: p.DefaultTTL,
+		Reason: fmt.Sprintf("%s: confidence=%d severity=%s signals=%d",
+			reason, ev.Confidence, ev.Severity, signalCount(ev)),
+		Withheld: withheld,
+	}
+}
+
+func (p *Policy) protectedClient(ev events.DetectionEvent) string {
+	if p.Allowlist.Contains(ev.ClientMAC, ev.ClientIP) {
+		return fmt.Sprintf("allowlisted device %s / %s", ev.ClientMAC, ev.ClientIP)
+	}
+	if p.Infrastructure.Contains(ev.ClientMAC, ev.ClientIP) {
+		return fmt.Sprintf("protected infrastructure %s / %s", ev.ClientMAC, ev.ClientIP)
+	}
+	return ""
+}
+
+// autoBlockRefusals lists every per-event auto-block condition the event
+// fails, phrased for the operator who will read it as the pending action's
+// policy_rule. Empty means the event itself is fit for auto-block.
+func (p *Policy) autoBlockRefusals(ev events.DetectionEvent) []string {
+	var out []string
+	if problem := targetProblem(ev); problem != "" {
+		out = append(out, problem)
+	} else if _, ok := ev.AttestedSignal(p.AutoMinConfidence); !ok {
+		out = append(out, attestationProblem(ev, p.AutoMinConfidence))
 	}
 	if !p.corroborated(ev) {
-		return fmt.Sprintf("needs %d signals, has %d", p.AutoMinSignals, signalCount(ev)), false
+		out = append(out, fmt.Sprintf("needs %d signals, has %d", p.AutoMinSignals, signalCount(ev)))
 	}
-	if problem := targetProblem(ev); problem != "" {
-		return problem, false
-	}
-	return "", true
+	return out
 }
 
 // targetProblem explains why the event cannot be enforced automatically by
 // name, or returns "" when its target is a domain.
 //
 // The target is the ONLY thing enforcement may act on. Domain and Summary
-// are what was observed and how to describe it; in 1.x the sinkhole was fed
-// Domain, which for an IP-IoC hit was "cdn.x (→203.0.113.7)" and for an IDS
-// hit was the rule message, so those auto-blocks always failed in the
-// driver. Without a domain target there is nothing the automatic path can
-// block, and the operator reviewing the queue should read why.
+// are what was observed and how to describe it.
 func targetProblem(ev events.DetectionEvent) string {
 	switch {
 	case ev.Target == nil:
@@ -278,23 +426,61 @@ func targetProblem(ev events.DetectionEvent) string {
 	}
 }
 
+// attestationProblem explains why no known-bad signal vouches for the
+// domain target strongly enough. The distinction matters to the operator:
+// "nothing external says this is bad" and "a feed says so, but weakly" call
+// for different judgements.
+func attestationProblem(ev events.DetectionEvent, minConfidence int) string {
+	if !ev.HasKnownBadSignal() {
+		return "no known-bad signal: heuristics alone never auto-block"
+	}
+	if s, ok := ev.AttestedSignal(0); ok {
+		return fmt.Sprintf("the known-bad signal for %s is too weak on its own: %s confidence %d < %d",
+			ev.Target.Value, s.Class, s.Confidence, minConfidence)
+	}
+	var evidence []string
+	for _, s := range ev.Signals {
+		if !events.IsKnownBadSignal(s.Class) {
+			continue
+		}
+		if len(evidence) == 3 {
+			evidence = append(evidence, "…")
+			break
+		}
+		evidence = append(evidence, describeSignal(s))
+	}
+	return fmt.Sprintf("no known-bad signal names the target %s (known-bad evidence: %s)",
+		ev.Target.Value, strings.Join(evidence, ", "))
+}
+
+// describeSignal renders a signal for a policy_rule. The indicator comes
+// from the event, so it is quoted and truncated rather than trusted as text.
+func describeSignal(s events.Signal) string {
+	ind := s.Indicator
+	if len(ind) > 64 {
+		ind = ind[:64] + "…"
+	}
+	if ind == "" {
+		return fmt.Sprintf("%s without an indicator at %d", s.Class, s.Confidence)
+	}
+	return fmt.Sprintf("%s %s %q at %d", s.Class, s.IndicatorType, ind, s.Confidence)
+}
+
 // corroborated reports whether the event satisfies the AutoMinSignals gate.
-// A single-signal known-bad detection (an IoC feed match) counts as
-// sufficient on its own regardless of AutoMinSignals — that is the classic
-// "block this C2 domain now" case. Composite detections must carry at least
-// AutoMinSignals distinct signal classes.
+// A single-class detection (an IoC feed match) counts as sufficient on its
+// own — the classic "block this C2 domain now" case, and safe because the
+// attestation check has already required that signal to name the target and
+// clear the bar alone. Composites must carry at least AutoMinSignals
+// distinct signal classes.
 //
-// The single-signal shortcut is only safe because autoBlockBlockedBy has
-// already established that a known-bad class is present: an event without
-// one cannot reach here with AutoRequireKnownBad on.
+// The count is taken from Signals, not from the event's self-declared
+// signal_class, so a mislabelled composite cannot skip the gate.
 func (p *Policy) corroborated(ev events.DetectionEvent) bool {
 	if p.AutoMinSignals <= 1 {
 		return true
 	}
-	if ev.SignalClass != events.SignalComposite {
-		return true // single-signal known-bad IoC; not a composite
-	}
-	return len(ev.ContributingClasses()) >= p.AutoMinSignals
+	classes := len(ev.ContributingClasses())
+	return classes <= 1 || classes >= p.AutoMinSignals
 }
 
 // signalCount is the number of distinct signal classes behind the event,
@@ -304,6 +490,17 @@ func signalCount(ev events.DetectionEvent) int {
 		return n
 	}
 	return 1
+}
+
+// autoSeverityBar is the rank an event needs for auto-block. A bar that is
+// not a known severity can only come from a Policy built in code (LoadFromEnv
+// validates it); it is treated as unreachable rather than as rank 0, which
+// would let every severity through.
+func autoSeverityBar(s string) int {
+	if r := severityRank(s); r > 0 {
+		return r
+	}
+	return severityRank(events.SeverityCritical) + 1
 }
 
 func severityRank(s string) int {
@@ -319,4 +516,11 @@ func severityRank(s string) int {
 	default:
 		return 0
 	}
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }

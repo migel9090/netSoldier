@@ -15,6 +15,7 @@ import (
 	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/drivers"
 	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/policy"
 	"github.com/migel9090/netSoldier/libs/events"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type recordingDriver struct {
@@ -36,6 +37,8 @@ func (d *recordingDriver) Name() string { return "recording" }
 
 var _ drivers.Driver = (*recordingDriver)(nil)
 
+// newAuthTestEnv serves every route behind the middleware: apiKey is the
+// operator token, apiKey+"-ingest" the ingest token.
 func newAuthTestEnv(t *testing.T, apiKey string) (*httptest.Server, *actions.Store) {
 	t.Helper()
 	pol := policy.DefaultPolicy()
@@ -44,17 +47,18 @@ func newAuthTestEnv(t *testing.T, apiKey string) (*httptest.Server, *actions.Sto
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("GET /policy", handleGetPolicy(pol, true))
+	mux.Handle("GET /metrics", promhttp.Handler())
+	mux.HandleFunc("GET /policy", handleGetPolicy(pol))
 	mux.HandleFunc("GET /allowlist", handleGetAllowlist(pol))
 	mux.HandleFunc("GET /actions/pending", handleListByState(store, events.StatePending))
 	mux.HandleFunc("GET /actions/active", handleListByState(store, events.StateActive))
 	mux.HandleFunc("GET /actions/{id}", handleGetAction(store))
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true, newEvaluationLedger(time.Hour)))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, newEvaluationLedger(time.Hour)))
 	mux.HandleFunc("POST /actions/{id}/approve", handleApprove(store, resolve))
 	mux.HandleFunc("POST /actions/{id}/reject", handleReject(store))
 	mux.HandleFunc("POST /actions/{id}/revert", handleRevert(store, resolve))
 
-	srv := httptest.NewServer(authMiddleware(apiKey, nil, mux))
+	srv := httptest.NewServer(authMiddleware(credentials{operator: apiKey, ingest: apiKey + "-ingest"}, nil, mux))
 	t.Cleanup(srv.Close)
 	return srv, store
 }
@@ -126,7 +130,7 @@ func TestSecAllowlistNoDriverApplied(t *testing.T) {
 	resolve := func(string) (drivers.Driver, error) { return drv, nil }
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true, newEvaluationLedger(time.Hour)))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, newEvaluationLedger(time.Hour)))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -165,7 +169,7 @@ func TestSecAllowlistConcurrentEvaluations(t *testing.T) {
 	resolve := func(string) (drivers.Driver, error) { return drv, nil }
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true, newEvaluationLedger(time.Hour)))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, newEvaluationLedger(time.Hour)))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -262,20 +266,39 @@ func TestSecAuthRejectsInvalidSchemes(t *testing.T) {
 	}
 }
 
-func TestSecAuthGETPassthrough(t *testing.T) {
+// TestSecAuthReadsNeedOperatorToken: /allowlist and /actions disclose which
+// devices cannot be blocked and what is enforced, and were open to anything
+// that could reach the service. Only the probes stay open.
+func TestSecAuthReadsNeedOperatorToken(t *testing.T) {
 	srv, _ := newAuthTestEnv(t, "secret-key")
 
-	paths := []string{"/healthz", "/policy", "/allowlist", "/actions/pending", "/actions/active"}
-
-	for _, path := range paths {
+	get := func(path, token string) int {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	for _, path := range []string{"/healthz", "/metrics"} {
+		if got := get(path, ""); got != 200 {
+			t.Errorf("GET %s without auth: got %d, want 200", path, got)
+		}
+	}
+	for _, path := range []string{"/policy", "/allowlist", "/actions/pending", "/actions/active", "/actions/ACT-x"} {
 		t.Run(path, func(t *testing.T) {
-			resp, err := http.Get(srv.URL + path)
-			if err != nil {
-				t.Fatal(err)
+			if got := get(path, ""); got != http.StatusUnauthorized {
+				t.Errorf("GET %s without auth: got %d, want 401", path, got)
 			}
-			resp.Body.Close()
-			if resp.StatusCode != 200 {
-				t.Errorf("GET %s without auth: got %d, want 200", path, resp.StatusCode)
+			if got := get(path, "secret-key-ingest"); got != http.StatusUnauthorized {
+				t.Errorf("GET %s with the ingest token: got %d, want 401", path, got)
+			}
+			if got := get(path, "secret-key"); got == http.StatusUnauthorized {
+				t.Errorf("GET %s with the operator token was refused", path)
 			}
 		})
 	}

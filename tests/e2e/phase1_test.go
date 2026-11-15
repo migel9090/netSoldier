@@ -78,10 +78,11 @@ func TestPhase1E2E(t *testing.T) {
 		// production posture. Every earlier e2e run left both unset, so the
 		// authenticated path was never exercised and auto-block was never
 		// tested against the empty-allowlist guard.
-		"KILLSWITCH_API_KEY": e2eAPIKey,
-		"WEBHOOK_SECRET":     e2eWebhookSecret,
-		"ALLOWLIST_IPS":      "192.168.1.1",
-		"ALLOWLIST_MACS":     "aa:bb:cc:00:00:01",
+		"KILLSWITCH_API_KEY":      e2eAPIKey,
+		"KILLSWITCH_INGEST_TOKEN": e2eIngestToken,
+		"WEBHOOK_SECRET":          e2eWebhookSecret,
+		"ALLOWLIST_IPS":           "192.168.1.1",
+		"ALLOWLIST_MACS":          "aa:bb:cc:00:00:01",
 	})
 	t.Cleanup(stopKs)
 

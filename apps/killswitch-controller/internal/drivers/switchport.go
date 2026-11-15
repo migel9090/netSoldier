@@ -72,8 +72,13 @@ func (d *SwitchPortDriver) Name() string { return "switch_acl" }
 
 // Apply calls the switch webhook to disable the port or move the
 // device to the quarantine VLAN.
+//
+// The request carries the identifiers in the form the guard checked them,
+// not as the action spelled them: an adapter that parsed a raw string
+// differently from the guard could act on a device the guard never saw.
 func (d *SwitchPortDriver) Apply(ctx context.Context, action *events.EnforcementAction) error {
-	if err := d.guard.Check(action.TargetMAC, action.TargetIP); err != nil {
+	dev, err := d.guard.Vet(action.TargetMAC, action.TargetIP)
+	if err != nil {
 		return err
 	}
 
@@ -85,8 +90,8 @@ func (d *SwitchPortDriver) Apply(ctx context.Context, action *events.Enforcement
 	req := SwitchRequest{
 		ActionID:       action.ID,
 		Operation:      op,
-		TargetMAC:      action.TargetMAC,
-		TargetIP:       action.TargetIP,
+		TargetMAC:      dev.MAC,
+		TargetIP:       dev.IP,
 		QuarantineVLAN: d.quarantineVLAN,
 	}
 
@@ -103,12 +108,21 @@ func (d *SwitchPortDriver) Apply(ctx context.Context, action *events.Enforcement
 }
 
 // Revert calls the switch webhook to restore the port or original VLAN.
+// Restoring is never refused — it can only give a device its access back —
+// but it names the device the way Apply did, so the adapter finds the port
+// it changed.
 func (d *SwitchPortDriver) Revert(ctx context.Context, action *events.EnforcementAction) error {
 	req := SwitchRequest{
 		ActionID:  action.ID,
 		Operation: "restore",
 		TargetMAC: action.TargetMAC,
 		TargetIP:  action.TargetIP,
+	}
+	if key, err := parseDeviceMAC(action.TargetMAC); err == nil {
+		req.TargetMAC = formatMACKey(key)
+	}
+	if addr, err := parseDeviceIP(action.TargetIP); err == nil {
+		req.TargetIP = addr.String()
 	}
 
 	if err := d.call(ctx, req); err != nil {
