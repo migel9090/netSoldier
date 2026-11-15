@@ -201,7 +201,7 @@ data:
                 <networks><ip>__POD_CIDR__</ip></networks>
                 <grants>
                     <query>GRANT SELECT ON netsoldier_rita.threat_mixtape</query>
-                    <query>GRANT INSERT ON netsoldier.ml_beacons</query>
+                    <query>GRANT SELECT, INSERT ON netsoldier.ml_beacons</query>
                 </grants>
             </ml_beacon>
 
@@ -213,8 +213,8 @@ data:
                 <profile>default</profile>
                 <networks><ip>__POD_CIDR__</ip></networks>
                 <grants>
-                    <query>GRANT SELECT ON netsoldier.connections</query>
-                    <query>GRANT INSERT ON netsoldier.ml_anomalies</query>
+                    <query>GRANT SELECT ON netsoldier.zeek_conn</query>
+                    <query>GRANT SELECT, INSERT ON netsoldier.ml_anomalies</query>
                 </grants>
             </ml_flow>
 
