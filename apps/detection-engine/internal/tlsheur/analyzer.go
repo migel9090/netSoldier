@@ -35,10 +35,11 @@ func init() {
 	prometheus.MustRegister(tlsFindings)
 }
 
-// Resolver answers "which domain did this IP resolve from" (correlator
-// DNS cache).
+// Resolver answers "which name did this client resolve to this address"
+// (dnscache.Cache). Per client: a CDN address carries many names, and the
+// one another device looked up says nothing about this connection.
 type Resolver interface {
-	Get(ip string) string
+	Get(client, ip string) string
 }
 
 // Analyzer inspects unified TLS client events and emits alerts for
@@ -105,7 +106,7 @@ func (a *Analyzer) Handle(ev ingest.SensorEvent) {
 
 	resolved := ""
 	if a.resolver != nil {
-		resolved = a.resolver.Get(ev.DstIP)
+		resolved = a.resolver.Get(ev.SrcIP, ev.DstIP)
 	}
 
 	// 2) SNI does not belong to the domain the client actually resolved

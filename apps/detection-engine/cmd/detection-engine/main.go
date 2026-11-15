@@ -4,42 +4,46 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/adguard"
-	"github.com/migel9090/netSoldier/apps/detection-engine/internal/capture"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/clickhouse"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/composite"
-	"github.com/migel9090/netSoldier/apps/detection-engine/internal/correlator"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
-	"github.com/migel9090/netSoldier/apps/detection-engine/internal/eventmap"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/devices"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/dnscache"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/feedback"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/ingest"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/iocmatch"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/pipeline"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/store"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/tlsheur"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/tracing"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/webhook"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
-// invalidEvents counts detections dropped because they would not validate.
-// Non-zero means a producer is building events the killswitch refuses.
-var invalidEvents = prometheus.NewCounter(prometheus.CounterOpts{
-	Namespace: "detection_engine",
-	Name:      "invalid_events_total",
-	Help:      "Detections not forwarded because they break the event contract.",
-})
-
-func init() {
-	prometheus.MustRegister(invalidEvents)
-}
+const (
+	// defaultDBPath is where the local store lives unless DB_PATH says
+	// otherwise; the deployment mounts a volume at its directory.
+	defaultDBPath = "/var/lib/detection-engine/detection-engine.db"
+	// shutdownFlush bounds how long a clean shutdown keeps delivering the
+	// outbox. What is not delivered by then stays on disk.
+	shutdownFlush = 5 * time.Second
+	// producerStop bounds the wait for pollers to finish their current poll.
+	producerStop = 5 * time.Second
+)
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
@@ -47,36 +51,77 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	otelEndpoint := envOr(os.Getenv, "OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector.observability.svc:4317")
+	tp, err := tracing.Init(ctx, "detection-engine", otelEndpoint)
+	if err != nil {
+		slog.Warn("tracing disabled", "error", err)
+	} else {
+		defer func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := tp.Shutdown(sctx); err != nil {
+				slog.Error("tracer shutdown error", "error", err)
+			}
+		}()
+	}
+
+	if err := run(ctx, os.Getenv, nil); err != nil {
+		slog.Error("detection-engine failed", "error", err)
+		stop()
+		os.Exit(1)
+	}
+}
+
+// run builds the service from its environment and serves until ctx ends.
+// Shutdown stops accepting requests, lets the pollers finish, then flushes
+// the outbox for at most shutdownFlush and leaves the rest on disk for the
+// next start. onListen, when set, receives the bound address.
+func run(ctx context.Context, getenv func(string) string, onListen func(addr string)) error {
+	env := func(key, fallback string) string { return envOr(getenv, key, fallback) }
+
 	// Detection ids carry a per-process prefix so they stay unique across
 	// restarts. Overridable for deployments that want a stable, readable
 	// instance name; it must be alphanumeric.
-	if p := os.Getenv("DETECTION_ID_PREFIX"); p != "" {
+	if p := getenv("DETECTION_ID_PREFIX"); p != "" {
 		if err := detection.SetIDPrefix(p); err != nil {
 			slog.Warn("invalid DETECTION_ID_PREFIX, using a generated prefix", "error", err)
 		}
 	}
 	slog.Info("detection id prefix", "prefix", detection.IDPrefix())
 
-	otelEndpoint := envOr("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector.observability.svc:4317")
-	tp, err := tracing.Init(ctx, "detection-engine", otelEndpoint)
+	st, err := openStore(getenv)
 	if err != nil {
-		slog.Warn("tracing disabled", "error", err)
-	} else {
-		defer func() {
-			if err := tp.Shutdown(context.Background()); err != nil {
-				slog.Error("tracer shutdown error", "error", err)
+		return err
+	}
+	defer func() {
+		if err := st.Close(); err != nil {
+			slog.Error("closing the local store failed", "error", err)
+		}
+	}()
+	alerts := st.Alerts(parseDuration(env("ALERT_RETENTION", "720h"), store.DefaultAlertRetention), 0)
+
+	// One ClickHouse client for sensor reads and feedback writes.
+	var ch *clickhouse.Client
+	if cfg, ok := clickhouse.ConfigFromEnv(getenv); ok {
+		if ch, err = clickhouse.New(cfg); err != nil {
+			slog.Error("ClickHouse disabled: sensor ingest and feedback persistence are off", "error", err)
+		} else {
+			if !ch.Authenticated() {
+				slog.Warn("CLICKHOUSE_USER is not set: ClickHouse will treat this service as its " +
+					"`default` user, which the deployment grants nothing to")
 			}
-		}()
+			slog.Info("clickhouse configured", "endpoint", ch.String())
+		}
 	}
 
 	agClient := adguard.NewClient(
-		envOr("ADGUARD_URL", "http://adguard-web.dns.svc:3000"),
-		envOr("ADGUARD_USER", "admin"),
-		envOr("ADGUARD_PASSWORD", "changeme"),
+		env("ADGUARD_URL", "http://adguard-web.dns.svc:3000"),
+		env("ADGUARD_USER", "admin"),
+		env("ADGUARD_PASSWORD", "changeme"),
 	)
 
 	matcher := iocmatch.New()
-	tlPath := envOr("THREATLIST_PATH", "/etc/detection-engine/domains.txt")
+	tlPath := env("THREATLIST_PATH", "/etc/detection-engine/domains.txt")
 	if staticIoCs, err := iocmatch.LoadDomainsFromFile(tlPath); err != nil {
 		slog.Warn("static threatlist not loaded", "path", tlPath, "error", err)
 	} else {
@@ -89,158 +134,136 @@ func main() {
 			"domains", added, "rejected", rejected)
 	}
 
-	if tiURL := os.Getenv("THREAT_INTEL_URL"); tiURL != "" {
-		syncInterval := parseDuration(envOr("IOC_SYNC_INTERVAL", "5m"), 5*time.Minute)
-		go iocmatch.SyncLoop(ctx, matcher, tiURL, syncInterval)
+	// Producers: everything that turns observations into detections. They
+	// stop on ctx; shutdown waits for them before the final outbox flush.
+	var producers sync.WaitGroup
+	goProduce := func(f func()) {
+		producers.Add(1)
+		go func() { defer producers.Done(); f() }()
 	}
 
-	dnsCache := correlator.NewDNSCache()
+	if tiURL := getenv("THREAT_INTEL_URL"); tiURL != "" {
+		syncInterval := parseDuration(env("IOC_SYNC_INTERVAL", "5m"), 5*time.Minute)
+		goProduce(func() { iocmatch.SyncLoop(ctx, matcher, tiURL, syncInterval) })
+	}
 
-	pollInterval := parseDuration(envOr("POLL_INTERVAL", "30s"), 30*time.Second)
+	pollInterval := parseDuration(env("POLL_INTERVAL", "30s"), 30*time.Second)
 	engine := detection.New(agClient, matcher, pollInterval)
 
-	engine.OnDNSAnswer = func(ip, domain string, ttl int) {
-		dnsCache.Set(ip, domain, ttl)
+	// Which name each client resolved to which address, for the TLS
+	// heuristics.
+	resolved := dnscache.New(0)
+	engine.OnDNSAnswer = resolved.Set
+
+	// Every detection is enriched with the device holding the client
+	// address: the killswitch allowlist and composite correlation both key
+	// on the MAC.
+	devURL := env("DEVICE_INVENTORY_URL", "http://device-inventory:8081")
+	devKey := getenv("DEVICE_API_KEY")
+	if devKey == "" {
+		slog.Warn("DEVICE_API_KEY is not set: an inventory that requires its key will refuse every " +
+			"lookup, and detections will carry no client MAC")
 	}
+	resolver := devices.New(devURL, devKey, parseDuration(env("DEVICE_LOOKUP_TTL", "60s"), devices.DefaultTTL))
+	engine.ResolveClient = resolver.Resolve
+	slog.Info("client identity from device-inventory", "url", devURL, "authenticated", devKey != "")
 
 	// False-positive feedback loop (step 118): suppressions gate what
-	// reaches the killswitch. Built once here so the alert-path closures
-	// capture a stable store; the ClickHouse sink + reload happen below
-	// when CLICKHOUSE_URL is set.
-	chURL := os.Getenv("CLICKHOUSE_URL")
-	chDB := envOr("CLICKHOUSE_DATABASE", "netsoldier")
+	// reaches the killswitch.
 	var feedbackSink feedback.Sink
-	if chURL != "" {
-		feedbackSink = feedback.NewCHSink(chURL, chDB)
+	if ch != nil {
+		feedbackSink = feedback.NewCHSink(ch)
 	}
 	feedbackStore := feedback.NewWithOptions(feedbackSink, feedback.Options{
-		TTL:             parseDuration(envOr("FEEDBACK_SUPPRESSION_TTL", "720h"), feedback.DefaultSuppressionTTL),
-		MaxSuppressions: 0, // default cap
+		TTL:         parseDuration(env("FEEDBACK_SUPPRESSION_TTL", "720h"), feedback.DefaultSuppressionTTL),
+		AlertLookup: alerts.ByID,
 	})
-
-	// forward delivers a detection to the killswitch (or any generic
-	// webhook receiver) as the shared events.DetectionEvent contract.
-	var forward func(detection.Alert)
-	if webhookURL := os.Getenv("WEBHOOK_URL"); webhookURL != "" {
-		sender := webhook.NewSender(webhookURL,
-			envOr("WEBHOOK_SECRET", ""), envOr("WEBHOOK_TOKEN", ""), 3)
-		go sender.Run(ctx)
-		forward = func(a detection.Alert) {
-			ev := eventmap.AlertToEvent(a)
-			// The receiver would refuse it anyway; refusing here keeps the
-			// reason in this service's log and metrics, next to the producer
-			// that built it, instead of a 4xx line on the other side.
-			if err := ev.Validate(); err != nil {
-				invalidEvents.Inc()
-				slog.Error("detection not forwarded: it breaks the event contract",
-					"id", a.ID, "signal_class", a.SignalClass, "error", err)
-				return
-			}
-			sender.Send(ev)
+	if ch != nil {
+		// Before any producer starts, so the first detections after a
+		// restart are already judged against the analysts' verdicts.
+		lctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		if n, err := feedback.LoadInto(lctx, ch, feedbackStore); err != nil {
+			slog.Warn("feedback load failed: suppressions start empty", "error", err)
+		} else {
+			slog.Info("feedback suppressions loaded", "verdicts", n, "active", len(feedbackStore.Active()))
 		}
+		cancel()
+	}
+
+	// Delivery to the killswitch (or any receiver of the shared contract)
+	// through the durable outbox.
+	var forward func(detection.Alert)
+	var dispatcher *webhook.Dispatcher
+	var outbox *store.Outbox
+	if webhookURL := getenv("WEBHOOK_URL"); webhookURL != "" {
+		window := parseDuration(env("WEBHOOK_AGGREGATION_WINDOW", "10m"), store.DefaultAggregationWindow)
+		if outbox, err = st.Outbox(window, 0); err != nil {
+			return fmt.Errorf("open outbox: %w", err)
+		}
+		sender := webhook.NewSender(webhookURL, getenv("WEBHOOK_SECRET"), getenv("WEBHOOK_TOKEN"))
+		dispatcher = webhook.NewDispatcher(outbox, sender)
+		fw := &pipeline.Forwarder{Outbox: outbox, Notify: dispatcher.Notify}
+		forward = fw.Forward
 		slog.Info("webhook enabled", "url", webhookURL,
-			"signed", os.Getenv("WEBHOOK_SECRET") != "",
-			"authenticated", os.Getenv("WEBHOOK_TOKEN") != "")
+			"signed", getenv("WEBHOOK_SECRET") != "",
+			"authenticated", getenv("WEBHOOK_TOKEN") != "",
+			"aggregation_window", window, "backlog", outbox.Pending())
+	}
+	dispatcherDone := make(chan struct{})
+	if dispatcher != nil {
+		go func() { defer close(dispatcherDone); dispatcher.Run(ctx) }()
+	} else {
+		close(dispatcherDone)
 	}
 
 	// Composite-confidence correlator (step 116): combines corroborating
-	// signals per client. When several distinct signal classes line up it
-	// emits one higher-confidence composite; otherwise the single signal
-	// flows through unchanged.
-	compWindow := parseDuration(envOr("COMPOSITE_WINDOW", "15m"), 15*time.Minute)
-	correlate := composite.New(compWindow, func(comp detection.Alert) {
-		if feedbackStore.Suppressed(comp) {
-			feedbackStore.CountSuppressed()
-			return
-		}
-		if forward != nil {
-			forward(comp)
-		}
-	})
-
-	engine.OnAlert = func(a detection.Alert) {
-		if feedbackStore.Suppressed(a) {
-			feedbackStore.CountSuppressed()
-			return
-		}
-		// A formed composite supersedes the single signal for enforcement;
-		// otherwise forward the individual detection as before.
-		if comp := correlate.Observe(a); comp == nil && forward != nil {
-			forward(a)
-		}
+	// signals per client. The pipeline acts on what it returns.
+	compWindow := parseDuration(env("COMPOSITE_WINDOW", "15m"), 15*time.Minute)
+	pipe := &pipeline.Pipeline{
+		Alerts:    alerts,
+		Suppress:  feedbackStore,
+		Correlate: composite.New(compWindow, nil),
+		Forward:   forward,
 	}
+	engine.OnAlert = pipe.Handle
 
-	go engine.Run(ctx)
+	goProduce(func() { engine.Run(ctx) })
 
-	// Unified sensor ingest (step 109): consume Suricata EVE alerts and
-	// Zeek Intel hits landed in ClickHouse and route them through the
-	// same alert path as DNS detections.
-	if chURL != "" {
-		chc := ingest.NewCHClient(chURL, chDB)
-		sensorInterval := parseDuration(envOr("SENSOR_POLL_INTERVAL", "30s"), 30*time.Second)
+	// Unified sensor ingest (step 109): Suricata EVE alerts, Zeek Intel and
+	// SSL, RITA beacons and Isolation-Forest anomalies landed in ClickHouse,
+	// routed through the same alert path as DNS detections.
+	if ch != nil {
+		sensorInterval := parseDuration(env("SENSOR_POLL_INTERVAL", "30s"), 30*time.Second)
 		emit := func(ev ingest.SensorEvent) {
 			engine.Ingest(ingest.ToAlert(ev, matcher))
 		}
-		go ingest.NewPoller(chc, ingest.NewSuricataAlerts(), sensorInterval, emit).Run(ctx)
-		go ingest.NewPoller(chc, ingest.NewZeekIntel(), sensorInterval, emit).Run(ctx)
-
-		// ML signals for composite-confidence (step 116): RITA beacons and
-		// Isolation-Forest flow anomalies. Until now nothing consumed these
-		// tables; they are the "beacon" and "volumetric" corroborators.
-		go ingest.NewPoller(chc, ingest.NewMLBeacons(), sensorInterval, emit).Run(ctx)
-		go ingest.NewPoller(chc, ingest.NewMLAnomalies(), sensorInterval, emit).Run(ctx)
-
-		// TLS client heuristics (step 110): TLS-client-fingerprint/JA3 IoC
-		// matches plus fingerprint/SNI/DNS correlation, decryption-free.
-		localNets := strings.Split(envOr("LOCAL_NETWORKS",
+		localNets := strings.Split(env("LOCAL_NETWORKS",
 			strings.Join(tlsheur.DefaultLocalCIDRs, ",")), ",")
-		tlsAnalyzer := tlsheur.New(matcher, dnsCache, localNets, engine.Ingest)
-		go ingest.NewPoller(chc, ingest.NewZeekSSL(), sensorInterval, tlsAnalyzer.Handle).Run(ctx)
-
-		// FP feedback persistence (step 118): rebuild suppressions from
-		// ClickHouse on startup (the sink was wired above).
-		if n, err := feedback.LoadInto(ctx, chc, feedbackStore); err != nil {
-			slog.Warn("feedback load failed", "error", err)
-		} else if n > 0 {
-			slog.Info("feedback suppressions loaded", "count", n)
+		tlsAnalyzer := tlsheur.New(matcher, resolved, localNets, engine.Ingest)
+		pollers := []*ingest.Poller{
+			ingest.NewPoller(ch, ingest.NewSuricataAlerts(), sensorInterval, emit),
+			ingest.NewPoller(ch, ingest.NewZeekIntel(), sensorInterval, emit),
+			ingest.NewPoller(ch, ingest.NewMLBeacons(), sensorInterval, emit),
+			ingest.NewPoller(ch, ingest.NewMLAnomalies(), sensorInterval, emit),
+			ingest.NewPoller(ch, ingest.NewZeekSSL(), sensorInterval, tlsAnalyzer.Handle),
 		}
-
+		for _, p := range pollers {
+			goProduce(func() { p.Run(ctx) })
+		}
 		slog.Info("unified sensor ingest enabled", "interval", sensorInterval)
 	}
 
-	if spanIface := os.Getenv("SPAN_INTERFACE"); spanIface != "" {
-		flowCh := make(chan capture.FlowRecord, 256)
-		idleTimeout := parseDuration(envOr("FLOW_IDLE_TIMEOUT", "30s"), 30*time.Second)
-		cap := capture.New(spanIface, flowCh, idleTimeout)
-		go func() {
-			if err := cap.Run(ctx); err != nil {
-				slog.Error("capture failed", "interface", spanIface, "error", err)
-			}
-		}()
-
-		devURL := envOr("DEVICE_INVENTORY_URL", "http://device-inventory:8081")
-		devCache := correlator.NewDeviceCache(devURL)
-		go devCache.RefreshLoop(ctx, 30*time.Second)
-
-		var chWriter *correlator.CHWriter
-		if chURL != "" {
-			chWriter = correlator.NewCHWriter(chURL, chDB)
-		}
-
-		cor := correlator.New(dnsCache, devCache, chWriter, flowCh)
-		go cor.Run(ctx)
-
-		slog.Info("capture + correlator enabled", "interface", spanIface, "idle_timeout", idleTimeout)
-	}
+	maintained := make(chan struct{})
+	go func() { defer close(maintained); maintain(ctx, alerts, outbox) }()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("GET /alerts", engine.HandleAlerts)
+	mux.HandleFunc("GET /alerts", alerts.HandleList)
 	mux.HandleFunc("POST /feedback", feedbackStore.HandleFeedback)
 	mux.HandleFunc("GET /feedback", feedbackStore.HandleList)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
-	apiKey := os.Getenv("DETECTION_API_KEY")
+	apiKey := getenv("DETECTION_API_KEY")
 	if apiKey == "" {
 		slog.Error("no DETECTION_API_KEY set — POST /feedback is UNAUTHENTICATED. " +
 			"A false-positive verdict suppresses detections before they reach the " +
@@ -248,31 +271,122 @@ func main() {
 			"any indicator.")
 	}
 
-	addr := envOr("LISTEN_ADDR", ":8080")
+	addr := env("LISTEN_ADDR", ":8080")
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	if onListen != nil {
+		onListen(ln.Addr().String())
+	}
 	srv := &http.Server{
-		Addr:         addr,
 		Handler:      otelhttp.NewHandler(authMiddleware(apiKey, mux), "detection-engine"),
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
-
+	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("starting detection-engine", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("server failed", "error", err)
-			os.Exit(1)
+		slog.Info("starting detection-engine", "addr", ln.Addr().String())
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
 		}
 	}()
 
-	<-ctx.Done()
-	slog.Info("shutting down")
+	var failure error
+	select {
+	case <-ctx.Done():
+		slog.Info("shutting down")
+	case err := <-serveErr:
+		failure = fmt.Errorf("http server: %w", err)
+	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	// 1. Stop accepting requests.
+	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := srv.Shutdown(sctx); err != nil {
+		slog.Error("http shutdown error", "error", err)
+	}
+	cancel()
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("shutdown error", "error", err)
+	// 2. Let the producers finish what they are doing; nothing new is
+	// produced after this.
+	if !waitTimeout(&producers, producerStop) {
+		slog.Warn("pollers did not stop in time; a detection they make after the store closes is lost",
+			"waited", producerStop)
+	}
+	<-maintained
+
+	// 3. Deliver what can be delivered quickly; the rest stays on disk.
+	<-dispatcherDone
+	if dispatcher != nil {
+		fctx, cancel := context.WithTimeout(context.Background(), shutdownFlush)
+		delivered, left := dispatcher.Flush(fctx)
+		cancel()
+		if left > 0 {
+			slog.Warn("undelivered detections left in the outbox",
+				"delivered_at_shutdown", delivered, "left", left, "durable", st.Durable(), "path", st.Path())
+		} else {
+			slog.Info("outbox flushed", "delivered_at_shutdown", delivered)
+		}
+	}
+	return failure
+}
+
+// openStore opens the local store. An explicitly configured DB_PATH that
+// cannot be opened is a configuration error. Without DB_PATH, an unusable
+// default directory degrades to memory — detection keeps working, but the
+// history and the undelivered detections are lost on restart, which is said
+// loudly and exported as detection_engine_store_durable 0.
+func openStore(getenv func(string) string) (*store.Store, error) {
+	if p := getenv("DB_PATH"); p != "" {
+		st, err := store.Open(p)
+		if err != nil {
+			return nil, fmt.Errorf("DB_PATH %s: %w", p, err)
+		}
+		slog.Info("local store opened", "path", p)
+		return st, nil
+	}
+	st, err := store.Open(defaultDBPath)
+	if err == nil {
+		slog.Info("local store opened", "path", defaultDBPath)
+		return st, nil
+	}
+	slog.Error("no writable data directory: alerts and undelivered detections are kept in memory "+
+		"and LOST on restart; mount a volume at the default path's directory or set DB_PATH",
+		"path", defaultDBPath, "error", err)
+	return store.OpenMemory()
+}
+
+// maintain applies retention to the alert history and forgets delivered
+// events once they can no longer absorb repeats.
+func maintain(ctx context.Context, alerts *store.Alerts, outbox *store.Outbox) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := alerts.Prune(); err != nil {
+				slog.Warn("alert retention failed", "error", err)
+			}
+			if outbox != nil {
+				if _, err := outbox.Purge(); err != nil {
+					slog.Warn("outbox purge failed", "error", err)
+				}
+			}
+		}
+	}
+}
+
+func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
 	}
 }
 
@@ -307,8 +421,8 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
+func envOr(getenv func(string) string, key, fallback string) string {
+	if v := getenv(key); v != "" {
 		return v
 	}
 	return fallback

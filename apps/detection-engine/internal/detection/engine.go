@@ -4,13 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,7 +18,6 @@ import (
 )
 
 const (
-	maxAlerts = 1000
 	// queryLogBatch is how many querylog entries one poll pulls. Entries
 	// older than the batch are dropped by AdGuard's ring buffer before the
 	// next poll, so a saturated batch means missed detections — tracked by
@@ -165,7 +161,8 @@ func ClampConfidence(c int) int {
 }
 
 // Alert is the engine's record of one detection; eventmap turns it into the
-// shared events.DetectionEvent. It is also what GET /alerts returns.
+// shared events.DetectionEvent. It is also what GET /alerts returns (the
+// store persists it as this JSON).
 type Alert struct {
 	ID        string    `json:"id"`
 	Timestamp time.Time `json:"timestamp"`
@@ -203,22 +200,23 @@ type Alert struct {
 }
 
 type Engine struct {
-	adguard     *adguard.Client
-	matcher     *iocmatch.Matcher
-	interval    time.Duration
-	lastSeen    time.Time
-	OnAlert     func(Alert)
-	OnDNSAnswer func(ip, domain string, ttl int)
+	adguard  *adguard.Client
+	matcher  *iocmatch.Matcher
+	interval time.Duration
+	lastSeen time.Time
+	// OnAlert receives every detection (the alert pipeline: store,
+	// suppression, correlation, delivery).
+	OnAlert func(Alert)
+	// OnDNSAnswer receives every A/AAAA answer a client got, for the TLS
+	// heuristics' per-client resolution cache.
+	OnDNSAnswer func(client, ip, domain string, ttl int)
 
 	// ResolveClient maps a client IP to its MAC and friendly name. The
 	// killswitch allowlist checks MAC first and home DHCP leases move, so a
 	// detection without a MAC can only ever be protected by its current IP
-	// — which is how an allowlisted router ends up quarantined. Optional:
-	// nil leaves ClientMAC empty and increments a counter.
+	// — which is how an allowlisted router ends up quarantined. nil leaves
+	// ClientMAC empty and increments a counter.
 	ResolveClient func(ip string) (mac, name string)
-
-	mu     sync.RWMutex
-	alerts []Alert
 }
 
 func New(ag *adguard.Client, m *iocmatch.Matcher, interval time.Duration) *Engine {
@@ -228,7 +226,6 @@ func New(ag *adguard.Client, m *iocmatch.Matcher, interval time.Duration) *Engin
 		matcher:  m,
 		interval: interval,
 		lastSeen: time.Now(),
-		alerts:   make([]Alert, 0),
 	}
 }
 
@@ -273,7 +270,7 @@ func (e *Engine) poll(ctx context.Context) {
 		if e.OnDNSAnswer != nil {
 			for _, ans := range entry.Answer {
 				if ans.Type == "A" || ans.Type == "AAAA" {
-					e.OnDNSAnswer(ans.Value, domain, ans.TTL)
+					e.OnDNSAnswer(entry.Client, ans.Value, domain, ans.TTL)
 				}
 			}
 		}
@@ -385,7 +382,7 @@ func canonicalOrRaw(ip string) string {
 
 // Ingest routes an externally-built alert (unified sensor events from
 // Suricata/Zeek) through the same path as AdGuard-sourced detections:
-// ring buffer, metrics, and the OnAlert fan-out.
+// client resolution, metrics, and the OnAlert fan-out.
 func (e *Engine) Ingest(a Alert) {
 	if a.ID == "" {
 		a.ID = NewID()
@@ -419,25 +416,9 @@ func (e *Engine) resolveClient(ip string) (mac, name string) {
 	return mac, name
 }
 
+// addAlert hands a detection to the alert pipeline, which persists it.
 func (e *Engine) addAlert(a Alert) {
-	e.mu.Lock()
-	e.alerts = append(e.alerts, a)
-	if len(e.alerts) > maxAlerts {
-		e.alerts = e.alerts[len(e.alerts)-maxAlerts:]
-	}
-	e.mu.Unlock()
-
 	if e.OnAlert != nil {
 		e.OnAlert(a)
 	}
-}
-
-func (e *Engine) HandleAlerts(w http.ResponseWriter, r *http.Request) {
-	e.mu.RLock()
-	alerts := make([]Alert, len(e.alerts))
-	copy(alerts, e.alerts)
-	e.mu.RUnlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(alerts)
 }

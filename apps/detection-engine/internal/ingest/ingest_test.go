@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/clickhouse"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/iocmatch"
 )
 
@@ -147,8 +148,12 @@ func TestPollerCursorAndDedupe(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	ch, err := clickhouse.New(clickhouse.Config{URL: srv.URL, Database: "netsoldier"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	var got []SensorEvent
-	p := NewPoller(NewCHClient(srv.URL, "netsoldier"), ZeekIntel{}, time.Hour, func(ev SensorEvent) {
+	p := NewPoller(ch, ZeekIntel{}, time.Hour, func(ev SensorEvent) {
 		got = append(got, ev)
 	})
 	p.cursor = time.Unix(1789000000, 0).UTC()
