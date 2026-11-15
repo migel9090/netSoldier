@@ -25,13 +25,14 @@ func startKillswitch(t *testing.T, ksBin, agURL string, extra map[string]string)
 	t.Helper()
 	ksAddr := freeAddr(t)
 	env := map[string]string{
-		"LISTEN_ADDR":        ksAddr,
-		"ADGUARD_URL":        agURL,
-		"ADGUARD_USER":       "admin",
-		"ADGUARD_PASSWORD":   "test",
-		"KILLSWITCH_API_KEY": e2eAPIKey,
-		"WEBHOOK_SECRET":     e2eWebhookSecret,
-		"ALLOWLIST_IPS":      "192.168.1.1",
+		"LISTEN_ADDR":             ksAddr,
+		"ADGUARD_URL":             agURL,
+		"ADGUARD_USER":            "admin",
+		"ADGUARD_PASSWORD":        "test",
+		"KILLSWITCH_API_KEY":      e2eAPIKey,
+		"KILLSWITCH_INGEST_TOKEN": e2eIngestToken,
+		"WEBHOOK_SECRET":          e2eWebhookSecret,
+		"ALLOWLIST_IPS":           "192.168.1.1",
 	}
 	for k, v := range extra {
 		env[k] = v
@@ -198,7 +199,7 @@ func TestTypedTargetEndToEnd(t *testing.T) {
 		"POLL_INTERVAL":               "1s",
 		"WEBHOOK_URL":                 "http://" + ksAddr + "/evaluate",
 		"WEBHOOK_SECRET":              e2eWebhookSecret,
-		"WEBHOOK_TOKEN":               e2eAPIKey,
+		"WEBHOOK_TOKEN":               e2eIngestToken,
 		"DETECTION_API_KEY":           e2eAPIKey,
 		"OTEL_EXPORTER_OTLP_ENDPOINT": "localhost:1",
 	})

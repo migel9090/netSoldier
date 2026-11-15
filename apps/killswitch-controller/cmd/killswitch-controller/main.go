@@ -72,12 +72,40 @@ var (
 		Name:      "duplicate_events_total",
 		Help:      "Detection events answered from the idempotency ledger instead of re-evaluated.",
 	})
+	// autoBlockWithheld counts detections that met every auto-block
+	// condition and were queued for a human only because the service runs
+	// with auto-block disabled — what a degraded start-up is costing.
+	autoBlockWithheld = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "killswitch",
+		Name:      "auto_block_withheld_total",
+		Help:      "Detections that would have been auto-blocked but were queued because auto-block is disabled, by reason.",
+	}, []string{"reason"})
+	// protectionEntriesRejected is non-zero only when the service was
+	// started with ALLOWLIST_ON_INVALID=pending-only: some device the
+	// operator meant to protect is not protected.
+	protectionEntriesRejected = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "killswitch",
+		Name:      "protection_entries_rejected",
+		Help:      "Allowlist / gateway entries rejected at start-up; while non-zero auto-block is disabled.",
+	})
 )
 
 func init() {
 	prometheus.MustRegister(pendingActions, activeActions, allowlistEntries,
-		autoBlockEnabled, rejectedRequests, driverFailures, duplicateEvents)
+		autoBlockEnabled, rejectedRequests, driverFailures, duplicateEvents,
+		autoBlockWithheld, protectionEntriesRejected)
+	for _, r := range []string{policy.WithheldEmptyAllowlist, policy.WithheldInvalidProtection} {
+		autoBlockWithheld.WithLabelValues(r)
+	}
 }
+
+// Routes the authentication middleware treats specially. Every other route,
+// and any path no route matches, needs the operator token.
+const (
+	evaluateRoute = "POST /evaluate"
+	healthRoute   = "GET /healthz"
+	metricsRoute  = "GET /metrics"
+)
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
@@ -85,37 +113,60 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	pol := policy.LoadFromEnv()
-
-	// An empty allowlist means NOTHING is protected — the router, the DNS
-	// server and the sensor itself are all quarantinable, and this project's
-	// own threat model notes that blocking the router takes the whole network
-	// offline. Rather than refuse to start (which would also stop detection,
-	// a worse outcome) the controller degrades to pending-only: every action
-	// still gets queued and audited, but a human has to approve it.
-	autoBlockAllowed := true
-	if pol.Allowlist.Len() == 0 {
-		if allowEmptyAllowlist() {
-			slog.Warn("allowlist is EMPTY and POLICY_ALLOW_EMPTY_ALLOWLIST is set — " +
-				"auto-block may target the router, DNS server or the sensor itself")
-		} else {
-			autoBlockAllowed = false
-			slog.Error("allowlist is EMPTY — auto-block disabled, every action requires " +
-				"human approval. Set ALLOWLIST_MACS/ALLOWLIST_IPS to protect critical " +
-				"devices, or POLICY_ALLOW_EMPTY_ALLOWLIST=true to override.")
-		}
+	// A protection entry that does not parse means a device the operator
+	// believes is protected is not; that stops the start (see LoadFromEnv).
+	pol, err := policy.LoadFromEnv()
+	if err != nil {
+		slog.Error("refusing to start: invalid protection configuration", "error", err)
+		os.Exit(1)
 	}
+
+	// An empty allowlist means NOTHING the operator chose is protected — the
+	// router among them, and this project's own threat model notes that
+	// blocking the router takes the whole network offline. Rather than refuse
+	// to start (which would also stop detection, a worse outcome) the policy
+	// degrades to pending-only: every action still gets queued and audited,
+	// but a human has to approve it.
+	switch hold, _ := pol.AutoBlockHold(); {
+	case len(pol.RejectedEntries) > 0:
+		slog.Error("auto-block DISABLED: started with rejected protection entries "+
+			"(ALLOWLIST_ON_INVALID=pending-only); every action requires human approval",
+			"rejected", pol.RejectedEntries)
+	case hold != "":
+		slog.Error("allowlist is EMPTY — auto-block disabled, every action requires " +
+			"human approval. Set ALLOWLIST_MACS/ALLOWLIST_IPS to protect critical " +
+			"devices, or POLICY_ALLOW_EMPTY_ALLOWLIST=true to override.")
+	case pol.Allowlist.Len() == 0:
+		slog.Warn("allowlist is EMPTY and POLICY_ALLOW_EMPTY_ALLOWLIST is set — " +
+			"auto-block may target devices the operator never listed")
+	}
+	autoBlockAllowed := pol.AutoBlockEnabled()
 	allowlistEntries.Set(float64(pol.Allowlist.Len()))
 	autoBlockEnabled.Set(boolGauge(autoBlockAllowed))
+	protectionEntriesRejected.Set(float64(len(pol.RejectedEntries)))
+
+	agURL := envOr("ADGUARD_URL", "http://adguard-web.dns.svc:3000")
+
+	// The sensor's own addresses and the DNS server are protected without
+	// anyone having to list them. If they cannot all be determined, the
+	// drivers that act on devices are withheld below.
+	infraErr := protectInfrastructure(ctx, pol, agURL, resolveHost)
+	if infraErr != nil {
+		slog.Error("could not determine every infrastructure address to protect — "+
+			"arp_isolate and switch_acl will be refused", "error", infraErr)
+	}
 
 	slog.Info("policy loaded",
 		"auto_confidence", pol.AutoMinConfidence,
 		"auto_severity", pol.AutoMinSeverity,
 		"auto_min_signals", pol.AutoMinSignals,
-		"auto_require_known_bad", pol.AutoRequireKnownBad,
+		"auto_action", events.ActionDNSSinkhole,
 		"default_ttl", pol.DefaultTTL,
 		"default_action", pol.DefaultAction,
 		"allowlist_entries", pol.Allowlist.Len(),
+		"gateway_ip", pol.GatewayIP.String(),
+		"gateway_mac", pol.GatewayMAC,
+		"infrastructure", append(pol.Infrastructure.IPs(), pol.Infrastructure.MACs()...),
 		"auto_block_allowed", autoBlockAllowed,
 	)
 
@@ -133,20 +184,14 @@ func main() {
 	// primary guard, but a driver that can reach the gateway must also refuse
 	// it on its own. Defence in depth, because an allowlist entry can be
 	// mistyped and a detection can arrive with the gateway's IP.
-	var guard drivers.TargetGuard
-	if gwIP := os.Getenv("ARP_GATEWAY_IP"); gwIP != "" {
-		guard.ProtectIP(gwIP)
-	}
-	for _, ip := range pol.Allowlist.IPs() {
-		guard.ProtectIP(ip)
-	}
-	for _, mac := range pol.Allowlist.MACs() {
-		guard.ProtectMAC(mac)
+	guard, err := buildGuard(pol)
+	if err != nil {
+		slog.Error("refusing to start: protected device not accepted by the target guard", "error", err)
+		os.Exit(1)
 	}
 
 	driverMap := make(map[string]drivers.Driver)
 
-	agURL := envOr("ADGUARD_URL", "http://adguard-web.dns.svc:3000")
 	agUser := os.Getenv("ADGUARD_USER")
 	agPass := os.Getenv("ADGUARD_PASSWORD")
 	if agUser == "" || agPass == "" {
@@ -155,20 +200,34 @@ func main() {
 	}
 	driverMap[events.ActionDNSSinkhole] = drivers.NewSinkholeDriver(agURL, agUser, agPass)
 
-	if gwIP := os.Getenv("ARP_GATEWAY_IP"); gwIP != "" {
-		arpDrv, err := drivers.NewARPIsolateDriver(envOr("ARP_INTERFACE", "eth0"), net.ParseIP(gwIP), &guard)
+	// The ARP driver is opt-in by naming its interface, and trusts only the
+	// gateway identity pinned in configuration.
+	if arpIface := os.Getenv("ARP_INTERFACE"); arpIface != "" {
+		err := deviceDriverReady(pol, infraErr)
+		if err == nil {
+			gwMAC, _ := net.ParseMAC(pol.GatewayMAC)
+			var arpDrv *drivers.ARPIsolateDriver
+			if arpDrv, err = drivers.NewARPIsolateDriver(arpIface, net.IP(pol.GatewayIP.AsSlice()), gwMAC, guard); err == nil {
+				driverMap[events.ActionARPIsolate] = arpDrv
+			}
+		}
 		if err != nil {
 			// Falling back to the sinkhole here would be worse than not
 			// offering the action at all: the operator would be told a
 			// device was isolated at layer 2 when only its DNS was blocked.
 			slog.Error("arp-isolate driver unavailable — arp_isolate actions will be REFUSED, "+
 				"not silently downgraded to a DNS block", "error", err)
-		} else {
-			driverMap[events.ActionARPIsolate] = arpDrv
 		}
 	}
 
-	if swURL := os.Getenv("SWITCH_WEBHOOK_URL"); swURL != "" {
+	swURL := os.Getenv("SWITCH_WEBHOOK_URL")
+	if swURL != "" {
+		if err := deviceDriverReady(pol, infraErr); err != nil {
+			slog.Error("switch driver unavailable — switch_acl actions will be REFUSED", "error", err)
+			swURL = ""
+		}
+	}
+	if swURL != "" {
 		vlan := 0
 		if v := os.Getenv("SWITCH_QUARANTINE_VLAN"); v != "" {
 			n, err := strconv.Atoi(v)
@@ -181,7 +240,7 @@ func main() {
 		}
 		if vlan >= 0 {
 			driverMap[events.ActionSwitchACL] = drivers.NewSwitchPortDriver(
-				swURL, vlan, os.Getenv("SWITCH_WEBHOOK_SECRET"), &guard)
+				swURL, vlan, os.Getenv("SWITCH_WEBHOOK_SECRET"), guard)
 			if os.Getenv("SWITCH_WEBHOOK_SECRET") == "" {
 				slog.Warn("SWITCH_WEBHOOK_SECRET not set — switch port operations are unsigned; " +
 					"anyone able to reach the webhook can disable ports")
@@ -213,26 +272,18 @@ func main() {
 	go runSafeTTLRevert(ctx, store, resolve)
 	go refreshKillswitchMetrics(ctx, store)
 
-	apiKey := os.Getenv("KILLSWITCH_API_KEY")
-	if apiKey == "" {
-		slog.Error("no KILLSWITCH_API_KEY set — API authentication is DISABLED; " +
-			"anyone able to reach this service can approve or revert enforcement")
-	}
-	webhookSecret := os.Getenv("WEBHOOK_SECRET")
 	tolerance := envDuration("WEBHOOK_SIGNATURE_TOLERANCE", events.DefaultSignatureTolerance)
-	var verifier *events.SignatureVerifier
-	if webhookSecret == "" {
-		slog.Warn("no WEBHOOK_SECRET set — detection events are accepted without " +
-			"signature verification; their contents cannot be trusted")
-	} else {
-		verifier = &events.SignatureVerifier{Secret: webhookSecret, Tolerance: tolerance}
+	creds, verifier, err := loadAuth(tolerance)
+	if err != nil {
+		slog.Error("refusing to start: authentication is not fully configured", "error", err)
+		os.Exit(1)
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.Handle("GET /metrics", promhttp.Handler())
-	mux.HandleFunc("GET /policy", handleGetPolicy(pol, autoBlockAllowed))
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, autoBlockAllowed,
+	mux.HandleFunc(healthRoute, handleHealthz)
+	mux.Handle(metricsRoute, promhttp.Handler())
+	mux.HandleFunc("GET /policy", handleGetPolicy(pol))
+	mux.HandleFunc(evaluateRoute, handleEvaluate(pol, store, resolve,
 		newEvaluationLedger(ledgerRetention(tolerance))))
 	mux.HandleFunc("GET /allowlist", handleGetAllowlist(pol))
 	mux.HandleFunc("GET /actions/pending", handleListByState(store, events.StatePending))
@@ -242,7 +293,7 @@ func main() {
 	mux.HandleFunc("POST /actions/{id}/reject", handleReject(store))
 	mux.HandleFunc("POST /actions/{id}/revert", handleRevert(store, resolve))
 
-	handler := authMiddleware(apiKey, verifier, mux)
+	handler := authMiddleware(creds, verifier, mux)
 
 	addr := envOr("LISTEN_ADDR", ":8084")
 	srv := &http.Server{
@@ -255,8 +306,8 @@ func main() {
 
 	go func() {
 		slog.Info("starting killswitch-controller", "addr", addr,
-			"auth", apiKey != "", "signature_required", verifier != nil,
-			"signature_tolerance", tolerance)
+			"operator_auth", creds.operator != "", "ingest_auth", creds.ingest != "",
+			"signature_required", verifier != nil, "signature_tolerance", tolerance)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server failed", "error", err)
 			os.Exit(1)
@@ -273,26 +324,47 @@ func main() {
 	}
 }
 
-// authMiddleware authenticates mutating requests and verifies the signature
-// on detection events (nil verifier: none required). GET endpoints stay
-// unauthenticated by design (read-only), but note /allowlist and /actions do
-// disclose which devices cannot be blocked and what is currently enforced —
-// NetworkPolicy is what keeps them private, so it has to be in place.
-func authMiddleware(apiKey string, verifier *events.SignatureVerifier, next http.Handler) http.Handler {
+// authMiddleware enforces the two roles. POST /evaluate takes the ingest
+// token plus a valid signature (nil verifier: none required); every other
+// endpoint except /healthz and /metrics takes the operator token — reads
+// included, since /allowlist and /actions disclose which devices cannot be
+// blocked and what is currently enforced. An empty token for a role means
+// that role is unauthenticated, which loadAuth only permits in insecure mode.
+//
+// The role is decided by the route the mux will actually serve, not by
+// comparing the raw path: a spelling the mux maps to /evaluate must not
+// escape the ingest checks, and the ingest token must not reach anything
+// the mux maps elsewhere.
+func authMiddleware(creds credentials, verifier *events.SignatureVerifier, mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			next.ServeHTTP(w, r)
+		_, route := mux.Handler(r)
+		if route == healthRoute || route == metricsRoute {
+			mux.ServeHTTP(w, r)
 			return
 		}
 
-		if apiKey != "" {
-			if !validBearer(r.Header.Get("Authorization"), apiKey) {
-				rejectedRequests.WithLabelValues("bad_token").Inc()
-				slog.Warn("rejected unauthenticated request",
-					"path", r.URL.Path, "remote", r.RemoteAddr)
-				writeJSONError(w, http.StatusUnauthorized, "unauthorized")
-				return
+		want, other, role := creds.operator, creds.ingest, "operator"
+		if route == evaluateRoute {
+			want, other, role = creds.ingest, creds.operator, "ingest"
+		}
+		if header := r.Header.Get("Authorization"); want != "" && !validBearer(header, want) {
+			reason := "bad_token"
+			if other != "" && validBearer(header, other) {
+				// A genuine token used outside its role: the ingest
+				// credential trying to approve, or an operator credential
+				// submitting events. Worth telling apart on a dashboard.
+				reason = "wrong_role"
 			}
+			rejectedRequests.WithLabelValues(reason).Inc()
+			slog.Warn("rejected request", "reason", reason, "requires", role,
+				"path", r.URL.Path, "remote", r.RemoteAddr)
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			mux.ServeHTTP(w, r)
+			return
 		}
 
 		// Read the body once, under a cap, so the signature covers exactly
@@ -307,7 +379,7 @@ func authMiddleware(apiKey string, verifier *events.SignatureVerifier, next http
 
 		// Only /evaluate carries a signed detection payload; operator
 		// actions are authenticated by the bearer token alone.
-		if verifier != nil && r.URL.Path == "/evaluate" {
+		if verifier != nil && route == evaluateRoute {
 			if err := verifier.Verify(r.Header.Get(events.SignatureHeader), body); err != nil {
 				reason := "bad_signature"
 				if errors.Is(err, events.ErrStaleSignature) {
@@ -324,7 +396,7 @@ func authMiddleware(apiKey string, verifier *events.SignatureVerifier, next http
 			}
 		}
 
-		next.ServeHTTP(w, r)
+		mux.ServeHTTP(w, r)
 	})
 }
 
@@ -398,19 +470,25 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func handleGetPolicy(pol *policy.Policy, autoBlockAllowed bool) http.HandlerFunc {
+func handleGetPolicy(pol *policy.Policy) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
+		hold, _ := pol.AutoBlockHold()
 		writeJSON(w, http.StatusOK, map[string]any{
-			"auto_min_confidence":    pol.AutoMinConfidence,
-			"auto_min_severity":      pol.AutoMinSeverity,
-			"auto_min_signals":       pol.AutoMinSignals,
-			"auto_require_known_bad": pol.AutoRequireKnownBad,
-			"pend_min_confidence":    pol.PendMinConfidence,
-			"pend_min_severity":      pol.PendMinSeverity,
-			"default_ttl":            pol.DefaultTTL,
-			"default_action":         pol.DefaultAction,
-			"auto_block_allowed":     autoBlockAllowed,
-			"allowlist_entries":      pol.Allowlist.Len(),
+			"auto_min_confidence": pol.AutoMinConfidence,
+			"auto_min_severity":   pol.AutoMinSeverity,
+			"auto_min_signals":    pol.AutoMinSignals,
+			// Always true: auto-block needs a known-bad signal that attests
+			// the blocked domain. Kept for readers of the 1.x response.
+			"auto_require_known_bad":      true,
+			"auto_action_type":            events.ActionDNSSinkhole,
+			"pend_min_confidence":         pol.PendMinConfidence,
+			"pend_min_severity":           pol.PendMinSeverity,
+			"default_ttl":                 pol.DefaultTTL,
+			"default_action":              pol.DefaultAction,
+			"auto_block_allowed":          hold == "",
+			"auto_block_disabled_reason":  hold,
+			"allowlist_entries":           pol.Allowlist.Len(),
+			"rejected_protection_entries": len(pol.RejectedEntries),
 		})
 	}
 }
@@ -423,7 +501,7 @@ func handleGetPolicy(pol *policy.Policy, autoBlockAllowed bool) http.HandlerFunc
 // once per event id (see evaluationLedger). Enforcement acts on the event's
 // typed target only, never on its domain or summary.
 func handleEvaluate(pol *policy.Policy, store *actions.Store, resolve driverResolver,
-	autoBlockAllowed bool, ledger *evaluationLedger) http.HandlerFunc {
+	ledger *evaluationLedger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 		if err != nil {
@@ -456,12 +534,11 @@ func handleEvaluate(pol *policy.Policy, store *actions.Store, resolve driverReso
 		}()
 
 		decision := pol.Evaluate(ev)
-
-		// With no allowlist configured, downgrade auto-block to pending
-		// rather than enforce blind.
-		if decision.Action == "auto_block" && !autoBlockAllowed {
-			decision.Action = "pending"
-			decision.Reason = "pending (auto-block disabled: allowlist is empty): " + decision.Reason
+		if decision.Withheld != "" {
+			autoBlockWithheld.WithLabelValues(decision.Withheld).Inc()
+			slog.Warn("auto-block withheld: the detection met every auto-block condition, "+
+				"but automatic enforcement is disabled for this service",
+				"id", ev.ID, "withheld", decision.Withheld, "reason", decision.Reason)
 		}
 
 		var action *events.EnforcementAction
@@ -681,15 +758,6 @@ func boolGauge(b bool) float64 {
 		return 1
 	}
 	return 0
-}
-
-func allowEmptyAllowlist() bool {
-	switch strings.ToLower(os.Getenv("POLICY_ALLOW_EMPTY_ALLOWLIST")) {
-	case "1", "true", "yes":
-		return true
-	default:
-		return false
-	}
 }
 
 // instanceIDPrefix makes action IDs unique across restarts. The old global

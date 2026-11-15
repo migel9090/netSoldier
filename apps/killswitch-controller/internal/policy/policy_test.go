@@ -30,19 +30,34 @@ func feedMatch(conf int, sev string) events.DetectionEvent {
 	}
 }
 
-// composite builds a multi-class detection from the given classes.
-func composite(conf int, target *events.Target, classes ...string) events.DetectionEvent {
-	ev := events.DetectionEvent{
+// composite builds a critical multi-signal detection.
+func composite(conf int, target *events.Target, signals ...events.Signal) events.DetectionEvent {
+	return events.DetectionEvent{
 		Confidence:  conf,
 		Severity:    events.SeverityCritical,
 		ClientIP:    "192.168.1.100",
 		SignalClass: events.SignalComposite,
+		Signals:     signals,
 		Target:      target,
 	}
-	for _, c := range classes {
-		ev.Signals = append(ev.Signals, events.Signal{Class: c, Confidence: 70})
+}
+
+// sig is one contributing signal with its own confidence and indicator.
+func sig(class string, conf int, indicatorType, indicator string) events.Signal {
+	return events.Signal{Class: class, Confidence: conf, IndicatorType: indicatorType, Indicator: indicator}
+}
+
+func domainSig(class string, conf int, domain string) events.Signal {
+	return sig(class, conf, events.IndicatorDomain, domain)
+}
+
+func mustLoad(t *testing.T) *Policy {
+	t.Helper()
+	p, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv: %v", err)
 	}
-	return ev
+	return p
 }
 
 func TestAutoBlock(t *testing.T) {
@@ -155,18 +170,30 @@ func TestDefaultPolicyValues(t *testing.T) {
 
 func TestAutoMinSignalsRequiresCorroboration(t *testing.T) {
 	p := newTestPolicy()
-	p.AutoMinSignals = 2
+	p.AutoMinSignals = 3
 
-	// a composite carrying only one signal class → downgraded to pending
-	single := p.Evaluate(composite(95, evilDomain, events.SignalIoC))
-	if single.Action != "pending" {
-		t.Fatalf("single-signal composite should be pending under AutoMinSignals=2, got %q", single.Action)
+	// two classes, an attested feed match among them, under a 3-class bar
+	two := composite(98, evilDomain, domainSig(events.SignalIoC, 95, "evil.example"),
+		domainSig(events.SignalBeacon, 75, "evil.example"))
+	d := p.Evaluate(two)
+	if d.Action != "pending" || !strings.Contains(d.Reason, "needs 3 signals, has 2") {
+		t.Fatalf("a 2-class composite under AutoMinSignals=3 should be pending and say why, got %q (%s)",
+			d.Action, d.Reason)
 	}
 
-	// two corroborating classes, one of them a feed match → auto-block
-	corrob := p.Evaluate(composite(93, evilDomain, events.SignalIoC, events.SignalBeacon))
-	if corrob.Action != "auto_block" {
-		t.Fatalf("two-signal composite should auto-block, got %q (%s)", corrob.Action, corrob.Reason)
+	// Labelling the same evidence as a single-signal event must not skip
+	// the gate: the count comes from the signals, not the label.
+	mislabelled := two
+	mislabelled.SignalClass = events.SignalIoC
+	if d := p.Evaluate(mislabelled); d.Action != "pending" {
+		t.Fatalf("a mislabelled composite skipped the signal gate: %q (%s)", d.Action, d.Reason)
+	}
+
+	// two corroborating classes under a 2-class bar → auto-block
+	p.AutoMinSignals = 2
+	if d := p.Evaluate(two); d.Action != "auto_block" {
+		t.Fatalf("two-signal composite with an attested feed match should auto-block, got %q (%s)",
+			d.Action, d.Reason)
 	}
 }
 
@@ -244,7 +271,7 @@ func TestPendingExplainsMissingTarget(t *testing.T) {
 
 func TestLoadFromEnvAutoMinSignals(t *testing.T) {
 	t.Setenv("POLICY_AUTO_MIN_SIGNALS", "2")
-	if p := LoadFromEnv(); p.AutoMinSignals != 2 {
+	if p := mustLoad(t); p.AutoMinSignals != 2 {
 		t.Errorf("AutoMinSignals = %d, want 2", p.AutoMinSignals)
 	}
 }
@@ -303,7 +330,7 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("ALLOWLIST_MACS", "aa:bb:cc:dd:ee:ff, 11:22:33:44:55:66")
 	t.Setenv("ALLOWLIST_IPS", "10.0.0.1,10.0.0.2")
 
-	p := LoadFromEnv()
+	p := mustLoad(t)
 
 	if p.AutoMinConfidence != 85 {
 		t.Errorf("auto confidence = %d, want 85", p.AutoMinConfidence)
@@ -363,8 +390,10 @@ func TestCorroboratedHeuristicsNeverAutoBlock(t *testing.T) {
 
 	// what combine([75,70]) actually produces, pointed at the beacon's
 	// destination
-	heuristicsOnly := composite(93, &events.Target{Type: events.TargetDomain, Value: "updates.vendor.example"},
-		events.SignalBeacon, events.SignalVolumetric)
+	dest := &events.Target{Type: events.TargetDomain, Value: "updates.vendor.example"}
+	heuristicsOnly := composite(93, dest,
+		domainSig(events.SignalBeacon, 75, "updates.vendor.example"),
+		sig(events.SignalVolumetric, 70, "", ""))
 
 	d := p.Evaluate(heuristicsOnly)
 	if d.Action != "pending" {
@@ -375,12 +404,24 @@ func TestCorroboratedHeuristicsNeverAutoBlock(t *testing.T) {
 		t.Errorf("pending reason should explain the known-bad gate, got %q", d.Reason)
 	}
 
-	// Add an IDS signature: now something external attests this is bad.
+	// An IDS signature that names a rule, not the destination, attests
+	// nothing about updates.vendor.example: still a human's call.
 	withSignature := heuristicsOnly
 	withSignature.Signals = append(append([]events.Signal(nil), heuristicsOnly.Signals...),
-		events.Signal{Class: events.SignalIDS, Confidence: 70})
-	if d := p.Evaluate(withSignature); d.Action != "auto_block" {
-		t.Fatalf("heuristics corroborated by an IDS signature should auto-block, got %q", d.Action)
+		sig(events.SignalIDS, 70, events.IndicatorSID, "2013028"))
+	if d := p.Evaluate(withSignature); d.Action != "pending" ||
+		!strings.Contains(d.Reason, "no known-bad signal names the target updates.vendor.example") {
+		t.Fatalf("an IDS hit on a rule id must not unlock a block of the beacon's destination, got %q (%s)",
+			d.Action, d.Reason)
+	}
+
+	// A signature that matched the destination itself, strongly, does.
+	attested := heuristicsOnly
+	attested.Signals = append(append([]events.Signal(nil), heuristicsOnly.Signals...),
+		domainSig(events.SignalIDS, 95, "updates.vendor.example"))
+	if d := p.Evaluate(attested); d.Action != "auto_block" {
+		t.Fatalf("heuristics plus a strong signature on the destination should auto-block, got %q (%s)",
+			d.Action, d.Reason)
 	}
 }
 
@@ -399,12 +440,16 @@ func TestUnlabelledEventNeverAutoBlocks(t *testing.T) {
 	}
 }
 
-func TestAutoRequireKnownBadOptOut(t *testing.T) {
-	p := newTestPolicy()
-	p.AutoRequireKnownBad = false
-	d := p.Evaluate(composite(93, evilDomain, events.SignalBeacon, events.SignalVolumetric))
-	if d.Action != "auto_block" {
-		t.Fatalf("with the gate disabled heuristics may auto-block, got %q", d.Action)
+// TestKnownBadOptOutNoLongerWidens: POLICY_AUTO_REQUIRE_KNOWN_BAD=false used
+// to let corroborated heuristics auto-block. The variable is now ignored.
+func TestKnownBadOptOutNoLongerWidens(t *testing.T) {
+	t.Setenv("POLICY_AUTO_REQUIRE_KNOWN_BAD", "false")
+	t.Setenv("ALLOWLIST_IPS", "192.168.1.1")
+	p := mustLoad(t)
+	d := p.Evaluate(composite(93, evilDomain,
+		domainSig(events.SignalBeacon, 75, "evil.example"), sig(events.SignalVolumetric, 70, "", "")))
+	if d.Action != "pending" {
+		t.Fatalf("heuristics must not auto-block whatever the environment says, got %q", d.Action)
 	}
 }
 
@@ -414,7 +459,7 @@ func TestAutoRequireKnownBadOptOut(t *testing.T) {
 // auto-block to a bare confidence check. A typo must never widen enforcement.
 func TestInvalidSeverityEnvDoesNotWidenPolicy(t *testing.T) {
 	t.Setenv("POLICY_AUTO_SEVERITY", "CRITICAL_TYPO")
-	p := LoadFromEnv()
+	p := mustLoad(t)
 	if p.AutoMinSeverity != events.SeverityCritical {
 		t.Fatalf("invalid severity should fall back to critical, got %q", p.AutoMinSeverity)
 	}
@@ -438,7 +483,7 @@ func TestLoadFromEnvRejectsInvalidValues(t *testing.T) {
 	t.Setenv("POLICY_DEFAULT_TTL", "-1")
 	t.Setenv("POLICY_AUTO_MIN_SIGNALS", "0")
 
-	p := LoadFromEnv()
+	p := mustLoad(t)
 	if p.AutoMinConfidence != 90 {
 		t.Errorf("AutoMinConfidence = %d, want 90", p.AutoMinConfidence)
 	}

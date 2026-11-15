@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/migel9090/netSoldier/libs/events"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
@@ -23,14 +24,21 @@ const (
 	arpReply  = 2
 
 	poisonInterval = 2 * time.Second
-	// gatewayMACTTL bounds how long a resolved gateway MAC is trusted. The
-	// address was previously resolved once at startup and kept forever, so
-	// after a router reboot that changed its MAC the poison packets went to
-	// a stale address (isolation silently stopped working) and the restore
-	// packets on revert wrote a WRONG gateway entry into the target's ARP
-	// cache — leaving the device broken by the revert.
-	gatewayMACTTL = 5 * time.Minute
 )
+
+// gatewayMACConflicts counts observations of a MAC other than the pinned
+// one answering for the gateway IP. Either the router was replaced and
+// GATEWAY_MAC is stale, or a device on the LAN is impersonating it; both
+// need a human, and the driver does nothing until one has looked.
+var gatewayMACConflicts = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "killswitch",
+	Name:      "gateway_mac_conflicts_total",
+	Help:      "Times a MAC other than GATEWAY_MAC was seen answering for the gateway IP; ARP enforcement is refused while it lasts.",
+})
+
+func init() {
+	prometheus.MustRegister(gatewayMACConflicts)
+}
 
 // ARPIsolateDriver isolates a device at Layer 2 by poisoning its ARP
 // cache and the gateway's ARP cache. While active, the target device
@@ -39,6 +47,11 @@ const (
 //
 // Safeguards:
 //   - TargetGuard refuses the gateway and any protected device outright
+//   - The gateway's MAC is pinned from configuration, never learned. The
+//     neighbour table is something any LAN device can write to with one
+//     forged ARP reply; when it disagrees with the pinned MAC that is an
+//     alarm and the driver refuses to send anything, rather than adopting
+//     the new MAC as the gateway (and as a protected device)
 //   - Every raw send is checked; a failure fails Apply instead of pretending
 //     the device is isolated
 //   - IP forwarding is checked at startup, because a node with
@@ -54,19 +67,32 @@ type ARPIsolateDriver struct {
 	gatewayIP net.IP
 	guard     *TargetGuard
 
-	mu         sync.Mutex
+	// gatewayMAC is the pinned gateway identity (GATEWAY_MAC). It is set
+	// once and never replaced by anything observed on the wire.
 	gatewayMAC net.HardwareAddr
-	gatewayAt  time.Time
-	active     map[string]context.CancelFunc
+	// observeGateway reports which MAC the neighbour table currently holds
+	// for an address; resolveFromProcARP unless a test substitutes it.
+	observeGateway func(net.IP) (net.HardwareAddr, error)
+
+	mu     sync.Mutex
+	active map[string]context.CancelFunc
 }
 
-// NewARPIsolateDriver creates a driver for the given interface and gateway.
-// It fails if the gateway MAC cannot be resolved or CAP_NET_RAW is missing:
-// an isolation driver that cannot send is worse than no driver, because the
-// caller would be told the device was cut off.
-func NewARPIsolateDriver(ifaceName string, gatewayIP net.IP, guard *TargetGuard) (*ARPIsolateDriver, error) {
+// NewARPIsolateDriver creates a driver for the given interface and the
+// gateway identified by gatewayIP and the pinned gatewayMAC. It fails if
+// either is missing or unusable, or CAP_NET_RAW is missing: an isolation
+// driver that cannot send is worse than no driver, because the caller would
+// be told the device was cut off.
+func NewARPIsolateDriver(ifaceName string, gatewayIP net.IP, gatewayMAC net.HardwareAddr,
+	guard *TargetGuard) (*ARPIsolateDriver, error) {
 	if gatewayIP == nil {
 		return nil, fmt.Errorf("gateway IP is required")
+	}
+	if len(gatewayMAC) != 6 || gatewayMAC[0]&1 == 1 || bytes.Equal(gatewayMAC, make(net.HardwareAddr, 6)) {
+		return nil, fmt.Errorf("gateway MAC %q must be pinned to the router's unicast address (GATEWAY_MAC)", gatewayMAC)
+	}
+	if guard == nil {
+		return nil, fmt.Errorf("a target guard is required")
 	}
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
@@ -74,11 +100,6 @@ func NewARPIsolateDriver(ifaceName string, gatewayIP net.IP, guard *TargetGuard)
 	}
 	if len(iface.HardwareAddr) != 6 {
 		return nil, fmt.Errorf("interface %s has no usable hardware address", ifaceName)
-	}
-
-	gwMAC, err := resolveFromProcARP(gatewayIP)
-	if err != nil {
-		return nil, fmt.Errorf("resolve gateway MAC for %s: %w", gatewayIP, err)
 	}
 
 	// Fail fast on a missing capability rather than at the first enforcement.
@@ -96,28 +117,34 @@ func NewARPIsolateDriver(ifaceName string, gatewayIP net.IP, guard *TargetGuard)
 	}
 
 	d := &ARPIsolateDriver{
-		iface:      iface,
-		gatewayIP:  gatewayIP.To4(),
-		guard:      guard,
-		gatewayMAC: gwMAC,
-		gatewayAt:  time.Now(),
-		active:     make(map[string]context.CancelFunc),
+		iface:          iface,
+		gatewayIP:      gatewayIP.To4(),
+		guard:          guard,
+		gatewayMAC:     append(net.HardwareAddr(nil), gatewayMAC...),
+		observeGateway: resolveFromProcARP,
+		active:         make(map[string]context.CancelFunc),
 	}
 	if d.gatewayIP == nil {
 		return nil, fmt.Errorf("gateway IP %s is not IPv4; ARP isolation is IPv4-only", gatewayIP)
 	}
 
 	// The gateway must never be a target, whatever the policy says.
-	if guard != nil {
-		guard.ProtectIP(d.gatewayIP.String())
-		guard.ProtectMAC(gwMAC.String())
-		guard.ProtectName("default gateway")
+	if err := guard.ProtectIP(d.gatewayIP.String()); err != nil {
+		return nil, err
 	}
+	if err := guard.ProtectMAC(d.gatewayMAC.String()); err != nil {
+		return nil, err
+	}
+	guard.ProtectName("default gateway")
+
+	// A conflict now is reported now; every send re-checks, so the driver
+	// can still be constructed and starts acting once the conflict is gone.
+	_, _ = d.trustedGatewayMAC()
 
 	slog.Info("arp-isolate driver ready",
 		"interface", ifaceName,
-		"gateway_ip", gatewayIP,
-		"gateway_mac", gwMAC,
+		"gateway_ip", d.gatewayIP.String(),
+		"gateway_mac", d.gatewayMAC.String(),
 	)
 	return d, nil
 }
@@ -140,16 +167,16 @@ func (d *ARPIsolateDriver) Apply(ctx context.Context, action *events.Enforcement
 	if targetIP.Equal(d.gatewayIP) {
 		return fmt.Errorf("refusing to isolate the default gateway %s", targetIP)
 	}
-	if bytes.Equal(targetMAC, d.currentGatewayMAC()) {
+	if bytes.Equal(targetMAC, d.gatewayMAC) {
 		return fmt.Errorf("refusing to isolate the default gateway MAC %s", targetMAC)
 	}
 	if bytes.Equal(targetMAC, d.iface.HardwareAddr) {
 		return fmt.Errorf("refusing to isolate the sensor's own interface %s", targetMAC)
 	}
 
-	gwMAC, err := d.gatewayHardwareAddr()
+	gwMAC, err := d.trustedGatewayMAC()
 	if err != nil {
-		return fmt.Errorf("gateway MAC unavailable: %w", err)
+		return err
 	}
 
 	fd, err := openARPSocket()
@@ -209,9 +236,15 @@ func (d *ARPIsolateDriver) Revert(ctx context.Context, action *events.Enforcemen
 		return nil
 	}
 
-	gwMAC, err := d.gatewayHardwareAddr()
+	gwMAC, err := d.trustedGatewayMAC()
 	if err != nil {
-		return fmt.Errorf("gateway MAC unavailable for restore: %w", err)
+		// Restore frames assert "the gateway is at gwMAC" to the target; with
+		// the gateway's identity in doubt the driver sends nothing. Poisoning
+		// has stopped, which is what lifts the isolation; the caches expire on
+		// their own.
+		slog.Error("arp revert: restore frames withheld, relying on ARP cache expiry",
+			"action_id", action.ID, "error", err)
+		return nil
 	}
 
 	fd, err := openARPSocket()
@@ -265,41 +298,31 @@ func (d *ARPIsolateDriver) parseTarget(action *events.EnforcementAction) (net.IP
 	return targetIP.To4(), targetMAC, nil
 }
 
-// gatewayHardwareAddr returns a fresh-enough gateway MAC, re-resolving it
-// when the cached value has aged out.
-func (d *ARPIsolateDriver) gatewayHardwareAddr() (net.HardwareAddr, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if time.Since(d.gatewayAt) < gatewayMACTTL && len(d.gatewayMAC) == 6 {
+// trustedGatewayMAC returns the pinned gateway MAC, or an error when the
+// neighbour table shows a different MAC answering for the gateway IP.
+//
+// The observation is only ever a reason to refuse. A missing or incomplete
+// entry contradicts nothing (the sensor may simply not have talked to the
+// router lately), so the pinned value stands; a different MAC is raised as
+// an alarm and is never adopted — adopting it is what let one forged ARP
+// reply redirect the poison and restore frames and get the forger
+// permanently protected from enforcement.
+func (d *ARPIsolateDriver) trustedGatewayMAC() (net.HardwareAddr, error) {
+	observe := d.observeGateway
+	if observe == nil {
+		observe = resolveFromProcARP
+	}
+	seen, err := observe(d.gatewayIP)
+	if err != nil || bytes.Equal(seen, d.gatewayMAC) {
 		return d.gatewayMAC, nil
 	}
-	mac, err := resolveFromProcARP(d.gatewayIP)
-	if err != nil {
-		if len(d.gatewayMAC) == 6 {
-			// Keep using the last known value rather than failing closed on
-			// a transient empty neighbour table, but say so.
-			slog.Warn("gateway MAC re-resolution failed, using cached value",
-				"gateway_ip", d.gatewayIP, "age", time.Since(d.gatewayAt), "error", err)
-			return d.gatewayMAC, nil
-		}
-		return nil, err
-	}
-	if !bytes.Equal(mac, d.gatewayMAC) {
-		slog.Warn("gateway MAC changed", "old", d.gatewayMAC, "new", mac)
-		if d.guard != nil {
-			d.guard.ProtectMAC(mac.String())
-		}
-	}
-	d.gatewayMAC = mac
-	d.gatewayAt = time.Now()
-	return mac, nil
-}
-
-func (d *ARPIsolateDriver) currentGatewayMAC() net.HardwareAddr {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.gatewayMAC
+	gatewayMACConflicts.Inc()
+	slog.Error("GATEWAY MAC CONFLICT: a different MAC answers for the gateway IP — "+
+		"refusing to send ARP frames until it is resolved (router replaced and GATEWAY_MAC stale, "+
+		"or a device impersonating the gateway)",
+		"gateway_ip", d.gatewayIP.String(), "pinned_mac", d.gatewayMAC.String(), "observed_mac", seen.String())
+	return nil, fmt.Errorf("gateway MAC conflict: %s answers for %s but GATEWAY_MAC is %s; refusing to act",
+		seen, d.gatewayIP, d.gatewayMAC)
 }
 
 func (d *ARPIsolateDriver) poisonLoop(ctx context.Context, fd int, targetIP net.IP, targetMAC net.HardwareAddr) {
@@ -314,9 +337,10 @@ func (d *ARPIsolateDriver) poisonLoop(ctx context.Context, fd int, targetIP net.
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			gwMAC, err := d.gatewayHardwareAddr()
+			gwMAC, err := d.trustedGatewayMAC()
 			if err != nil {
-				slog.Error("poison loop: gateway MAC unavailable", "error", err)
+				slog.Error("poison loop suspended — device is NOT isolated while the gateway MAC is in doubt",
+					"target_ip", targetIP, "error", err)
 				continue
 			}
 			if err := d.sendPoison(fd, targetIP, targetMAC, gwMAC); err != nil {

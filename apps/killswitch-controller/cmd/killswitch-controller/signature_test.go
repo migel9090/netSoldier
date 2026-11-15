@@ -26,19 +26,23 @@ type signedEnv struct {
 func newSignedEnv(t *testing.T, autoBlockAllowed bool) *signedEnv {
 	t.Helper()
 	pol := policy.DefaultPolicy()
-	if err := pol.Allowlist.AddIP("192.168.1.1"); err != nil {
-		t.Fatalf("allowlist: %v", err)
+	if autoBlockAllowed {
+		if err := pol.Allowlist.AddIP("192.168.1.1"); err != nil {
+			t.Fatalf("allowlist: %v", err)
+		}
 	}
 	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
 	resolve := func(string) (drivers.Driver, error) { return nopDriver{}, nil }
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, autoBlockAllowed,
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve,
 		newEvaluationLedger(ledgerRetention(0))))
 
+	// key is the ingest token: these tests only submit events.
 	env := &signedEnv{key: "api-key", secret: "wh-secret"}
-	env.srv = httptest.NewServer(authMiddleware(env.key, &events.SignatureVerifier{Secret: env.secret}, mux))
+	env.srv = httptest.NewServer(authMiddleware(credentials{operator: "operator-key", ingest: env.key},
+		&events.SignatureVerifier{Secret: env.secret}, mux))
 	t.Cleanup(env.srv.Close)
 	return env
 }
@@ -139,9 +143,8 @@ func TestAutoBlockDowngradedWithoutAllowlist(t *testing.T) {
 
 	result := decodeJSON[map[string]any](t, resp)
 	decision := result["decision"].(map[string]any)
-	if decision["Action"] != "pending" {
-		t.Fatalf("auto-block must be downgraded to pending with an empty allowlist, got %v",
-			decision["Action"])
+	if decision["Action"] != "pending" || decision["Withheld"] != policy.WithheldEmptyAllowlist {
+		t.Fatalf("auto-block must be withheld as pending with an empty allowlist, got %v", decision)
 	}
 	action := result["action"].(map[string]any)
 	if action["state"] != events.StatePending {

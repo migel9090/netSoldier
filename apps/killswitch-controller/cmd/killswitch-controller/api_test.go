@@ -33,13 +33,16 @@ type testEnv struct {
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	pol := policy.DefaultPolicy()
+	// These tests list their own allowlist entries; auto-block stays
+	// available without one so the decision paths can be exercised.
+	pol.AllowEmptyAllowlist = true
 	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
 	resolve := func(string) (drivers.Driver, error) { return nopDriver{}, nil }
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("GET /policy", handleGetPolicy(pol, true))
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true, newEvaluationLedger(time.Hour)))
+	mux.HandleFunc("GET /policy", handleGetPolicy(pol))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, newEvaluationLedger(time.Hour)))
 	mux.HandleFunc("GET /allowlist", handleGetAllowlist(pol))
 	mux.HandleFunc("GET /actions/pending", handleListByState(store, events.StatePending))
 	mux.HandleFunc("GET /actions/active", handleListByState(store, events.StateActive))
@@ -316,16 +319,16 @@ func TestAuthMiddleware(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true, newEvaluationLedger(time.Hour)))
+	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, newEvaluationLedger(time.Hour)))
 
-	handler := authMiddleware("test-secret", nil, mux)
+	handler := authMiddleware(credentials{operator: "operator-secret", ingest: "test-secret"}, nil, mux)
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	// GET requests pass without auth
+	// the health probe passes without auth
 	resp, _ := http.Get(srv.URL + "/healthz")
 	if resp.StatusCode != 200 {
-		t.Errorf("GET without auth should succeed, got %d", resp.StatusCode)
+		t.Errorf("GET /healthz without auth should succeed, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 
