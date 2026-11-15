@@ -1,0 +1,6 @@
+# Allowlist: the image needs the lockfile and the sources, nothing else
+# (in particular not a local .venv).
+*
+!requirements.txt
+!src/
+**/__pycache__
