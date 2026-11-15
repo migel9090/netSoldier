@@ -48,3 +48,4 @@ configMapGenerator:
       - migrations/021_ml_beacons_history.sql
       - migrations/022_feedback_retention.sql
       - migrations/023_datetime64_timestamps.sql
+      - migrations/024_feedback_signal_class.sql
