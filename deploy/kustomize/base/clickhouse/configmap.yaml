@@ -154,9 +154,9 @@ data:
             </killswitch>
 
             <!-- detection: detection-engine. Tails the sensor and ML tables
-                 (internal/ingest), persists and reloads analyst feedback
-                 (internal/feedback) and writes correlated flows
-                 (internal/correlator). -->
+                 (internal/ingest) and persists and reloads analyst feedback
+                 (internal/feedback). Alerts and the delivery outbox live in
+                 its own local store, not here. -->
             <detection>
                 <password_sha256_hex>__DETECTION_PASSWORD_SHA256__</password_sha256_hex>
                 <profile>default</profile>
@@ -168,7 +168,6 @@ data:
                     <query>GRANT SELECT ON netsoldier.ml_beacons</query>
                     <query>GRANT SELECT ON netsoldier.ml_anomalies</query>
                     <query>GRANT SELECT, INSERT ON netsoldier.detection_feedback</query>
-                    <query>GRANT INSERT ON netsoldier.connections</query>
                 </grants>
             </detection>
 
