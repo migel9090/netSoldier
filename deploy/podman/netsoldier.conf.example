@@ -36,12 +36,18 @@ UI_URL=
 UI_PORT=3000
 
 # Devices that must never be enforced against (comma-separated MACs / IPs),
-# e.g. a NAS or a work laptop. While both lists are empty, automatic
-# blocking is OFF and every action waits for a human to approve it in the
-# web UI. The router (above) and this machine's DNS server are protected
-# either way, but they do not switch automatic blocking on.
+# e.g. a NAS or a work laptop, on top of the ones that always are: the
+# router (above) and this machine (HOST_IP and the MAC of LAN_INTERFACE).
 PROTECTED_MACS=
 PROTECTED_IPS=
+
+# Automatic blocking: off (the default) or on. Off, every action waits for a
+# human to approve it in the web UI. On, the killswitch sinkholes a domain
+# by itself when a known-bad indicator attests it at or above the
+# automatic-blocking thresholds below, for every device not protected above;
+# with both PROTECTED_* lists empty, that is every device but this machine
+# and the router.
+AUTO_BLOCK=off
 
 # How long a DNS block lasts before it is lifted, in seconds.
 BLOCK_TTL=3600
@@ -62,9 +68,10 @@ COMMERCIAL_MODE=false
 # first of LAN_NETWORKS every five minutes to find quiet devices.
 ARP_PROBE=false
 
-# Automatic-blocking thresholds, empty = the killswitch's defaults
-# (confidence 90, severity critical; pending from 50 / medium). The site's
-# own list (/etc/netsoldier/local-indicators.txt) carries confidence 80.
+# Automatic-blocking thresholds (used only with AUTO_BLOCK=on), empty = the
+# killswitch's defaults (confidence 90, severity critical); and the bar for
+# queueing an action at all (pending from 50 / medium). The site's own list
+# (/etc/netsoldier/local-indicators.txt) carries confidence 80, severity high.
 POLICY_AUTO_CONFIDENCE=
 POLICY_AUTO_SEVERITY=
 POLICY_PENDING_CONFIDENCE=

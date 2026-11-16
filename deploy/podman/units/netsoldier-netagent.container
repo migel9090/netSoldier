@@ -5,9 +5,11 @@
 # file capability for its non-root user. It listens on no port: it captures
 # ARP/DHCP/LLDP/mDNS/SSDP on the LAN interface and posts the raw frames to
 # device-inventory on the internal network (fixed address, NETAGENT_TOKEN).
-# ARP isolation stays off unless netsoldier.conf says ARP_ISOLATION=true.
-# Its health is a file, kept fresh every heartbeat, at
-# /run/netsoldier/netagent/health.json on the host.
+# ARP isolation is not offered in this profile (deploy/README.md, limits).
+#
+# Health: the agent rewrites a file on a tmpfs of its own every heartbeat,
+# and the health check below runs `/netagent health` in the container, which
+# fails once that file is stale. Exec form: the image has no shell.
 [Unit]
 Description=netSoldier lite: netagent (capture)
 PartOf=netsoldier.target
@@ -21,7 +23,8 @@ ReadOnly=true
 DropCapability=ALL
 AddCapability=NET_RAW
 NoNewPrivileges=true
-Volume=/run/netsoldier/netagent:/run/netagent:z
+# Owned by the image's user (U), never on the host.
+Tmpfs=/run/netagent:rw,size=1m,mode=0700,U,nosuid,nodev,noexec
 Environment=NETAGENT_ID=%H
 Environment=DEVICE_INVENTORY_URL=http://10.231.47.13:8081/agent/v1/frames
 Environment=NETAGENT_HEALTH_FILE=/run/netagent/health.json
@@ -30,6 +33,16 @@ Secret=netsoldier-netagent-token,type=env,target=NETAGENT_TOKEN
 # NETAGENT_INTERFACE (and the isolation settings when enabled), from
 # netsoldier.conf.
 EnvironmentFile=/etc/netsoldier/env/netagent.env
+# The file passes for three heartbeats (at least 10 s), so a check every
+# 10 s with three retries restarts an agent that has hung for about half a
+# minute, the way the Kubernetes liveness probe does (Restart=always below
+# brings it back).
+HealthCmd=["/netagent", "health"]
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=20s
+HealthOnFailure=kill
 PidsLimit=128
 PodmanArgs=--memory=64m --memory-swap=64m
 StopTimeout=20

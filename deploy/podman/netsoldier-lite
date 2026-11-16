@@ -5,7 +5,8 @@
 #   netsoldier-lite init       write a draft /etc/netsoldier/netsoldier.conf from
 #                              what this host looks like (review it!)
 #   netsoldier-lite install    install or update from /etc/netsoldier/netsoldier.conf
-#   netsoldier-lite status     units, health of every service, netagent's heartbeat
+#   netsoldier-lite status     units, health of every service (netagent: its
+#                              container health check)
 #   netsoldier-lite password   print the web UI password
 #   netsoldier-lite secret N   print one generated secret (see SECRETS below)
 #   netsoldier-lite uninstall [--keep-images]
@@ -82,10 +83,13 @@ SECRETS=(
 )
 
 CONFIG_KEYS=(LAN_INTERFACE HOST_IP GATEWAY_IP GATEWAY_MAC LAN_NETWORKS UI_URL UI_PORT
-  PROTECTED_MACS PROTECTED_IPS BLOCK_TTL UPSTREAM_DNS BOOTSTRAP_DNS ABUSECH_AUTH_KEY
+  PROTECTED_MACS PROTECTED_IPS AUTO_BLOCK BLOCK_TTL UPSTREAM_DNS BOOTSTRAP_DNS ABUSECH_AUTH_KEY
   COMMERCIAL_MODE ARP_PROBE POLICY_AUTO_CONFIDENCE POLICY_AUTO_SEVERITY
   POLICY_PENDING_CONFIDENCE POLICY_PENDING_SEVERITY IMAGE_PREFIX IMAGE_TAG)
 declare -A CFG=()
+# The MAC of LAN_INTERFACE, read by validate_config: this host is always in
+# the killswitch's protected set, by that MAC and by HOST_IP.
+LAN_MAC=""
 
 log() { printf '%s: %s\n' "$PROG" "$*"; }
 warn() { printf '%s: warning: %s\n' "$PROG" "$*" >&2; }
@@ -101,6 +105,7 @@ load_config() {
   [[ -r $file ]] || die "no configuration at $file (start from $SRC_DIR/netsoldier.conf.example or run: $PROG init)"
   for k in "${CONFIG_KEYS[@]}"; do CFG[$k]=""; done
   CFG[UI_PORT]=3000
+  CFG[AUTO_BLOCK]=off
   CFG[BLOCK_TTL]=3600
   CFG[UPSTREAM_DNS]=https://dns.quad9.net/dns-query,https://dns.cloudflare.com/dns-query
   CFG[BOOTSTRAP_DNS]=9.9.9.9,1.1.1.1
@@ -151,8 +156,14 @@ validate_config() {
   done
   if [[ -n ${CFG[LAN_INTERFACE]} ]]; then
     [[ ${CFG[LAN_INTERFACE]} =~ ^[A-Za-z0-9_.@-]{1,15}$ ]] || errs+=("LAN_INTERFACE: not an interface name")
-    ip link show dev "${CFG[LAN_INTERFACE]}" >/dev/null 2>&1 ||
+    if ip link show dev "${CFG[LAN_INTERFACE]}" >/dev/null 2>&1; then
+      LAN_MAC=$(cat "/sys/class/net/${CFG[LAN_INTERFACE]}/address" 2>/dev/null || true)
+      LAN_MAC=${LAN_MAC,,}
+      is_unicast_mac "$LAN_MAC" ||
+        errs+=("LAN_INTERFACE: ${CFG[LAN_INTERFACE]} has no unicast MAC address (${LAN_MAC:-none}); netagent needs an Ethernet or Wi-Fi interface")
+    else
       errs+=("LAN_INTERFACE: no interface ${CFG[LAN_INTERFACE]} on this host")
+    fi
   fi
   for k in HOST_IP GATEWAY_IP; do
     [[ -z ${CFG[$k]} ]] || is_ipv4 "${CFG[$k]}" || errs+=("$k: not an IPv4 address: ${CFG[$k]}")
@@ -171,6 +182,8 @@ validate_config() {
   done
   [[ ${CFG[UI_PORT]} =~ ^[1-9][0-9]{0,4}$ ]] && ((CFG[UI_PORT] <= 65535)) &&
     [[ ${CFG[UI_PORT]} != 53 ]] || errs+=("UI_PORT: not a usable port: ${CFG[UI_PORT]}")
+  # The killswitch refuses to start on anything else; say so here instead.
+  [[ ${CFG[AUTO_BLOCK]} =~ ^(on|off)$ ]] || errs+=("AUTO_BLOCK: want on or off: ${CFG[AUTO_BLOCK]}")
   [[ ${CFG[BLOCK_TTL]} =~ ^[1-9][0-9]*$ ]] || errs+=("BLOCK_TTL: want a positive number of seconds")
   for k in COMMERCIAL_MODE ARP_PROBE; do
     [[ ${CFG[$k]} =~ ^(true|false)$ ]] || errs+=("$k: want true or false")
@@ -201,8 +214,15 @@ validate_config() {
   if [[ -n ${CFG[HOST_IP]} ]] && ! ip -4 -o addr show dev "${CFG[LAN_INTERFACE]}" | grep -qw "inet ${CFG[HOST_IP]}"; then
     warn "HOST_IP ${CFG[HOST_IP]} is not (yet) an address of ${CFG[LAN_INTERFACE]}"
   fi
-  if [[ -z ${CFG[PROTECTED_MACS]}${CFG[PROTECTED_IPS]} ]]; then
-    log "no protected devices configured: automatic blocking is OFF, every action waits for approval"
+  # Protection and automation are separate: this host and the router are
+  # always protected, PROTECTED_* adds devices, and only AUTO_BLOCK=on lets
+  # the killswitch act without a human.
+  if [[ ${CFG[AUTO_BLOCK]} == off ]]; then
+    log "AUTO_BLOCK=off: automatic blocking is OFF, every action waits for approval in the web UI"
+  elif [[ -z ${CFG[PROTECTED_MACS]}${CFG[PROTECTED_IPS]} ]]; then
+    log "AUTO_BLOCK=on with no PROTECTED_MACS/PROTECTED_IPS: only this host (${CFG[HOST_IP]}, $LAN_MAC) and the router (${CFG[GATEWAY_IP]}, ${CFG[GATEWAY_MAC]}) are protected; any other device's lookups of an attested known-bad domain can be sinkholed without approval"
+  else
+    log "AUTO_BLOCK=on: protected are this host, the router and PROTECTED_MACS/PROTECTED_IPS ($(join_list "${CFG[PROTECTED_MACS]} ${CFG[PROTECTED_IPS]}"))"
   fi
 }
 
@@ -294,6 +314,8 @@ write_file() { # write_file MODE PATH (content on stdin), replacing atomically
 }
 
 join_list() { split_list "$1" | paste -sd, -; }
+# uniq_list LIST...: the entries of every LIST, first occurrence kept, comma-separated.
+uniq_list() { local l; for l in "$@"; do split_list "$l"; done | awk '!seen[$0]++' | paste -sd, -; }
 
 render_env() {
   install -d -m 0755 "$ENV_DIR"
@@ -322,10 +344,13 @@ render_env() {
     echo "# Generated by $PROG from $CONFIG; edit that file and re-run install."
     echo "GATEWAY_IP=${CFG[GATEWAY_IP]}"
     echo "GATEWAY_MAC=${CFG[GATEWAY_MAC]}"
-    # Empty lists are written out on purpose: an empty allowlist is what
-    # keeps automatic blocking off.
-    echo "ALLOWLIST_MACS=$(join_list "${CFG[PROTECTED_MACS],,}")"
-    echo "ALLOWLIST_IPS=$(join_list "${CFG[PROTECTED_IPS]}")"
+    # This host first, by its LAN address and its LAN MAC: inside its
+    # container the killswitch only sees its own container addresses, and
+    # the host is the DNS server every client uses. Then the site's own.
+    echo "ALLOWLIST_MACS=$(uniq_list "$LAN_MAC" "${CFG[PROTECTED_MACS],,}")"
+    echo "ALLOWLIST_IPS=$(uniq_list "${CFG[HOST_IP]}" "${CFG[PROTECTED_IPS]}")"
+    # Always written: on or off is the operator's choice, not a default.
+    echo "POLICY_AUTO_BLOCK=${CFG[AUTO_BLOCK]}"
     echo "POLICY_DEFAULT_TTL=${CFG[BLOCK_TTL]}"
     local k
     for k in POLICY_AUTO_CONFIDENCE POLICY_AUTO_SEVERITY POLICY_PENDING_CONFIDENCE POLICY_PENDING_SEVERITY; do
@@ -394,7 +419,6 @@ render_units() {
 # netSoldier lite runtime directories (netsoldier-lite).
 d /run/netsoldier 0755 root root -
 d /run/netsoldier/podman 0700 root root -
-d /run/netsoldier/netagent 0755 65532 65532 -
 EOF
   systemd-tmpfiles --create "$TMPFILES"
 }
@@ -494,16 +518,23 @@ wait_healthy() {
       [[ $code == 200 || ($unit == netsoldier-adguard && $code == 302) ]] || pending+=("$unit")
     done
     [[ $(http_code "http://${CFG[HOST_IP]}:${CFG[UI_PORT]}/healthz") == 200 ]] || pending+=("web-ui@${CFG[HOST_IP]}:${CFG[UI_PORT]}")
-    netagent_fresh || pending+=(netsoldier-netagent)
+    [[ $(netagent_health) == healthy ]] || pending+=(netsoldier-netagent)
     ((${#pending[@]} == 0)) && return 0
     ((SECONDS < deadline)) || { warn "not healthy yet: ${pending[*]} (see: $PROG status)"; return 1; }
     sleep 3
   done
 }
 
-netagent_fresh() {
-  local f=$RUN_DIR/netagent/health.json
-  [[ -s $f ]] && (($(date +%s) - $(stat -c %Y "$f") < 30))
+# netagent listens on nothing; its unit's health check (HealthCmd=, which
+# runs `/netagent health` inside the container) is what says it is alive.
+# Prints starting, healthy or unhealthy (nothing when there is no container).
+netagent_health() {
+  podman inspect --format '{{.State.Health.Status}}' netsoldier-netagent 2>/dev/null || true
+}
+# The output of the newest health check: one line saying why.
+netagent_health_output() {
+  { podman inspect --format '{{range .State.Health.Log}}{{.Output}}{{end}}' netsoldier-netagent 2>/dev/null || true; } |
+    sed '/^$/d' | tail -n1
 }
 
 # ── Commands ────────────────────────────────────────────────────────────────
@@ -534,6 +565,8 @@ cmd_install() {
   systemctl enable netsoldier.target >/dev/null 2>&1
   log "starting netsoldier.target"
   systemctl restart netsoldier.target
+  # Left by earlier versions, which kept netagent's health file on the host.
+  rm -rf "$RUN_DIR/netagent"
   if wait_healthy 240; then
     log "all services healthy"
   fi
@@ -546,13 +579,14 @@ cmd_status() {
     load_config "$CONFIG"
     [[ -n ${CFG[UI_URL]} ]] || CFG[UI_URL]="http://${CFG[HOST_IP]}:${CFG[UI_PORT]}"
   fi
-  local unit code
+  local unit code out
   printf '%-30s %-10s %s\n' UNIT STATE HEALTH
   for unit in "${CONTAINER_UNITS[@]}"; do
     code=-
     if [[ -n ${HEALTH_URL[$unit]:-} ]]; then code=$(http_code "${HEALTH_URL[$unit]}"); fi
     if [[ $unit == netsoldier-netagent ]]; then
-      if netagent_fresh; then code="heartbeat ok"; else code="no fresh health file"; fi
+      code=$(netagent_health) out=$(netagent_health_output)
+      code="${code:-no container}${out:+ ($out)}"
     fi
     printf '%-30s %-10s %s\n' "$unit" "$(systemctl is-active "$unit.service" 2>/dev/null || true)" "$code"
   done
@@ -560,7 +594,6 @@ cmd_status() {
     printf '%-30s %-10s %s\n' "web UI ${CFG[UI_URL]}" "" \
       "$(http_code "http://${CFG[HOST_IP]}:${CFG[UI_PORT]}/healthz")"
   fi
-  [[ -s $RUN_DIR/netagent/health.json ]] && { echo "netagent:"; cat "$RUN_DIR/netagent/health.json"; echo; }
   podman stats --no-stream --format '{{.Name}} {{.MemUsage}}' 2>/dev/null | grep '^netsoldier-' || true
 }
 

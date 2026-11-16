@@ -29,8 +29,11 @@ Secret=netsoldier-adguard-password,type=env,target=ADGUARD_PASSWORD
 Secret=netsoldier-killswitch-operator-token,type=env,target=KILLSWITCH_API_KEY
 Secret=netsoldier-killswitch-ingest-token,type=env,target=KILLSWITCH_INGEST_TOKEN
 Secret=netsoldier-webhook-secret,type=env,target=WEBHOOK_SECRET
-# GATEWAY_IP, GATEWAY_MAC, ALLOWLIST_IPS, ALLOWLIST_MACS, POLICY_*, from
-# netsoldier.conf. An empty allowlist keeps auto-block off.
+# From netsoldier.conf: GATEWAY_IP, GATEWAY_MAC; ALLOWLIST_IPS (HOST_IP and
+# PROTECTED_IPS) and ALLOWLIST_MACS (LAN_INTERFACE's MAC and PROTECTED_MACS),
+# never acted against; POLICY_AUTO_BLOCK (AUTO_BLOCK, off unless set to on:
+# only then may the killswitch sinkhole a domain without a human); the
+# other POLICY_* thresholds.
 EnvironmentFile=/etc/netsoldier/env/killswitch.env
 PidsLimit=256
 PodmanArgs=--memory=64m --memory-swap=64m

@@ -22,6 +22,11 @@ site: `infra/lab/deploy.sh` deploys `kustomize/sites/lab` and
 `infra/lab/scenario.sh` tests it end to end (usage in each script's header;
 `task lab:deploy`, `task lab:scenario`, `task lab:undeploy`).
 
+Automatic blocking is a site's decision: the killswitch acts without a human
+only when the site's `site.env` says `POLICY_AUTO_BLOCK=on` (absent or `off`:
+every action waits for approval), and even then not while its allowlist is
+empty. No profile switches it on; the lab site states it `off`.
+
 **Runtime rules (ADR-0004).** Every first-party pod runs with
 `runtimeClassName: gvisor`, all capabilities dropped, non-root, read-only
 root filesystem, no host network — except `netagent` (host network,
@@ -42,8 +47,8 @@ role there and never copies them anywhere.
 
 The ten-minute install for a Raspberry Pi or any Linux box: DNS-level
 visibility, detection against threat feeds and a site-local list,
-human-approved (or, once configured, attested automatic) DNS sinkholing, and
-the web UI. Each service keeps its state in its own SQLite store on a Podman
+human-approved (or, with `AUTO_BLOCK=on`, attested automatic) DNS
+sinkholing, and the web UI. Each service keeps its state in its own SQLite store on a Podman
 volume; there is no ClickHouse, no packet sensor and no ML.
 
 **Requirements.** Debian 13 or Raspberry Pi OS (trixie, 64-bit) or another
@@ -77,7 +82,14 @@ and `no-new-privileges`; only `netagent` keeps `NET_RAW` (ADR-0004, point 6).
 - `netsoldier-edge` is an ordinary NATed bridge for the three containers that
   need egress (upstream DNS, feed downloads) or a published port.
 - Only DNS and the web UI face the LAN, and only on `HOST_IP`; the AdGuard
-  admin API and every service API stay on the internal network.
+  admin API and every service API stay on the internal network. The web
+  UI's metrics listener is not started (`METRICS_ADDR=off`: nothing scrapes
+  it here), and its UI port answers `/metrics` with 404.
+- `netagent` listens on nothing, so its health is its unit's health check:
+  `HealthCmd=` runs `/netagent health` in the container, which fails once
+  the health file the agent rewrites every heartbeat (on a tmpfs of its own)
+  is stale; after three failures the container is killed and systemd
+  restarts it.
 - The AdGuard image is upstream's, pinned by digest, rebuilt locally without
   its `cap_net_bind_service` file capability (`podman/adguard/Containerfile`);
   it binds 53 because the unit lowers `ip_unprivileged_port_start` inside the
@@ -93,14 +105,19 @@ Five values are required: `LAN_INTERFACE`, `HOST_IP`, `GATEWAY_IP`,
 `GATEWAY_MAC`, `LAN_NETWORKS`. `netsoldier-lite init` writes a draft from the
 default route and the neighbour table — check the gateway MAC against the
 router's label, the neighbour table can be forged. Optional: `UI_URL` /
-`UI_PORT`, `PROTECTED_MACS` / `PROTECTED_IPS`, `BLOCK_TTL`, upstream DNS,
-`ABUSECH_AUTH_KEY`, `COMMERCIAL_MODE`, `ARP_PROBE`, the auto-block
-thresholds, and where the images come from.
+`UI_PORT`, `PROTECTED_MACS` / `PROTECTED_IPS`, `AUTO_BLOCK`, `BLOCK_TTL`,
+upstream DNS, `ABUSECH_AUTH_KEY`, `COMMERCIAL_MODE`, `ARP_PROBE`, the
+auto-block thresholds, and where the images come from.
 
-**An empty protected set means no automatic blocking**: every action waits
-for a human in the web UI. The router (`GATEWAY_IP`/`GATEWAY_MAC`) and the DNS
-server are protected either way but do not switch automatic blocking on.
-Nothing ships a placeholder allowlist.
+**Automatic blocking is off unless `AUTO_BLOCK=on`** (`off` is the default;
+any other value is refused): until then every action waits for a human in
+the web UI. Protection is separate from it. The router
+(`GATEWAY_IP`/`GATEWAY_MAC`), this host (`HOST_IP` and the MAC of
+`LAN_INTERFACE`, which the installer always puts in the killswitch's
+protected set) and the DNS server are never acted against;
+`PROTECTED_MACS`/`PROTECTED_IPS` add devices. With `AUTO_BLOCK=on` and no
+`PROTECTED_*`, the installer says that only this host and the router are
+protected. Nothing ships a placeholder allowlist.
 
 Site-local known-bad domains go in `/etc/netsoldier/local-indicators.txt`
 (confidence 80, so with the default policy they always wait for approval).
@@ -162,11 +179,13 @@ Images are `<IMAGE_PREFIX>/<service>:<IMAGE_TAG>` (default
 `infra/lab/lite/` installs the profile on a clean Debian 13 LXC container,
 simulates a home LAN inside it (bridge without uplink, a router namespace with
 DHCP, a victim namespace) and runs the smoke scenario: DHCP lease → device in
-the inventory, known-bad lookup → alert with the MAC → pending action,
-approval → AdGuard rule → sinkholed lookup, TTL → resolves again, audit
-trail, gateway never enforced, web UI sign-in, a block surviving the
-restart of every service and of the whole profile, and a false-positive
-verdict surviving a restart. See
+the inventory, known-bad lookup → alert with the MAC → pending action
+(automatic blocking off as shipped, and reported so), approval → AdGuard
+rule → sinkholed lookup, TTL → resolves again, audit trail, gateway and
+this host never enforced, web UI sign-in and `/metrics` 404 from the LAN,
+an automatic block with `AUTO_BLOCK=on` surviving the restart of every
+service and of the whole profile, and a false-positive verdict surviving a
+restart. See
 `infra/lab/lite/Taskfile.yml`: `LITE_HOST=<lab host> task lite:e2e`, or
 `task lite:e2e:ansible` for the same through the role (`LITE_BUILD=local`
 builds the images with Docker on the workstation).
@@ -204,9 +223,6 @@ images are not built yet. Runtime images take ≈ 330 MiB of disk.
 - No ClickHouse: analyst verdicts and alerts live in detection-engine's
   SQLite store and the audit log in the killswitch's (`GET /audit`); there is
   no long-term history beyond what those stores keep.
-- The host's own LAN address is not in the killswitch's protected set (it can
-  only see its container addresses); a DNS sinkhole never cuts a device off,
-  so this matters only once device-level drivers exist here.
 - IPv4 only: DNS and the UI are published on `HOST_IP`; IPv6 clients that
   learn another resolver bypass AdGuard.
 - Published ports and container egress are forwarded traffic (netavark,

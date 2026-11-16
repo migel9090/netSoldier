@@ -24,6 +24,9 @@ Environment=KILLSWITCH_URL=http://netsoldier-killswitch:8084
 Environment=DEVICE_INVENTORY_URL=http://netsoldier-device-inventory:8081
 Environment=DETECTION_ENGINE_URL=http://netsoldier-detection-engine:8080
 Environment=NODE_OPTIONS=--max-old-space-size=64
+# Nothing scrapes metrics in this profile, so the metrics listener (default
+# :9464) is not started at all. The UI port answers /metrics with 404.
+Environment=METRICS_ADDR=off
 Secret=netsoldier-web-session-secret,type=env,target=SESSION_SECRET
 Secret=netsoldier-web-ui-password,type=env,target=WEB_UI_PASSWORD
 Secret=netsoldier-killswitch-operator-token,type=env,target=KILLSWITCH_API_KEY

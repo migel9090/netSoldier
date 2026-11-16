@@ -5,8 +5,9 @@
 # local-indicators.txt), resolves the client to a device through
 # device-inventory, keeps alerts and its delivery outbox in SQLite and
 # delivers signed detections to the killswitch with the ingest token. No
-# ClickHouse in this profile: sensor ingest and feedback persistence are off.
-# Internal network only, no capability, nothing published.
+# ClickHouse in this profile: sensor ingest is off, and analysts' verdicts
+# live in the same local store. Internal network only, no capability,
+# nothing published.
 [Unit]
 Description=netSoldier lite: detection-engine
 PartOf=netsoldier.target
@@ -30,10 +31,8 @@ Environment=THREAT_INTEL_URL=http://netsoldier-threat-intel-sync:8083
 Environment=THREATLIST_PATH=/etc/netsoldier/local-indicators.txt
 Environment=DEVICE_INVENTORY_URL=http://netsoldier-device-inventory:8081
 Environment=WEBHOOK_URL=http://netsoldier-killswitch:8084/evaluate
-# There is no OpenTelemetry collector in this profile. Sampling nothing
-# means the exporter never has anything to send (and never dials the
-# default collector address).
-Environment=OTEL_TRACES_SAMPLER=always_off
+# No OTEL_EXPORTER_OTLP_ENDPOINT: there is no OpenTelemetry collector in this
+# profile, and without an endpoint no exporter is created.
 Environment=GOMEMLIMIT=72MiB
 Secret=netsoldier-adguard-password,type=env,target=ADGUARD_PASSWORD
 Secret=netsoldier-detection-api-key,type=env,target=DETECTION_API_KEY
