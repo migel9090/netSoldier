@@ -71,6 +71,15 @@ func IsEnforcedState(state string) bool {
 	return state == StateActive || state == StateRevertFailed
 }
 
+// Driver operations an action can have outstanding (InFlight).
+const (
+	OperationApply  = "apply"
+	OperationRevert = "revert"
+)
+
+// operations is the InFlight vocabulary, mirrored by the schema enum.
+var operations = []string{OperationApply, OperationRevert}
+
 // EnforcementAction represents a killswitch enforcement decision and its
 // lifecycle. Used by killswitch-controller, web-ui (approval flow), and
 // the append-only audit log in ClickHouse.
@@ -115,4 +124,12 @@ type EnforcementAction struct {
 	// why, so the UI can show "approved but not enforced" (or "still
 	// enforced") rather than leaving the operator to infer it from pod logs.
 	FailureReason string `json:"failure_reason,omitempty"`
+
+	// InFlight names the driver operation asked for and not yet answered
+	// (OperationApply, OperationRevert), empty when there is none. The
+	// state alone cannot say it: an action whose revert is under way is
+	// still active (or revert_failed) until the revert is confirmed, and
+	// must look different from one nobody is lifting. Optional; added in
+	// 2.0 without a version change, so readers must not require it.
+	InFlight string `json:"in_flight,omitempty"`
 }

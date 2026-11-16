@@ -36,8 +36,24 @@
 // fields in bodies are ignored). The controller's own actors are reserved:
 // auto-policy (creations, automatic approvals), ttl (the reaper),
 // reconcile (reconciliation), netagent (a result the agent reported) and
-// system (capacity eviction). An activation or failure carries the actor
-// who asked for the operation.
+// system (capacity eviction).
+//
+// Each entry names who did what that entry records, so the trail of an
+// isolation reads "approved: alice, active: netagent" — alice asked, the
+// agent confirmed, possibly much later:
+//
+//   - An approval names who approved (operator or auto-policy).
+//   - An apply's outcome (active, apply_failed) names who settled it. For a
+//     deferred driver that is the netagent: its confirmation, its refusal,
+//     or its silence past the deadline. A synchronous driver answers inside
+//     the call made for whoever asked, and there is no other party to name:
+//     the outcome carries the asker, the reason names the driver.
+//   - A revert's outcome (reverted, revert_failed) names who asked for the
+//     outstanding revert (operator, ttl), whoever confirmed it. Starting a
+//     revert writes no entry, so this is the only one that can say who
+//     lifted the enforcement — and reverted_by is taken from it. An
+//     enforcement that ends with no revert outstanding names who ended it,
+//     or found it ended (netagent, reconcile, ttl).
 //
 // # Outstanding operations
 //
@@ -45,7 +61,9 @@
 // for it and its deadline. A synchronous call that a restart interrupted
 // therefore has a defined outcome: an apply is undone, a revert retried. A
 // deferred operation (the netagent confirms later) keeps its deadline across
-// the restart; the agent's result or the deadline decides.
+// the restart; the agent's result or the deadline decides. The API serves
+// the outstanding operation as the action's in_flight (apply, revert): a
+// revert under way does not change the state until it is confirmed.
 //
 // # What the reaper owns
 //

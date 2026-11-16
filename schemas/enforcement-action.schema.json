@@ -112,6 +112,11 @@
     "failure_reason": {
       "type": "string",
       "description": "Which driver call failed and why."
+    },
+    "in_flight": {
+      "type": "string",
+      "enum": ["apply", "revert"],
+      "description": "The driver operation asked for and not yet answered; absent when there is none. apply: the enforcement is being applied (every approved action has one; for arp_isolate it waits for the netagent's confirmation). revert: the enforcement is being lifted; the action stays active or revert_failed, i.e. still enforced, until the revert is confirmed. Optional: absent in actions served before it was added."
     }
   },
   "additionalProperties": false

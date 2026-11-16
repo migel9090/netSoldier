@@ -89,8 +89,16 @@ func (a *stubAgent) run() {
 
 func agentHarness(t *testing.T) *harness {
 	t.Helper()
+	return agentHarnessWith(t, 2*time.Second, 0)
+}
+
+// agentHarnessWith sets how long an isolation waits for the agent's
+// confirmation and how long a request waits for an outcome.
+func agentHarnessWith(t *testing.T, confirm, wait time.Duration) *harness {
+	t.Helper()
 	return newHarness(t, harnessOpts{
-		engine: enforce.Config{ConfirmTimeout: 2 * time.Second},
+		engine: enforce.Config{ConfirmTimeout: confirm},
+		wait:   wait,
 		driversFor: func(s *actions.Store) map[string]drivers.Driver {
 			var guard drivers.TargetGuard
 			if err := guard.ProtectIP("192.168.1.1"); err != nil {
@@ -144,6 +152,120 @@ func TestARPIsolationThroughTheAgent(t *testing.T) {
 	defer agent.mu.Unlock()
 	if len(agent.active) != 0 {
 		t.Fatalf("the agent still isolates %v", agent.active)
+	}
+}
+
+// TestInFlightNamesTheOutstandingOperation: an action whose release the
+// netagent has not confirmed yet was served exactly like an active block
+// nobody was lifting, and an isolation waiting for the agent like any
+// approved action. in_flight says which operation is outstanding, on every
+// read, and is gone once it is answered.
+func TestInFlightNamesTheOutstandingOperation(t *testing.T) {
+	h := agentHarnessWith(t, 10*time.Second, 50*time.Millisecond)
+	agent := newStubAgent(h)
+	agent.poll() // seen: isolation is available
+	a := h.createPending("02:00:00:00:00:34", "192.168.1.34", "x.example")
+	if a.InFlight != "" {
+		t.Fatalf("a pending action has nothing in flight: %q", a.InFlight)
+	}
+
+	inFlight := func(want string) {
+		t.Helper()
+		var got events.EnforcementAction
+		if status := h.get("/actions/"+a.ID, &got); status != http.StatusOK || got.InFlight != want {
+			t.Errorf("GET /actions/%s: %d in_flight %q, want %q", a.ID, status, got.InFlight, want)
+		}
+	}
+
+	status, got := h.approve(a.ID, map[string]string{"action_type": events.ActionARPIsolate})
+	if status != http.StatusAccepted || got.State != events.StateApproved || got.InFlight != events.OperationApply {
+		t.Fatalf("approve awaiting the agent: %d %s in_flight %q", status, got.State, got.InFlight)
+	}
+	inFlight(events.OperationApply)
+
+	agent.poll() // fetches the isolation
+	agent.poll() // reports it done
+	if st := h.action(a.ID).State; st != events.StateActive {
+		t.Fatalf("after the agent confirmed: %s", st)
+	}
+	inFlight("")
+
+	status, got = h.revert(a.ID, "bob")
+	if status != http.StatusAccepted || got.State != events.StateActive || got.InFlight != events.OperationRevert {
+		t.Fatalf("revert awaiting the agent: %d %s in_flight %q", status, got.State, got.InFlight)
+	}
+	inFlight(events.OperationRevert)
+	if l := h.list("active"); len(l) != 1 || l[0].InFlight != events.OperationRevert {
+		t.Errorf("/actions/active must show the release under way: %+v", l)
+	}
+
+	agent.poll()
+	agent.poll()
+	h.idle(a.ID)
+	if st := h.action(a.ID).State; st != events.StateReverted {
+		t.Fatalf("after the agent confirmed the release: %s", st)
+	}
+	inFlight("")
+	if l := h.list("history"); len(l) != 1 || l[0].InFlight != "" {
+		t.Errorf("a finished action has nothing in flight: %+v", l)
+	}
+}
+
+// TestIsolationAuditNamesApproverAndConfirmer pins the attribution rule of
+// the actions package documentation for a deferred driver: the approval
+// names the operator, the apply's outcome names the netagent (it confirmed,
+// refused, or stayed silent past the deadline), and the revert's outcome
+// names the operator who asked for it although the agent confirmed it. The
+// synchronous counterpart is TestAuditTrailIsCompleteAndAttributable.
+func TestIsolationAuditNamesApproverAndConfirmer(t *testing.T) {
+	h := agentHarnessWith(t, 300*time.Millisecond, 5*time.Second)
+	agent := newStubAgent(h)
+	agent.poll() // seen, but not polling: the first isolation goes unconfirmed
+
+	trail := func(id string) string {
+		t.Helper()
+		var entries []actions.AuditEntry
+		if status := h.get("/audit?action_id="+id, &entries); status != http.StatusOK {
+			t.Fatalf("GET /audit: %d", status)
+		}
+		var steps []string
+		for i := len(entries) - 1; i >= 0; i-- {
+			e := entries[i]
+			steps = append(steps, e.FromState+">"+e.ToState+":"+e.Actor)
+		}
+		return strings.Join(steps, " ")
+	}
+	isolate := func(mac, ip string) string {
+		t.Helper()
+		a := h.createPending(mac, ip, "x.example")
+		if status, _ := h.approve(a.ID, map[string]string{"action_type": events.ActionARPIsolate}); status != http.StatusOK {
+			t.Fatalf("approve %s: %d", a.ID, status)
+		}
+		return a.ID
+	}
+
+	silent := isolate("02:00:00:00:00:35", "192.168.1.35")
+	agent.run()
+	confirmed := isolate("02:00:00:00:00:36", "192.168.1.36")
+	if status, _ := h.revert(confirmed, "bob"); status != http.StatusOK {
+		t.Fatalf("revert: %d", status)
+	}
+	agent.mu.Lock()
+	agent.refuse[drivers.CommandIsolate] = "refused: target is the gateway"
+	agent.mu.Unlock()
+	refused := isolate("02:00:00:00:00:37", "192.168.1.37")
+
+	for id, want := range map[string]string{
+		silent:    ">pending:auto-policy pending>approved:alice approved>apply_failed:netagent",
+		confirmed: ">pending:auto-policy pending>approved:alice approved>active:netagent active>reverted:bob",
+		refused:   ">pending:auto-policy pending>approved:alice approved>apply_failed:netagent",
+	} {
+		if got := trail(id); got != want {
+			t.Errorf("%s:\n got %s\nwant %s", id, got, want)
+		}
+	}
+	if a := h.action(confirmed); a.ApprovedBy != testActor || a.RevertedBy != "bob" {
+		t.Errorf("approved_by %q reverted_by %q, want the operators", a.ApprovedBy, a.RevertedBy)
 	}
 }
 

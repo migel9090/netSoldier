@@ -41,11 +41,12 @@ func IsSystemActor(name string) bool {
 	return false
 }
 
-// Driver operations an action can have outstanding.
+// Driver operations an action can have outstanding. They are the wire's
+// in_flight values: Action serves Op as it is.
 const (
 	OpNone   = ""
-	OpApply  = "apply"
-	OpRevert = "revert"
+	OpApply  = events.OperationApply
+	OpRevert = events.OperationRevert
 )
 
 // Options configures retention and identity.
@@ -99,8 +100,14 @@ type Record struct {
 	LastSeenAt      time.Time
 }
 
-// Action returns the wire form.
-func (r Record) Action() events.EnforcementAction { return r.EnforcementAction }
+// Action returns the wire form. Its in_flight is the outstanding operation
+// (Op), so that an action whose revert is under way can be told from one
+// nobody is lifting; Op is the one place it is kept.
+func (r Record) Action() events.EnforcementAction {
+	a := r.EnforcementAction
+	a.InFlight = r.Op
+	return a
+}
 
 // ErrNotFound is returned for an unknown action id.
 var ErrNotFound = errors.New("action not found")
@@ -396,7 +403,11 @@ func (s *Store) put(tx *sql.Tx, r *Record, now time.Time) error {
 		}
 		r.ID = fmt.Sprintf("%s-%d", s.opts.IDPrefix, r.Seq)
 	}
-	body, err := json.Marshal(r.EnforcementAction)
+	// The body never carries in_flight: the op column is its source, and a
+	// copy in the body could only go stale.
+	stored := r.EnforcementAction
+	stored.InFlight = ""
+	body, err := json.Marshal(stored)
 	if err != nil {
 		return err
 	}

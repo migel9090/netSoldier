@@ -581,6 +581,47 @@ func TestOpsAreRecordedBeforeTheDriverRuns(t *testing.T) {
 	}
 }
 
+// TestWireInFlightIsTheOutstandingOp: the wire's in_flight is derived from
+// the op column on every read and never stored in the body, where a copy
+// would outlive the operation.
+func TestWireInFlightIsTheOutstandingOp(t *testing.T) {
+	c := newClock()
+	s := newStore(t, c)
+	r := pending(t, s, event("192.168.1.51", "evil.example"))
+	if r.Action().InFlight != "" {
+		t.Fatalf("pending: in_flight %q", r.Action().InFlight)
+	}
+	approved, _ := s.Approve(r.ID, "alice", "", c.Now().Add(time.Minute))
+	if approved.Action().InFlight != events.OperationApply {
+		t.Fatalf("approved: in_flight %q, want apply", approved.Action().InFlight)
+	}
+	s.Activate(r.ID, "alice", "")
+	got, _ := s.BeginOp(r.ID, OpRevert, "bob", "", c.Now().Add(time.Second), events.StateActive)
+	if a := got.Action(); a.InFlight != events.OperationRevert || a.State != events.StateActive {
+		t.Fatalf("revert under way: %s in_flight %q", a.State, a.InFlight)
+	}
+	if read, _ := s.Get(r.ID); read.Action().InFlight != events.OperationRevert {
+		t.Errorf("read back: in_flight %q", read.Action().InFlight)
+	}
+	// A record whose embedded copy says otherwise is written without it.
+	if _, err := s.mutate("test", r.ID, func(r *Record, _ time.Time) (*Transition, error) {
+		r.EnforcementAction.InFlight = OpApply
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.Reverted(r.ID, "bob", "")
+	read, _ := s.Get(r.ID)
+	if read.Action().InFlight != "" || read.EnforcementAction.InFlight != "" {
+		t.Errorf("finished: in_flight %q (body %q)", read.Action().InFlight, read.EnforcementAction.InFlight)
+	}
+	var body string
+	if err := s.db.QueryRow(`SELECT body FROM actions WHERE id = ?`, r.ID).Scan(&body); err != nil ||
+		strings.Contains(body, "in_flight") {
+		t.Errorf("stored body carries in_flight: %s (%v)", body, err)
+	}
+}
+
 func TestEnforcedOnAndInForce(t *testing.T) {
 	c := newClock()
 	s := newStore(t, c)
