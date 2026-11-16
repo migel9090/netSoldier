@@ -1,0 +1,11 @@
+# netSoldier lite: killswitch-controller's database (SQLite: actions, the
+# audit log, the sinkhole rule ledger). It is the only record of what is
+# enforced; the service does not start without it.
+[Unit]
+Description=netSoldier lite: volume killswitch-data
+
+[Volume]
+VolumeName=netsoldier-killswitch-data
+User=65532
+Group=65532
+Label=app=netsoldier

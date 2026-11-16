@@ -1,0 +1,10 @@
+# netSoldier lite: threat-intel-sync's indicator store (SQLite). Without it a
+# restart serves 503 until the feeds have answered again.
+[Unit]
+Description=netSoldier lite: volume threat-intel-sync-data
+
+[Volume]
+VolumeName=netsoldier-threat-intel-sync-data
+User=65532
+Group=65532
+Label=app=netsoldier

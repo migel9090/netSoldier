@@ -1,0 +1,92 @@
+# AdGuard Home configuration for the netSoldier lite profile (Podman).
+#
+# Rendered by deploy/podman/netsoldier-lite into the netsoldier-adguard-conf
+# volume on the first install; AdGuard owns the file afterwards (it saves
+# the sinkhole rules the killswitch adds into user_rules). Placeholders are
+# upper-case names between double at-signs; nothing here names an address of
+# anyone's network.
+#
+# - The single user is the one detection-engine and killswitch-controller
+#   sign in as; its bcrypt hash comes from the generated secret
+#   adguard-password. With users present AdGuard never starts its
+#   unauthenticated setup wizard.
+# - The admin API listens on 3000 inside the container and is reachable on
+#   the internal Podman network only; it is never published.
+# - DNS listens on 53 inside the container (the unit lowers
+#   ip_unprivileged_port_start in the container's own network namespace, so
+#   no capability is needed); the unit publishes it on HOST_IP:53.
+http:
+  address: 0.0.0.0:3000
+  session_ttl: 720h
+users:
+  - name: @@ADGUARD_USER@@
+    password: @@ADGUARD_PASSWORD_HASH@@
+auth_attempts: 5
+block_auth_min: 15
+language: ""
+theme: auto
+dns:
+  bind_hosts:
+    - 0.0.0.0
+  port: 53
+  anonymize_client_ip: false
+  ratelimit: 100
+  upstream_dns:
+@@UPSTREAM_DNS@@
+  fallback_dns: []
+  bootstrap_dns:
+@@BOOTSTRAP_DNS@@
+  upstream_mode: load_balance
+  cache_size: 4194304
+  cache_ttl_min: 0
+  cache_ttl_max: 86400
+  cache_optimistic: false
+  enable_dnssec: true
+  edns_client_subnet:
+    enabled: false
+  protection_enabled: true
+  filtering_enabled: true
+  blocking_mode: default
+  blocked_response_ttl: 10
+  use_private_ptr_resolvers: false
+  local_ptr_upstreams: []
+querylog:
+  enabled: true
+  file_enabled: true
+  interval: 168h
+  size_memory: 1000
+  ignored: []
+statistics:
+  enabled: true
+  interval: 24h
+  ignored: []
+filters:
+  - enabled: true
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
+    name: AdGuard DNS filter
+    id: 1
+whitelist_filters: []
+user_rules: []
+dhcp:
+  enabled: false
+clients:
+  runtime_sources:
+    whois: false
+    arp: false
+    rdns: false
+    dhcp: false
+    hosts: true
+  persistent: []
+log:
+  file: ""
+  max_backups: 0
+  max_size: 100
+  max_age: 3
+  compress: false
+  local_time: false
+  verbose: false
+os:
+  group: ""
+  user: ""
+  rlimit_nofile: 0
+schema_version: 29

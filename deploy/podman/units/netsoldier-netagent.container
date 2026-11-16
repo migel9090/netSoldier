@@ -1,0 +1,45 @@
+# netSoldier lite: netagent, the only container with raw network access
+# (ADR-0004, point 6).
+#
+# Host network, NET_RAW and nothing else; the image carries cap_net_raw as a
+# file capability for its non-root user. It listens on no port: it captures
+# ARP/DHCP/LLDP/mDNS/SSDP on the LAN interface and posts the raw frames to
+# device-inventory on the internal network (fixed address, NETAGENT_TOKEN).
+# ARP isolation stays off unless netsoldier.conf says ARP_ISOLATION=true.
+# Its health is a file, kept fresh every heartbeat, at
+# /run/netsoldier/netagent/health.json on the host.
+[Unit]
+Description=netSoldier lite: netagent (capture)
+PartOf=netsoldier.target
+After=netsoldier-device-inventory.service netsoldier-killswitch.service
+
+[Container]
+ContainerName=netsoldier-netagent
+Image=ghcr.io/migel9090/netagent:main
+Network=host
+ReadOnly=true
+DropCapability=ALL
+AddCapability=NET_RAW
+NoNewPrivileges=true
+Volume=/run/netsoldier/netagent:/run/netagent:z
+Environment=NETAGENT_ID=%H
+Environment=DEVICE_INVENTORY_URL=http://10.231.47.13:8081/agent/v1/frames
+Environment=NETAGENT_HEALTH_FILE=/run/netagent/health.json
+Environment=GOMEMLIMIT=48MiB
+Secret=netsoldier-netagent-token,type=env,target=NETAGENT_TOKEN
+# NETAGENT_INTERFACE (and the isolation settings when enabled), from
+# netsoldier.conf.
+EnvironmentFile=/etc/netsoldier/env/netagent.env
+PidsLimit=128
+PodmanArgs=--memory=64m --memory-swap=64m
+StopTimeout=20
+Label=app=netsoldier
+
+[Service]
+Environment=XDG_RUNTIME_DIR=/run/netsoldier/podman
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=netsoldier.target

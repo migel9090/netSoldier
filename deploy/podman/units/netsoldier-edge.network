@@ -1,0 +1,12 @@
+# netSoldier lite: the edge network.
+#
+# Only the containers that need it join this one, in addition to the
+# internal network: AdGuard Home (upstream DNS, and DNS published on the
+# LAN), threat-intel-sync (feed downloads) and the web UI (published on the
+# LAN). An ordinary NATed bridge; Podman picks a free subnet.
+[Unit]
+Description=netSoldier lite: edge network (egress and the two LAN-facing ports)
+
+[Network]
+NetworkName=netsoldier-edge
+Label=app=netsoldier

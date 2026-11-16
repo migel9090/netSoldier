@@ -1,0 +1,21 @@
+# netSoldier lite: the internal network every service API lives on.
+#
+# Internal: containers on it get no route out, and nothing on it is NATed,
+# forwarded to the LAN or published on a host port. DNS (aardvark-dns) stays
+# on: it gives the containers each other's names, and an internal network
+# only gets its bridge address on the host side when DNS is on. That
+# host-side address is how netagent, on the host network, reaches
+# device-inventory and the killswitch (ADR-0004, point 6).
+#
+# The subnet is netSoldier's own, not the LAN's. Change it (together with the
+# IP addresses in the .container units) only if it collides with a network
+# the host routes to.
+[Unit]
+Description=netSoldier lite: internal network (service APIs, no route out)
+
+[Network]
+NetworkName=netsoldier-internal
+Internal=true
+Subnet=10.231.47.0/24
+Gateway=10.231.47.1
+Label=app=netsoldier

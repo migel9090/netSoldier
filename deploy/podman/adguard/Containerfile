@@ -1,0 +1,23 @@
+# AdGuard Home for the lite profile, without the file capability.
+#
+# The upstream image marks its binary `cap_net_bind_service=eip`. A file
+# capability with the effective bit makes exec fail (EPERM) when the
+# capability is not in the container's bounding set, so the upstream image
+# only starts with NET_BIND_SERVICE added. The lite profile adds no
+# capability to anything but netagent (ADR-0004, point 6): this image is the
+# pinned upstream image with that one extended attribute removed (a plain
+# copy does not carry xattrs), run as a non-root user. DNS still listens on
+# 53 inside the container because the unit lowers
+# net.ipv4.ip_unprivileged_port_start in the container's own network
+# namespace.
+#
+# Built on the target by netsoldier-lite (seconds; nothing is compiled).
+# AdGuard Home is GPL-3.0.
+ARG ADGUARD_IMAGE=docker.io/adguard/adguardhome:v0.107.55@sha256:2979cc78a28aceb77f90980a5440578dbb7bc406dffe261e9ae402750193bde0
+FROM ${ADGUARD_IMAGE}
+
+RUN cp /opt/adguardhome/AdGuardHome /opt/adguardhome/AdGuardHome.nocap \
+ && mv -f /opt/adguardhome/AdGuardHome.nocap /opt/adguardhome/AdGuardHome \
+ && chmod 0755 /opt/adguardhome/AdGuardHome
+
+USER 65532:65532

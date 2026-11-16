@@ -1,0 +1,38 @@
+# netSoldier lite: device-inventory.
+#
+# Parses the frames netagent forwards (POST /agent/v1/frames, NETAGENT_TOKEN)
+# and serves the inventory to detection-engine and the web UI (every other
+# endpoint, DEVICE_API_KEY). Internal network only: no capability, no raw
+# socket, no published port. The fixed address is what netagent, on the host
+# network, posts to.
+[Unit]
+Description=netSoldier lite: device-inventory
+PartOf=netsoldier.target
+
+[Container]
+ContainerName=netsoldier-device-inventory
+Image=ghcr.io/migel9090/device-inventory:main
+Network=netsoldier-internal.network:ip=10.231.47.13
+ReadOnly=true
+DropCapability=ALL
+NoNewPrivileges=true
+Volume=netsoldier-device-inventory-data.volume:/var/lib/device-inventory
+Environment=LISTEN_ADDR=:8081
+Environment=DB_PATH=/var/lib/device-inventory/devices.db
+Environment=GOMEMLIMIT=72MiB
+Secret=netsoldier-device-api-key,type=env,target=DEVICE_API_KEY
+Secret=netsoldier-netagent-token,type=env,target=NETAGENT_TOKEN
+# ARP_SCAN_SUBNET when ARP_PROBE=true in netsoldier.conf.
+EnvironmentFile=/etc/netsoldier/env/device-inventory.env
+PidsLimit=256
+PodmanArgs=--memory=96m --memory-swap=96m
+Label=app=netsoldier
+
+[Service]
+Environment=XDG_RUNTIME_DIR=/run/netsoldier/podman
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=netsoldier.target
