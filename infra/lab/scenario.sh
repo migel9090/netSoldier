@@ -8,18 +8,27 @@
 #      hostname) within 60 s, learned through netagent
 #   3  the victim resolves a lab indicator through AdGuard: an alert with its
 #      MAC within 60 s, and a pending action in the killswitch
+#   3a as shipped (POLICY_AUTO_BLOCK=off, allowlist not empty) GET /policy
+#      says automation is off and why, step 3's action stays pending, and a
+#      signed detection that meets every other auto-block condition is
+#      queued for a human (withheld as auto_block_off)
 #   4  the operator approves (operator token + actor header): the block rule
 #      is in AdGuard and the name is sinkholed
 #   5  after the TTL the rule is gone and the name resolves again
-#   3b with an auto-block policy, a second victim's lookup is blocked
+#   3b with an auto-block policy (POLICY_AUTO_BLOCK=on, thresholds lowered
+#      to the lab list's 80/high), a second victim's lookup is blocked
 #      without a human (attested indicator at or above the policy's bar)
-#   7  a detection naming the gateway (by IP, or by MAC) is never enforced
+#   7  a detection naming the gateway (by IP, or by MAC) is never enforced,
+#      auto-block on; then the shipped policy is restored
 #   6  the audit trail (GET /audit and ClickHouse audit_log) holds every
 #      transition with the right actor
 #   8  the web UI answers /healthz and /login from the LAN, a sign-in with
-#      the generated password returns the session cookies, and nothing is
-#      published on the node's real address
-#   P  the NetworkPolicies admit the core edges and refuse the others
+#      the generated password returns the session cookies, /metrics on the
+#      published port is 404 and the metrics port is not reachable from the
+#      LAN, and nothing is published on the node's real address
+#   P  the NetworkPolicies admit the core edges and refuse the others; the
+#      web UI's metrics port answers the scraper's identity only while a
+#      policy admits it
 #
 # Prints PASS/FAIL per step with the line that decides it; exits 1 if any
 # step failed. Credentials are read from the cluster and travel only through
@@ -223,6 +232,54 @@ step3() {
   fi
 }
 
+# ── 3a. automatic blocking is off as shipped ───────────────────────────
+AUTO_OFF_REASON="auto-block disabled: POLICY_AUTO_BLOCK=off"
+
+ks_metric() { # SERIES: its value in the killswitch's /metrics, or "absent"
+  http node GET "$KS/metrics" | body | awk -v m="$1" '$1 == m {print $2; f = 1} END {if (!f) print "absent"}'
+}
+gt() { awk -v a="$1" -v b="$2" 'BEGIN {exit !(a + 0 > b + 0)}'; }
+
+step3a() {
+  local pol ok=1 w0 w1 r id withheld='killswitch_auto_block_withheld_total{reason="auto_block_off"}'
+  # A non-empty allowlist used to switch automation on by itself; now only
+  # POLICY_AUTO_BLOCK=on does, and the lab site ships it off.
+  pol=$(ks GET /policy | body | jq -c '{auto_block, auto_block_allowed, auto_block_disabled_reason, allowlist_entries, auto_min_confidence, auto_min_severity}')
+  say "site.env POLICY_AUTO_BLOCK=$(site POLICY_AUTO_BLOCK), ALLOWLIST_IPS=$(site ALLOWLIST_IPS), ALLOWLIST_MACS=$(site ALLOWLIST_MACS)"
+  say "GET /policy: $pol"
+  say "gauges: auto_block_configured=$(ks_metric killswitch_auto_block_configured) auto_block_enabled=$(ks_metric killswitch_auto_block_enabled) (the held-back alert needs 1 and 0)"
+  [[ $(jq -r .auto_block <<<"$pol") == off && $(jq -r .auto_block_allowed <<<"$pol") == false &&
+    $(jq -r .auto_block_disabled_reason <<<"$pol") == "$AUTO_OFF_REASON" && $(jq -r .allowlist_entries <<<"$pol") -gt 0 ]] || ok=0
+  if [[ -n ${PENDING_ID:-} ]]; then
+    ACTION=$(ks GET "/actions/$PENDING_ID" | body)
+    say "step 3's action now: $(jq -c '{id, state, auto_approved, policy_rule}' <<<"$ACTION")"
+    [[ $(jq -r .state <<<"$ACTION") == pending && $(jq -r .auto_approved <<<"$ACTION") == false ]] || ok=0
+  else
+    say "no action from step 3 to look at"; ok=0
+  fi
+  # The lab's indicators sit below the default auto thresholds, so step 3
+  # alone would stay pending either way. A detection that clears every other
+  # auto-block condition (attested, confidence 95, critical, an unprotected
+  # device) shows that the switch is what holds it back.
+  w0=$(ks_metric "$withheld")
+  r=$(evaluate_signed "${V1_IP:-10.77.0.123}" "$V1_MAC" auto-off.netsoldier.test | body)
+  w1=$(ks_metric "$withheld")
+  id=$(jq -r '.action.id // empty' <<<"$r")
+  say "signed detection for $V1 (attested, 95, critical) -> $(jq -c '{decision: .decision.Action, withheld: .decision.Withheld, reason: .decision.Reason, state: .action.state}' <<<"$r")"
+  say "auto_block_withheld_total{reason=auto_block_off}: $w0 -> $w1"
+  [[ $(jq -r .decision.Action <<<"$r") == pending && $(jq -r .action.state <<<"$r") == pending &&
+    $(jq -r .decision.Reason <<<"$r") == *"$AUTO_OFF_REASON; every other auto-block condition held"* ]] || ok=0
+  [[ $w0 != absent && $w1 != absent ]] && gt "$w1" "$w0" || ok=0
+  if [[ -n $id ]]; then
+    say "$id rejected -> $(ks POST "/actions/$id/reject" '{"reason":"lab scenario: automation-off check"}' | body | jq -c '{state, rejected_by}')"
+  fi
+  if ((ok)); then
+    pass 3a "as shipped: auto_block=off ($AUTO_OFF_REASON) with $(jq -r .allowlist_entries <<<"$pol") allowlist entries; step 3 pending; an otherwise auto-blockable detection queued and counted as withheld"
+  else
+    fail 3a "automation is not off as shipped, or not reported as such"
+  fi
+}
+
 # ── 4. operator approval -> rule in AdGuard, name sinkholed ────────────
 step4() {
   local wrong r code
@@ -265,20 +322,45 @@ step5() {
 }
 
 # ── 3b. auto-block of an attested indicator ────────────────────────────
-set_auto_policy() {
-  if [[ $1 == on ]]; then
-    k -n "$NS" set env deploy/killswitch-controller POLICY_AUTO_CONFIDENCE=80 POLICY_AUTO_SEVERITY=high >/dev/null
-  else
-    k -n "$NS" set env deploy/killswitch-controller POLICY_AUTO_CONFIDENCE- POLICY_AUTO_SEVERITY- >/dev/null
-  fi
+# The auto variant switches automation on (POLICY_AUTO_BLOCK=on) and lowers
+# the thresholds to the lab list's 80/high; `auto_policy off` puts back
+# exactly the POLICY_AUTO_BLOCK entry that was deployed (the site's
+# configMapKeyRef) and drops the thresholds. Not called in a subshell: it
+# keeps what it saved in AUTO_ENV_SAVED.
+AUTO_POLICY=shipped
+AUTO_ENV_SAVED=
+KS_AUTO_ENV='[.spec.template.spec.containers[] | select(.name == "killswitch-controller") | .env[]? | select(.name == "POLICY_AUTO_BLOCK")][0]'
+
+auto_policy() { # on|off
+  local env patch
+  case $1 in
+    on)
+      [[ $AUTO_POLICY == on ]] && return 0
+      AUTO_ENV_SAVED=$(k -n "$NS" get deploy/killswitch-controller -o json |
+        jq -c "$KS_AUTO_ENV"' // {name: "POLICY_AUTO_BLOCK", "$patch": "delete"}')
+      env='[{"name":"POLICY_AUTO_BLOCK","value":"on","valueFrom":null},{"name":"POLICY_AUTO_CONFIDENCE","value":"80"},{"name":"POLICY_AUTO_SEVERITY","value":"high"}]'
+      ;;
+    off)
+      [[ $AUTO_POLICY == on ]] || return 0
+      env=$(jq -c '[if has("$patch") then . elif has("valueFrom") then . + {value: null} else . + {valueFrom: null} end,
+        {name: "POLICY_AUTO_CONFIDENCE", "$patch": "delete"}, {name: "POLICY_AUTO_SEVERITY", "$patch": "delete"}]' <<<"$AUTO_ENV_SAVED")
+      ;;
+  esac
+  patch=$(jq -cn --argjson e "$env" '{spec: {template: {spec: {containers: [{name: "killswitch-controller", env: $e}]}}}}')
+  k -n "$NS" patch deploy/killswitch-controller --type=strategic -p "$patch" >/dev/null ||
+    { say "could not switch the killswitch policy $1"; return 1; }
   k -n "$NS" rollout status deploy/killswitch-controller --timeout=180s >/dev/null
-  k -n "$NS" logs deploy/killswitch-controller | jq -r 'select(.msg == "policy loaded") |
-    "auto_confidence=\(.auto_confidence) auto_severity=\(.auto_severity) allowlist_entries=\(.allowlist_entries) auto_block_allowed=\(.auto_block_allowed)"' | tail -1
+  AUTO_POLICY=$1
+  say "killswitch policy $1: $(k -n "$NS" logs deploy/killswitch-controller | jq -r 'select(.msg == "policy loaded") |
+    "auto_block=\(.auto_block) auto_block_allowed=\(.auto_block_allowed) auto_confidence=\(.auto_confidence) auto_severity=\(.auto_severity) allowlist_entries=\(.allowlist_entries)"' | tail -1)"
+  say "POLICY_AUTO_BLOCK in the Deployment: $(k -n "$NS" get deploy/killswitch-controller -o json | jq -c "$KS_AUTO_ENV")"
 }
 
 step3b() {
-  local t0 t1
-  say "killswitch policy for the auto variant: $(set_auto_policy on)"
+  local t0 t1 pol
+  auto_policy on
+  pol=$(ks GET /policy | body | jq -c '{auto_block, auto_block_allowed, auto_block_disabled_reason}')
+  say "GET /policy: $pol; gauges: auto_block_configured=$(ks_metric killswitch_auto_block_configured) auto_block_enabled=$(ks_metric killswitch_auto_block_enabled)"
   lab_ssh sudo netsoldier-lab-lan release "$V2" >/dev/null
   t1=$(now)
   V2_IP=$(lease "$V2")
@@ -290,7 +372,7 @@ step3b() {
     say "action after $(($(now) - t0))s: $(jq -c '{id, state, auto_approved, approved_by, target_mac, policy_rule}' <<<"$ACTION")"
     if [[ $(jq -r .auto_approved <<<"$ACTION") == true && $(jq -r .target_mac <<<"$ACTION") == "$V2_MAC" ]] &&
       retry 15 resolves_to "$V2" "$D_AUTO" 0.0.0.0; then
-      pass 3b "auto-blocked without approval ($(jq -r .approved_by <<<"$ACTION")); $V2 now gets $D_AUTO -> 0.0.0.0"
+      pass 3b "POLICY_AUTO_BLOCK=on: auto-blocked without approval ($(jq -r .approved_by <<<"$ACTION")); $V2 now gets $D_AUTO -> 0.0.0.0"
     else
       fail 3b "action not auto-approved or name not sinkholed"
     fi
@@ -318,9 +400,10 @@ print(hmac.new(os.environ["WEBHOOK_SECRET"].encode(), sys.stdin.buffer.read(), h
 }
 
 step7() {
-  local t0 by_ip by_mac nothing ok=1
+  local t0 by_ip by_mac nothing ok=1 pol
+  auto_policy on # still on after 3b; switched on here when 7 runs without it
   t0=$(now)
-  say "the gateway ($GATEWAY_IP) resolves $D_GW -> $(resolve "$GW_NS" "$D_GW") (auto policy still on)"
+  say "the gateway ($GATEWAY_IP) resolves $D_GW -> $(resolve "$GW_NS" "$D_GW") (auto policy on)"
   if retry 60 alert_for "$D_GW" "$GATEWAY_IP"; then
     say "alert: $(jq -c '{id, client_ip, client_mac, confidence}' <<<"$ALERT")"
     sleep 15 # the outbox delivers within seconds; give it more
@@ -337,12 +420,17 @@ step7() {
   say "signed event naming the gateway's MAC -> $by_mac"
   [[ $(jq -r .decision <<<"$by_ip") == ignore && $(jq -r .action <<<"$by_ip") == null ]] || ok=0
   [[ $(jq -r .decision <<<"$by_mac") == ignore && $(jq -r .action <<<"$by_mac") == null ]] || ok=0
-  if ((ok)); then
-    pass 7 "gateway detections (lookup, by IP, by MAC; confidence 95, auto-block on) -> ignore, no action"
-  else
-    fail 7 "a detection naming the gateway produced an action or was not seen"
+  auto_policy off
+  pol=$(ks GET /policy | body | jq -c '{auto_block, auto_block_allowed, auto_block_disabled_reason}')
+  say "restored: GET /policy $pol"
+  if [[ $(jq -r .auto_block <<<"$pol") != off || $(jq -r .auto_block_disabled_reason <<<"$pol") != "$AUTO_OFF_REASON" ]]; then
+    say "the shipped policy (POLICY_AUTO_BLOCK=off) is not back"; ok=0
   fi
-  say "killswitch policy restored: $(set_auto_policy off)"
+  if ((ok)); then
+    pass 7 "gateway detections (lookup, by IP, by MAC; confidence 95, auto-block on) -> ignore, no action; shipped policy restored"
+  else
+    fail 7 "a detection naming the gateway produced an action or was not seen, or the shipped policy is not back"
+  fi
 }
 
 # ── 6. audit trail ─────────────────────────────────────────────────────
@@ -419,63 +507,147 @@ step8() {
   say "cookies: $cookies"
   [[ $(status <<<"$hz") == 200 && $(status <<<"$login") == 200 && $bad == 401 && $(status <<<"$good") == 200 ]] || ok=0
   [[ $cookies == *netsoldier_session* && $cookies == *netsoldier_csrf* ]] || ok=0
+  # The counters are on the metrics listener (9464), which has no hostPort:
+  # the published UI port answers /metrics with 404, and the node's LAN
+  # address has nothing on 9464.
+  local m_ui m_port
+  m_ui=$(http "$V1" GET "$ORIGIN/metrics" | status)
+  m_port=$(lab_ssh sudo ip netns exec "$V1" "$HTTP" <<<"{\"method\": \"GET\", \"url\": \"http://$NODE_LAN_IP:9464/metrics\", \"timeout\": 5}" | status)
+  say "$V1 -> GET $ORIGIN/metrics: $m_ui; GET http://$NODE_LAN_IP:9464/metrics: $m_port"
+  [[ $m_ui == 404 && $m_port == error:* ]] || ok=0
   # Nothing on the node's real address: the published ports are bound to
   # the lab LAN address only.
   real=$(curl -s -o /dev/null -m 4 -w '%{http_code}' "http://$(lab_target | awk '{print $2}'):3000/healthz" || true)
   say "from this workstation (real LAN) -> http://<node>:3000/healthz: ${real:-000} (000 = no answer)"
   [[ ${real:-000} == 000 ]] || ok=0
+  real=$(curl -s -o /dev/null -m 4 -w '%{http_code}' "http://$(lab_target | awk '{print $2}'):9464/metrics" || true)
+  say "from this workstation (real LAN) -> http://<node>:9464/metrics: ${real:-000}"
+  [[ ${real:-000} == 000 ]] || ok=0
   local dns
   dns=$(dns_answers "$(lab_target | awk '{print $2}')")
   say "from this workstation (real LAN) -> DNS query to <node>:53: $dns"
   [[ $dns == "no answer" ]] || ok=0
-  if ((ok)); then pass 8 "UI on $ORIGIN: /healthz 200, /login 200, sign-in 200 with session+csrf cookies; not on the real LAN"; else fail 8 "web UI check failed"; fi
+  if ((ok)); then pass 8 "UI on $ORIGIN: /healthz 200, /login 200, sign-in 200 with session+csrf cookies, /metrics 404, :9464 unreachable from the LAN; not on the real LAN"; else fail 8 "web UI check failed"; fi
 }
 
 # ── P. NetworkPolicies admit the real edges and nothing else ───────────
 # Throw-away pods wearing a workload's name label (but not part-of, so no
 # Service picks them up) try each port; the policies select by that label.
-probe_pod() { # NAME LABEL|-
+# The scraper's stand-in is a pod labelled like Prometheus in the
+# observability namespace: the identity the scrape policy admits.
+PROBE_NS=observability
+SCRAPE_POLICY=allow-core-metrics-scrape
+probe_pod() { # NAMESPACE NAME LABEL|-
   local labels='{}'
-  [[ $2 != - ]] && labels=$(jq -cn --arg n "$2" '{"app.kubernetes.io/name": $n}')
-  k -n "$NS" run "$1" --image=docker.io/library/busybox:1.37.0 --restart=Never \
+  [[ $3 != - ]] && labels=$(jq -cn --arg n "$3" '{"app.kubernetes.io/name": $n}')
+  k -n "$1" run "$2" --image=docker.io/library/busybox:1.37.0 --restart=Never \
     --labels="$(jq -r 'to_entries | map("\(.key)=\(.value)") | join(",")' <<<"$labels")" \
-    --overrides='{"spec":{"automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"'"$1"'","image":"docker.io/library/busybox:1.37.0","command":["sleep","300"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' >/dev/null
+    --overrides='{"spec":{"automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"'"$2"'","image":"docker.io/library/busybox:1.37.0","command":["sleep","300"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' >/dev/null
 }
-reach() { k -n "$NS" exec "$1" -- nc -z -w 3 "$2" "$3" >/dev/null 2>&1 && echo open || echo closed; }
-
-step_policies() {
-  local ch ks inv det ti ag ok=1 got want line
-  ch=$(svc "$NS" clickhouse) ks=$(svc "$NS" killswitch-controller) inv=$(svc "$NS" device-inventory)
-  det=$(svc "$NS" detection-engine) ti=$(svc "$NS" threat-intel-sync) ag=$(svc dns adguard-web)
-  probe_pod probe-web-ui web-ui
-  probe_pod probe-detection detection-engine
-  probe_pod probe-nobody -
-  k -n "$NS" wait --for=condition=Ready pod/probe-web-ui pod/probe-detection pod/probe-nobody --timeout=120s >/dev/null
-  # pod target port expected
+# reach POD IP PORT: POD is NAME (namespace netsoldier) or NAMESPACE/NAME.
+reach() {
+  local ns=$NS pod=$1
+  [[ $pod == */* ]] && ns=${pod%%/*} pod=${pod#*/}
+  k -n "$ns" exec "$pod" -- nc -z -w 3 "$2" "$3" >/dev/null 2>&1 && echo open || echo closed
+}
+reach_open() { [[ $(reach "$@") == open ]]; }
+# probe_table: "pod name ip port want" lines on stdin; appends to LINE and
+# clears OK on any surprise. An `open` is retried for a few seconds: a
+# policy applied a moment ago may not be enforced yet.
+probe_table() {
+  local pod name ip port want got
   while read -r pod name ip port want; do
     got=$(reach "$pod" "$ip" "$port")
-    line+="$pod->$name:$port=$got "
-    [[ $got == "$want" ]] || { ok=0; say "UNEXPECTED $pod -> $name:$port $got (want $want)"; }
-  done <<EOF
+    if [[ $got != "$want" && $want == open ]] && retry 15 reach_open "$pod" "$ip" "$port"; then
+      got=open
+    fi
+    LINE+="$pod->$name:$port=$got "
+    PROBES=$((PROBES + 1))
+    [[ $got == "$want" ]] || { OK=0; say "UNEXPECTED $pod -> $name:$port $got (want $want)"; }
+  done
+}
+# The scrape policy exactly as the profiles that run Prometheus ship it
+# (base/network-policies/extras), in the netsoldier namespace.
+scrape_policy() {
+  "$LAB_VENV/bin/python" -I -c '
+import sys, yaml
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if d and d["kind"] == "NetworkPolicy" and d["metadata"]["name"] == sys.argv[2]:
+        d["metadata"]["namespace"] = sys.argv[3]
+        d["metadata"].setdefault("labels", {})["netsoldier.io/lab-scenario"] = "probe"
+        yaml.safe_dump(d, sys.stdout)' \
+    "$REPO_DIR/deploy/kustomize/base/network-policies/extras/core-edges.yaml" "$SCRAPE_POLICY" "$NS"
+}
+
+step_policies() {
+  local ch ks inv det ti ag ui made_ns=0 metrics
+  LINE="" OK=1 PROBES=0
+  ch=$(svc "$NS" clickhouse) ks=$(svc "$NS" killswitch-controller) inv=$(svc "$NS" device-inventory)
+  det=$(svc "$NS" detection-engine) ti=$(svc "$NS" threat-intel-sync) ag=$(svc dns adguard-web)
+  ui=$(svc "$NS" web-ui)
+  if ! k get namespace "$PROBE_NS" >/dev/null 2>&1; then
+    k create namespace "$PROBE_NS" >/dev/null && made_ns=1
+    k label namespace "$PROBE_NS" netsoldier.io/lab-scenario=probe \
+      pod-security.kubernetes.io/enforce=restricted >/dev/null
+  fi
+  probe_pod "$NS" probe-web-ui web-ui
+  probe_pod "$NS" probe-detection detection-engine
+  probe_pod "$NS" probe-nobody -
+  probe_pod "$PROBE_NS" probe-scraper prometheus
+  k -n "$NS" wait --for=condition=Ready pod/probe-web-ui pod/probe-detection pod/probe-nobody --timeout=120s >/dev/null
+  k -n "$PROBE_NS" wait --for=condition=Ready pod/probe-scraper --timeout=120s >/dev/null
+  # pod target ip port expected
+  probe_table <<EOF
 probe-web-ui killswitch $ks 8084 open
 probe-web-ui device-inventory $inv 8081 open
 probe-web-ui detection-engine $det 8080 open
 probe-web-ui clickhouse $ch 8123 closed
 probe-web-ui adguard-api $ag 3000 closed
 probe-web-ui threat-intel $ti 8083 closed
+probe-web-ui web-ui-metrics $ui 9464 closed
 probe-detection clickhouse $ch 8123 open
 probe-detection clickhouse-native $ch 9000 closed
 probe-detection adguard-api $ag 3000 open
 probe-detection threat-intel $ti 8083 open
 probe-detection killswitch $ks 8084 open
+probe-detection web-ui-metrics $ui 9464 closed
 probe-nobody killswitch $ks 8084 closed
 probe-nobody device-inventory $inv 8081 closed
 probe-nobody clickhouse $ch 8123 closed
 probe-nobody adguard-api $ag 3000 closed
+probe-nobody web-ui-metrics $ui 9464 closed
+$PROBE_NS/probe-scraper web-ui-metrics $ui 9464 closed
+$PROBE_NS/probe-scraper web-ui $ui 3000 closed
 EOF
-  say "$line"
+  say "$LINE"
+  # The core profile runs no Prometheus, so nothing admits the scraper
+  # above. With the scrape policy the observability profiles ship, the same
+  # pod reaches the metrics port, and still not the UI port.
+  LINE=""
+  if scrape_policy | k apply -f - >/dev/null; then
+    say "applied $SCRAPE_POLICY from base/network-policies/extras/core-edges.yaml, ports $(k -n "$NS" get networkpolicy "$SCRAPE_POLICY" -o json | jq -c '[.spec.ingress[].ports[].port]')"
+    probe_table <<EOF
+$PROBE_NS/probe-scraper web-ui-metrics $ui 9464 open
+$PROBE_NS/probe-scraper web-ui $ui 3000 closed
+probe-nobody web-ui-metrics $ui 9464 closed
+probe-web-ui web-ui-metrics $ui 9464 closed
+EOF
+    say "$LINE"
+    metrics=$(k -n "$PROBE_NS" exec probe-scraper -- wget -q -T 5 -O - "http://$ui:9464/metrics" 2>&1)
+    say "scraper -> GET http://web-ui:9464/metrics: $(grep -c '^# TYPE' <<<"$metrics") metric families ($(grep '^# TYPE' <<<"$metrics" | awk '{print $3}' | head -n 3 | paste -sd, -), ...)"
+    grep -q '^# TYPE netsoldier_webui_' <<<"$metrics" || { OK=0; say "the metrics port did not answer with the web UI's counters"; }
+    k -n "$NS" delete networkpolicy "$SCRAPE_POLICY" --ignore-not-found >/dev/null
+  else
+    OK=0; say "could not apply $SCRAPE_POLICY"
+  fi
   k -n "$NS" delete pod probe-web-ui probe-detection probe-nobody --wait=false >/dev/null
-  if ((ok)); then pass P "15 probes: every allowed edge open, every other one closed"; else fail P "a NetworkPolicy admits too much or too little"; fi
+  k -n "$PROBE_NS" delete pod probe-scraper --wait=false >/dev/null
+  ((made_ns)) && k delete namespace "$PROBE_NS" --wait=false >/dev/null
+  if ((OK)); then
+    pass P "$PROBES probes: every allowed edge open, every other one closed; the metrics port answers the scraper only while the scrape policy admits it"
+  else
+    fail P "a NetworkPolicy admits too much or too little"
+  fi
 }
 
 memory() {
@@ -487,14 +659,17 @@ memory() {
 # `scenario.sh` runs everything in order; `scenario.sh P 8` only those steps
 # (the ones that need an earlier step's action cannot run alone).
 STEPS=("$@")
-((${#STEPS[@]})) || STEPS=(1 2 3 4 5 3b 7 6 8 P)
+((${#STEPS[@]})) || STEPS=(1 2 3 3a 4 5 3b 7 6 8 P)
 for s in "${STEPS[@]}"; do
   case $s in
     P) step_policies ;;
-    1 | 2 | 3 | 4 | 5 | 3b | 6 | 7 | 8) "step$s" ;;
+    1 | 2 | 3 | 3a | 4 | 5 | 3b | 6 | 7 | 8) "step$s" ;;
     *) lab_die "unknown step $s" ;;
   esac
 done
+# A run that switched automatic blocking on and stopped short of step 7
+# (`scenario.sh 3b`, say) still leaves the shipped policy behind.
+auto_policy off
 memory
 
 echo
