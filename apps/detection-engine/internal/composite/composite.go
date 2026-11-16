@@ -142,12 +142,13 @@ func (c *Correlator) Observe(a detection.Alert) *detection.Alert {
 	c.clients[client] = sigs
 	c.evict(now)
 
-	classes := distinctClasses(sigs)
+	effective := onePerIndicator(sigs)
+	classes := distinctClasses(effective)
 	if len(classes) < 2 {
 		return nil
 	}
 
-	comp := c.build(a, sigs, classes, now)
+	comp := c.build(a, effective, classes, now)
 	if comp.Confidence < minEmitConfidence {
 		return nil
 	}
@@ -371,6 +372,71 @@ func upsert(sigs []signal, s signal) []signal {
 		}
 	}
 	return append(sigs, s)
+}
+
+// onePerIndicator collapses known-bad signals (feed matches, signatures)
+// that attest the same indicator into the strongest of them, whichever
+// sensor reported each. noisy-OR assumes its inputs are independent; two
+// sensors reporting one feed indicator are one piece of evidence seen twice,
+// and counting it twice took a confidence-75 feed match that should wait for
+// a human to 94/critical.
+//
+// Heuristic signals are never collapsed, not into a known-bad signal and not
+// into each other, even when they name the same indicator. "A feed lists
+// this domain" and "this device contacts it on a schedule" are independent
+// kinds of evidence — reputation and behaviour — and their agreeing is
+// exactly the corroboration a two-signal auto-block gate asks for. Signals
+// without an indicator stand on their own.
+func onePerIndicator(sigs []signal) []signal {
+	out := make([]signal, 0, len(sigs))
+	at := make(map[string]int, len(sigs))
+	for _, s := range sigs {
+		key := ""
+		if events.IsKnownBadSignal(s.class) {
+			key = indicatorKey(s.alert)
+		}
+		if key == "" {
+			out = append(out, s)
+			continue
+		}
+		i, dup := at[key]
+		if !dup {
+			at[key] = len(out)
+			out = append(out, s)
+			continue
+		}
+		if s.confidence > out[i].confidence {
+			out[i] = s
+		}
+	}
+	return out
+}
+
+// indicatorKey is the canonical "type:value" of the indicator an alert's
+// signal attests, or "" when it attests none. An untyped value is not
+// compared: "x" could be a name, an address or a rule.
+func indicatorKey(a detection.Alert) string {
+	value, typ := a.MatchedIoC, a.IoCType
+	if len(a.Signals) > 0 {
+		value, typ = a.Signals[0].Indicator, a.Signals[0].IndicatorType
+	}
+	value = strings.TrimSpace(value)
+	if value == "" || typ == "" {
+		return ""
+	}
+	switch typ {
+	case events.IndicatorDomain:
+		if d, ok := events.CanonicalDomain(value); ok {
+			value = d
+		}
+	case events.IndicatorIP:
+		if ip, ok := events.CanonicalIP(value); ok {
+			value = ip
+		}
+	default:
+		value = strings.ToLower(value)
+	}
+	return strings.ToLower(typ) + ":" + value
 }
 
 func bestPerClass(sigs []signal) map[string]signal {

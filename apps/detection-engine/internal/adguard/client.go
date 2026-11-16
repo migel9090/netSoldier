@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -24,8 +26,7 @@ type QueryLogEntry struct {
 }
 
 type queryLogResponse struct {
-	Data   []QueryLogEntry `json:"data"`
-	Oldest string          `json:"oldest"`
+	Data []QueryLogEntry `json:"data"`
 }
 
 type Client struct {
@@ -44,28 +45,53 @@ func NewClient(baseURL, user, password string) *Client {
 	}
 }
 
-func (c *Client) QueryLog(ctx context.Context, limit int) ([]QueryLogEntry, error) {
-	url := fmt.Sprintf("%s/control/querylog?limit=%d", c.baseURL, limit)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// QueryLogPage is one page of the querylog, newest first.
+type QueryLogPage struct {
+	Entries []QueryLogEntry
+	// Oldest is the time of the oldest entry on the page, the older_than of
+	// the next page. Zero when the page is empty.
+	Oldest time.Time
+}
+
+// QueryLog returns up to limit entries older than olderThan (the newest ones
+// when olderThan is zero), newest first. Paging with the previous page's
+// Oldest walks back through the whole log, which is how AdGuard's own UI
+// reads it.
+func (c *Client) QueryLog(ctx context.Context, olderThan time.Time, limit int) (QueryLogPage, error) {
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(limit))
+	if !olderThan.IsZero() {
+		q.Set("older_than", olderThan.UTC().Format(time.RFC3339Nano))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/control/querylog?"+q.Encode(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return QueryLogPage{}, fmt.Errorf("create request: %w", err)
 	}
 	req.SetBasicAuth(c.user, c.password)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request: %w", err)
+		return QueryLogPage{}, fmt.Errorf("request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status: %d", resp.StatusCode)
+		return QueryLogPage{}, fmt.Errorf("unexpected status: %d", resp.StatusCode)
 	}
 
 	var result queryLogResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
+		return QueryLogPage{}, fmt.Errorf("decode: %w", err)
 	}
 
-	return result.Data, nil
+	// The next page starts below the oldest entry actually returned. The
+	// response's own "oldest" is not used: it is missing from some releases
+	// and stubs, and a value older than what was returned would skip entries.
+	page := QueryLogPage{Entries: result.Data}
+	for _, e := range result.Data {
+		if page.Oldest.IsZero() || e.Time.Before(page.Oldest) {
+			page.Oldest = e.Time
+		}
+	}
+	return page, nil
 }

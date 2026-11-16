@@ -1,5 +1,7 @@
 // Package store is detection-engine's local state: the alert history served
-// by GET /alerts and the outbox of detections still owed to the killswitch.
+// by GET /alerts, the outbox of detections still owed to the killswitch, how
+// far each input (the AdGuard querylog, each sensor table) has been read, and
+// which input records have already made a detection.
 //
 // It is one SQLite file (pure Go, modernc.org/sqlite) on the pod's volume.
 // Both halves used to live in memory — a 1000-entry ring and a 64-slot
@@ -70,6 +72,18 @@ var schema = []string{
 	CREATE INDEX outbox_due ON outbox (state, sev_rank DESC, seq);
 	CREATE INDEX outbox_agg ON outbox (agg_key, enqueued_at);
 	CREATE INDEX outbox_age ON outbox (state, enqueued_at);`,
+
+	`CREATE TABLE ingest_cursors (
+		source     TEXT PRIMARY KEY,
+		position   BLOB NOT NULL,    -- the reader's own encoding
+		updated_at INTEGER NOT NULL  -- unix ms, server clock
+	);
+
+	CREATE TABLE ingest_records (
+		record  BLOB PRIMARY KEY,    -- digest of (input, record)
+		seen_at INTEGER NOT NULL     -- unix ms, server clock
+	) WITHOUT ROWID;
+	CREATE INDEX ingest_records_age ON ingest_records (seen_at);`,
 }
 
 // Store is an open local database.

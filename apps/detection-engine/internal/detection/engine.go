@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -18,12 +20,38 @@ import (
 )
 
 const (
-	// queryLogBatch is how many querylog entries one poll pulls. Entries
-	// older than the batch are dropped by AdGuard's ring buffer before the
-	// next poll, so a saturated batch means missed detections — tracked by
-	// pollBatchSaturated and alerted on.
-	queryLogBatch = 300
+	// DefaultQueryLogPageSize is how many entries one querylog request asks
+	// for.
+	DefaultQueryLogPageSize = 500
+	// DefaultQueryLogMaxPages bounds one poll (QUERYLOG_MAX_PAGES). A poll
+	// pages back until it reaches what the previous poll already checked;
+	// the bound only matters when a device floods the resolver, and hitting
+	// it is reported as a gap.
+	DefaultQueryLogMaxPages = 40
+	// DefaultQueryLogOverlap is how far behind the newest checked entry a
+	// poll keeps looking (QUERYLOG_OVERLAP). AdGuard stamps an entry with the
+	// time the query arrived but logs it when the answer is back, so a slow
+	// lookup — and a C2 domain's own name server can be made slow on purpose
+	// — appears after entries that are newer than it. The overlap must cover
+	// AdGuard's upstream timeout (10 s by default).
+	DefaultQueryLogOverlap = 15 * time.Second
+	// DefaultLookback is how far back reading starts when there is no stored
+	// position, and the oldest stored position that is honoured
+	// (INGEST_LOOKBACK). Older than that, a detection is history rather than
+	// something to act on.
+	DefaultLookback = time.Hour
+
+	// queryLogCursor names the querylog's position in the cursor store.
+	queryLogCursor = "adguard_querylog"
+	// maxSeenEntries caps the de-duplication memory of the overlap window.
+	maxSeenEntries = 200000
 )
+
+// CursorStore persists how far an input has been read (*store.Cursors).
+type CursorStore interface {
+	Load(source string) (position []byte, updated time.Time, ok bool, err error)
+	Save(source string, position []byte) error
+}
 
 // Severity vocabulary shared with libs/events and the killswitch policy.
 const (
@@ -86,16 +114,32 @@ var (
 		Name:      "poll_errors_total",
 		Help:      "Total AdGuard querylog poll errors.",
 	})
-	// A poll that fills its batch means the querylog produced at least as
-	// many entries as we asked for, so older unseen entries were left
-	// behind and are gone by the next poll. Silent detection loss is the
-	// worst failure mode a monitor has: make it a number someone can alert
-	// on (step 124).
+	queryLogPages = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "detection_engine",
+		Name:      "querylog_pages_total",
+		Help:      "AdGuard querylog pages read.",
+	})
+	// A gap is a stretch of the querylog no poll checked: the page bound
+	// was reached before the entries the previous poll had already seen.
+	// Every query in it may have been a detection. Silent detection loss is
+	// the worst failure mode a monitor has, so it is a number to alert on.
+	queryLogGaps = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "detection_engine",
+		Name:      "querylog_gaps_total",
+		Help:      "Polls that stopped at the page bound, leaving querylog entries unchecked.",
+	})
+	// The same event under the name the existing DetectionQueryLogSaturated
+	// alert rule reads.
 	pollBatchSaturated = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "detection_engine",
 		Name:      "poll_batch_saturated_total",
-		Help:      "Polls that returned a full batch, meaning querylog entries were likely missed.",
+		Help:      "Same as querylog_gaps_total; kept for existing alert rules.",
 	})
+	cursorClamped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "detection_engine",
+		Name:      "ingest_cursor_clamped_total",
+		Help:      "Starts whose stored read position was older than INGEST_LOOKBACK, so the records in between were skipped.",
+	}, []string{"source"})
 	macResolutionFailures = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "detection_engine",
 		Name:      "mac_resolution_failures_total",
@@ -108,7 +152,7 @@ var (
 
 func init() {
 	prometheus.MustRegister(queriesChecked, alertsGenerated, threatlistDomains, pollErrors,
-		pollBatchSaturated, macResolutionFailures)
+		queryLogPages, queryLogGaps, pollBatchSaturated, cursorClamped, macResolutionFailures)
 	p := defaultIDPrefix()
 	idPrefix.Store(&p)
 }
@@ -122,6 +166,14 @@ func init() {
 func NewID() string {
 	return events.FormatDetectionID(*idPrefix.Load(), alertCounter.Add(1))
 }
+
+// Record names the input record a detection comes from: source is the input
+// ("adguard", a sensor table), key the record within it — and, when one
+// record can make several detections, which one. Inputs are re-read on
+// purpose (the readers look a little behind where they stopped, so nothing
+// that landed late is skipped); the pipeline uses this to recognise a record
+// it has already turned into a detection.
+func Record(source, key string) string { return source + "\x00" + key }
 
 // SetIDPrefix replaces the per-process id prefix (DETECTION_ID_PREFIX). It
 // must be alphanumeric so ids keep the contract's shape.
@@ -197,13 +249,37 @@ type Alert struct {
 	// names nothing concrete. Producers set it; nothing downstream may
 	// derive it from Domain or Summary.
 	Target *events.Target `json:"target,omitempty"`
+
+	// Record is the input record the detection came from (see Record), or
+	// "" for one that has none (a composite). Internal only.
+	Record string `json:"-"`
 }
+
+// NoteCursorClamped counts a start whose stored position for source was
+// older than the look-back, i.e. records were skipped.
+func NoteCursorClamped(source string) { cursorClamped.WithLabelValues(source).Inc() }
 
 type Engine struct {
 	adguard  *adguard.Client
 	matcher  *iocmatch.Matcher
 	interval time.Duration
+
+	// Cursors keeps the querylog position across restarts; nil keeps it in
+	// memory only. The settings below fall back to their defaults when <= 0.
+	Cursors  CursorStore
+	PageSize int
+	MaxPages int
+	Overlap  time.Duration
+	Lookback time.Duration
+	now      func() time.Time
+
+	started bool
+	// lastSeen is the newest entry time checked. Polls re-read Overlap
+	// behind it; seen holds the entries in that window that were already
+	// checked, so a re-read is not a second detection.
 	lastSeen time.Time
+	seen     map[string]time.Time
+
 	// OnAlert receives every detection (the alert pipeline: store,
 	// suppression, correlation, delivery).
 	OnAlert func(Alert)
@@ -225,12 +301,15 @@ func New(ag *adguard.Client, m *iocmatch.Matcher, interval time.Duration) *Engin
 		adguard:  ag,
 		matcher:  m,
 		interval: interval,
-		lastSeen: time.Now(),
+		now:      time.Now,
+		seen:     make(map[string]time.Time),
 	}
 }
 
 func (e *Engine) Run(ctx context.Context) {
-	slog.Info("detection engine started", "interval", e.interval, "threatlist_size", e.matcher.Size())
+	e.start()
+	slog.Info("detection engine started", "interval", e.interval, "threatlist_size", e.matcher.Size(),
+		"querylog_from", e.lastSeen)
 	ticker := time.NewTicker(e.interval)
 	defer ticker.Stop()
 
@@ -244,53 +323,210 @@ func (e *Engine) Run(ctx context.Context) {
 	}
 }
 
-func (e *Engine) poll(ctx context.Context) {
-	entries, err := e.adguard.QueryLog(ctx, queryLogBatch)
-	if err != nil {
-		pollErrors.Inc()
-		slog.Warn("adguard poll failed", "error", err)
+func (e *Engine) pageSize() int { return positiveOr(e.PageSize, DefaultQueryLogPageSize) }
+func (e *Engine) maxPages() int { return positiveOr(e.MaxPages, DefaultQueryLogMaxPages) }
+func (e *Engine) overlap() time.Duration {
+	return positiveDurOr(e.Overlap, DefaultQueryLogOverlap)
+}
+func (e *Engine) lookback() time.Duration {
+	return positiveDurOr(e.Lookback, DefaultLookback)
+}
+
+// start sets where reading begins: the stored position, or the look-back
+// when there is none or it is older than the look-back. Starting at "now"
+// meant every query logged while the pod was down, or not yet polled when it
+// stopped, was never checked.
+func (e *Engine) start() {
+	if e.started {
 		return
 	}
-
-	if len(entries) >= queryLogBatch {
-		pollBatchSaturated.Inc()
-		slog.Warn("querylog batch saturated, entries may have been missed",
-			"batch", queryLogBatch, "interval", e.interval)
+	e.started = true
+	floor := e.now().Add(-e.lookback())
+	e.lastSeen = floor
+	if e.Cursors == nil {
+		return
 	}
+	raw, _, ok, err := e.Cursors.Load(queryLogCursor)
+	if err != nil {
+		slog.Warn("querylog position unreadable: looking back instead", "lookback", e.lookback(), "error", err)
+		return
+	}
+	if !ok {
+		slog.Info("no stored querylog position: looking back", "lookback", e.lookback())
+		return
+	}
+	var pos queryLogPosition
+	if err := json.Unmarshal(raw, &pos); err != nil || pos.LastSeen.IsZero() {
+		slog.Warn("stored querylog position is malformed: looking back instead", "lookback", e.lookback())
+		return
+	}
+	if pos.LastSeen.Before(floor) {
+		NoteCursorClamped("adguard")
+		slog.Warn("stored querylog position is older than INGEST_LOOKBACK: queries in between are not checked",
+			"stored", pos.LastSeen, "resuming_at", floor)
+		return
+	}
+	e.lastSeen = pos.LastSeen
+}
 
-	// Entries arrive newest-first; stop at the first already-seen timestamp
-	for _, entry := range entries {
-		if !entry.Time.After(e.lastSeen) {
+type queryLogPosition struct {
+	LastSeen time.Time `json:"last_seen"`
+}
+
+// poll checks every querylog entry logged since the previous poll.
+//
+// It pages back from the newest entry until it reaches entries older than
+// the overlap behind the last checked one. Reading one fixed batch was a
+// blind spot anyone could aim at: a C2 lookup followed by as many junk
+// queries as the batch held was never checked. Paging is bounded so a flood
+// cannot stall the poller; reaching the bound is a gap, which is counted and
+// logged, because the queries in it are detections that may have been
+// missed.
+func (e *Engine) poll(ctx context.Context) {
+	e.start()
+	horizon := e.lastSeen.Add(-e.overlap())
+	newest := e.lastSeen
+	limit := e.pageSize()
+
+	var olderThan, oldestRead time.Time
+	pages, reached := 0, false
+	for !reached && pages < e.maxPages() {
+		page, err := e.adguard.QueryLog(ctx, olderThan, limit)
+		if err != nil {
+			// Nothing advances: the next poll reads this stretch again, and
+			// what was already checked is skipped as seen.
+			pollErrors.Inc()
+			slog.Warn("adguard poll failed", "error", err, "pages_read", pages)
+			return
+		}
+		pages++
+		queryLogPages.Inc()
+		for _, entry := range page.Entries {
+			if entry.Time.Before(horizon) {
+				reached = true
+				continue
+			}
+			key := entryKey(entry)
+			if _, dup := e.seen[key]; dup {
+				continue
+			}
+			e.seen[key] = entry.Time
+			e.check(entry, key)
+			if entry.Time.After(newest) {
+				newest = entry.Time
+			}
+		}
+		if len(page.Entries) < limit {
+			reached = true // nothing older left
 			break
 		}
-
-		queriesChecked.Inc()
-		domain := strings.ToLower(strings.TrimSuffix(entry.Question.Host, "."))
-
-		if e.OnDNSAnswer != nil {
-			for _, ans := range entry.Answer {
-				if ans.Type == "A" || ans.Type == "AAAA" {
-					e.OnDNSAnswer(entry.Client, ans.Value, domain, ans.TTL)
-				}
-			}
+		if !olderThan.IsZero() && !page.Oldest.Before(olderThan) {
+			// The server did not move back (it ignores older_than): there is
+			// no way to read further, which is a gap like the bound.
+			break
 		}
+		olderThan, oldestRead = page.Oldest, page.Oldest
+	}
+	if !reached {
+		queryLogGaps.Inc()
+		pollBatchSaturated.Inc()
+		slog.Warn("querylog gap: page limit reached before the last checked entry, queries in between were not checked",
+			"pages", pages, "page_size", limit, "unchecked_after", horizon, "unchecked_before", oldestRead,
+			"hint", "raise QUERYLOG_MAX_PAGES or shorten POLL_INTERVAL")
+	}
 
-		if ioc, ok := e.matcher.MatchDomain(domain); ok {
-			e.emitAlert(entry, domain, "", ioc)
-		}
+	// An entry stamped in the future (a clock that jumped) must not move the
+	// position past entries that are still to come.
+	if now := e.now(); newest.After(now) {
+		newest = now
+	}
+	if newest.After(e.lastSeen) {
+		e.lastSeen = newest
+		e.saveCursor()
+	}
+	e.forget()
+}
 
+// check matches one querylog entry against the indicators.
+func (e *Engine) check(entry adguard.QueryLogEntry, key string) {
+	queriesChecked.Inc()
+	domain := strings.ToLower(strings.TrimSuffix(entry.Question.Host, "."))
+
+	if e.OnDNSAnswer != nil {
 		for _, ans := range entry.Answer {
 			if ans.Type == "A" || ans.Type == "AAAA" {
-				if ioc, ok := e.matcher.MatchIP(ans.Value); ok {
-					e.emitAlert(entry, domain, ans.Value, ioc)
-				}
+				e.OnDNSAnswer(entry.Client, ans.Value, domain, ans.TTL)
 			}
 		}
 	}
 
-	if len(entries) > 0 && entries[0].Time.After(e.lastSeen) {
-		e.lastSeen = entries[0].Time
+	if ioc, ok := e.matcher.MatchDomain(domain); ok {
+		e.emitAlert(entry, key, domain, "", ioc)
 	}
+
+	for _, ans := range entry.Answer {
+		if ans.Type == "A" || ans.Type == "AAAA" {
+			if ioc, ok := e.matcher.MatchIP(ans.Value); ok {
+				e.emitAlert(entry, key, domain, ans.Value, ioc)
+			}
+		}
+	}
+}
+
+// entryKey identifies one querylog entry. AdGuard stamps entries with
+// nanosecond precision, so the time plus who asked what is unique.
+func entryKey(entry adguard.QueryLogEntry) string {
+	return entry.Time.UTC().Format(time.RFC3339Nano) + "|" + entry.Client + "|" +
+		entry.Question.Host + "|" + entry.Question.Type
+}
+
+// forget drops seen entries that have left the overlap window, and caps the
+// rest: a flood must not grow it without bound.
+func (e *Engine) forget() {
+	cutoff := e.lastSeen.Add(-e.overlap())
+	for k, t := range e.seen {
+		if t.Before(cutoff) {
+			delete(e.seen, k)
+		}
+	}
+	if len(e.seen) <= maxSeenEntries {
+		return
+	}
+	times := make([]time.Time, 0, len(e.seen))
+	for _, t := range e.seen {
+		times = append(times, t)
+	}
+	slices.SortFunc(times, func(a, b time.Time) int { return a.Compare(b) })
+	cut := times[len(times)-maxSeenEntries]
+	for k, t := range e.seen {
+		if t.Before(cut) {
+			delete(e.seen, k)
+		}
+	}
+}
+
+func (e *Engine) saveCursor() {
+	if e.Cursors == nil {
+		return
+	}
+	raw, _ := json.Marshal(queryLogPosition{LastSeen: e.lastSeen})
+	if err := e.Cursors.Save(queryLogCursor, raw); err != nil {
+		slog.Warn("querylog position not saved: a restart re-checks from the previous one", "error", err)
+	}
+}
+
+func positiveOr(v, fallback int) int {
+	if v > 0 {
+		return v
+	}
+	return fallback
+}
+
+func positiveDurOr(v, fallback time.Duration) time.Duration {
+	if v > 0 {
+		return v
+	}
+	return fallback
 }
 
 // emitAlert records a feed match on one querylog entry: on the queried name
@@ -301,9 +537,10 @@ func (e *Engine) poll(ctx context.Context) {
 // thousands of subdomains). An answer match targets the ADDRESS: the queried
 // name is often a shared CDN host, and blocking it would cut off every site
 // behind it — so the name stays in Domain, where it is only context.
-func (e *Engine) emitAlert(entry adguard.QueryLogEntry, queried, answer string, ioc iocmatch.IoC) {
+func (e *Engine) emitAlert(entry adguard.QueryLogEntry, key, queried, answer string, ioc iocmatch.IoC) {
 	alert := Alert{
 		ID:          NewID(),
+		Record:      Record("adguard", key+"|"+answer),
 		Timestamp:   entry.Time,
 		Domain:      queried,
 		ClientIP:    canonicalOrRaw(entry.Client),
