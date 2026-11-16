@@ -562,6 +562,33 @@ func TestNoPacketCaptureInTheBinary(t *testing.T) {
 	}
 }
 
+// Without a configured AdGuard account the service must not try one of its
+// own: it used to log in as admin/changeme, AdGuard's well-known default
+// (audit DP-5).
+func TestRunHasNoDefaultAdGuardCredential(t *testing.T) {
+	var polls atomic.Int32
+	var sawDefault atomic.Bool
+	ag := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		polls.Add(1)
+		if u, p, ok := r.BasicAuth(); ok && u == "admin" && p == "changeme" {
+			sawDefault.Store(true)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(ag.Close)
+	q := &querylog{u: ag.URL}
+	env := baseEnv(t, q, startReceiver(t), startInventory(t, "192.0.2.1", "aa:bb:cc:00:00:01", "x").url,
+		filepath.Join(t.TempDir(), "de.db"))
+	delete(env, "ADGUARD_USER")
+	delete(env, "ADGUARD_PASSWORD")
+	start(t, env)
+
+	waitFor(t, "a query-log poll", func() bool { return polls.Load() > 0 })
+	if sawDefault.Load() {
+		t.Fatal("the engine authenticated to AdGuard as admin/changeme without being configured to")
+	}
+}
+
 // A deployment without an OpenTelemetry collector (the core profile) turns
 // tracing off with the standard switch. Before, nothing could: an empty
 // endpoint fell back to the collector's in-cluster name, and the exporter
