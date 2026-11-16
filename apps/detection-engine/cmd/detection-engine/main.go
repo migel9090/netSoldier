@@ -53,8 +53,9 @@ func main() {
 	defer stop()
 
 	otelEndpoint := envOr(os.Getenv, "OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector.observability.svc:4317")
-	tp, err := tracing.Init(ctx, "detection-engine", otelEndpoint)
-	if err != nil {
+	if !tracingEnabled(os.Getenv) {
+		slog.Info("tracing disabled (OTEL_SDK_DISABLED)")
+	} else if tp, err := tracing.Init(ctx, "detection-engine", otelEndpoint); err != nil {
 		slog.Warn("tracing disabled", "error", err)
 	} else {
 		defer func() {
@@ -474,6 +475,15 @@ func authMiddleware(apiKey string, next http.Handler) http.Handler {
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// tracingEnabled honours OTEL_SDK_DISABLED, the OpenTelemetry switch for a
+// deployment without a collector: an empty OTEL_EXPORTER_OTLP_ENDPOINT falls
+// back to the in-cluster collector's name, so without this the exporter
+// retried a name that does not resolve and logged every ten seconds.
+func tracingEnabled(getenv func(string) string) bool {
+	off, err := strconv.ParseBool(strings.TrimSpace(getenv("OTEL_SDK_DISABLED")))
+	return err != nil || !off
 }
 
 func envOr(getenv func(string) string, key, fallback string) string {
