@@ -62,6 +62,39 @@ func TestRecentIsNewestFirstWithLimit(t *testing.T) {
 	}
 }
 
+// TestHandleListSaysSuppressed: an alert recorded under an analyst's verdict
+// carries "suppressed": true in GET /alerts; every other alert has no such
+// key, so readers of the old shape see nothing new.
+func TestHandleListSaysSuppressed(t *testing.T) {
+	a := memStore(t).Alerts(0, 0)
+	silenced := alert(1, events.SeverityHigh)
+	silenced.Suppressed = true
+	for _, al := range []detection.Alert{silenced, alert(2, events.SeverityHigh)} {
+		if err := a.Add(al); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := httptest.NewRecorder()
+	a.HandleList(rec, httptest.NewRequest(http.MethodGet, "/alerts", nil))
+	var raw []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil || len(raw) != 2 {
+		t.Fatalf("GET /alerts = %q (%v)", rec.Body.String(), err)
+	}
+	byID := map[string]map[string]any{}
+	for _, r := range raw {
+		byID[r["id"].(string)] = r
+	}
+	if v, ok := byID["DET-t-1"]["suppressed"]; !ok || v != true {
+		t.Errorf("suppressed alert: %v, want \"suppressed\": true", byID["DET-t-1"])
+	}
+	if v, ok := byID["DET-t-2"]["suppressed"]; ok {
+		t.Errorf("an alert recorded without a verdict carries suppressed=%v", v)
+	}
+	if got, ok := a.ByID("DET-t-1"); !ok || !got.Suppressed {
+		t.Errorf("ByID lost the mark: %+v", got)
+	}
+}
+
 // TestHandleList: GET /alerts stays a JSON array of the alert shape — `[]`
 // when empty, never null — with ?limit= validated and capped.
 func TestHandleList(t *testing.T) {

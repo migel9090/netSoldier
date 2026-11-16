@@ -250,6 +250,13 @@ type Alert struct {
 	// derive it from Domain or Summary.
 	Target *events.Target `json:"target,omitempty"`
 
+	// Suppressed marks an alert recorded while an analyst's false-positive
+	// verdict applied to it: kept in the history, but neither correlated nor
+	// delivered. Without it the history showed such an alert as new, and the
+	// analyst who silenced the indicator kept seeing it come back. Absent
+	// from the JSON otherwise.
+	Suppressed bool `json:"suppressed,omitempty"`
+
 	// Record is the input record the detection came from (see Record), or
 	// "" for one that has none (a composite). Internal only.
 	Record string `json:"-"`
