@@ -116,6 +116,36 @@ automatic action.
   part of the performance baseline, and revisit point 5 if ClickHouse ever ingests data
   that has not passed through a sandboxed service.
 
+## What the first deployments showed (2026-11-16)
+
+Both profiles were deployed in the lab the day this was accepted: the core stack on a k3s
+node, and the Podman profile on a single host. The split holds as decided. Four things are
+different from what the text above assumes, and anyone relying on this ADR should know them.
+
+- **On k3s a NetworkPolicy is not a boundary towards the node.** kube-router always admits
+  traffic from the local node to its pods; this was measured with a deny-all policy in place.
+  A process on the host network, `netagent` included, can therefore open a connection to
+  every pod on that node whatever the policies say. The rules that admit `netagent` by
+  address document intent and nothing more. What limits a compromised `netagent` is that it
+  holds two tokens, each valid on one endpoint; every service API requires its own key, and
+  that requirement is the control. Host-level policies (Cilium, Calico) would restore the
+  boundary and are a candidate for after v1.0.
+- **ARP isolation cannot be used in either profile as built.** The frames announce
+  `netagent`'s own interface as the gateway, so an isolated device's traffic arrives at our
+  host, and the guard refuses to send them while the host forwards IPv4: with forwarding on,
+  "isolation" would be relaying. A k3s node and a Podman host always forward. The guard is
+  right and stays; isolation frames are disabled in both profiles, and enforcement is by DNS
+  only until the router driver exists. Whether the ARP driver returns in another form (frames
+  that name an address no interface of ours owns, so the kernel has nothing to forward) or is
+  removed is decided with the router driver, after measuring it in the lab.
+- **AdGuard Home keeps one capability on k3s.** Its binary carries `NET_BIND_SERVICE` as a
+  file capability and the kernel will not execute it unless the capability is in the
+  container's bounding set. It is third-party and outside point 1, but it is the one
+  capability in the cluster besides `netagent`'s. The Podman profile rebuilds the image
+  without the file capability and runs it with none.
+- **Point 7 is not in place yet.** The manifests follow the rules; nothing at admission
+  enforces them until the Kyverno policy is written (roadmap step 125.12).
+
 ## Links
 
 - ADR-0001 — core architecture (out-of-band enforcement, fail-open, enforcement tiers)
