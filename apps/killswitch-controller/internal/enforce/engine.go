@@ -39,6 +39,10 @@ type Config struct {
 	AgentGrace time.Duration
 	// Prune says what the reaper may forget.
 	Prune actions.PruneOptions
+	// Now is the engine's clock; time.Now when nil. A test that has to get
+	// past a TTL or a backoff gives the engine and the store one clock it
+	// moves, instead of sleeping through it.
+	Now func() time.Time
 }
 
 func (c *Config) defaults() {
@@ -54,6 +58,9 @@ func (c *Config) defaults() {
 	set(&c.ReapInterval, 10*time.Second)
 	set(&c.ReconcileInterval, 5*time.Minute)
 	set(&c.AgentGrace, 10*time.Second)
+	if c.Now == nil {
+		c.Now = time.Now
+	}
 }
 
 // Engine is safe for concurrent use.
@@ -87,7 +94,7 @@ func New(store *actions.Store, drvs map[string]drivers.Driver, cfg Config) *Engi
 		store:    store,
 		drivers:  drvs,
 		cfg:      cfg,
-		now:      time.Now,
+		now:      cfg.Now,
 		inflight: map[string]*op{},
 		signals:  map[string]chan struct{}{},
 		stop:     make(chan struct{}),
@@ -272,10 +279,18 @@ func (e *Engine) Revert(ctx context.Context, id, actor, reason string) (actions.
 			// A deferred release is outstanding; its result decides.
 			return rec, nil
 		case events.IsEnforcedState(rec.State):
-			if _, started := e.startRevert(rec, actor, reason); started {
-				return rec, nil
+			cur, started, err := e.startRevert(rec, actor, reason)
+			if started {
+				return cur, nil
 			}
-			continue
+			var c *actions.ConflictError
+			if errors.As(err, &c) && (c.Current.State != rec.State || c.Current.Op != rec.Op) {
+				continue // it moved on since it was read: decide on what it is now
+			}
+			if err != nil {
+				return rec, err
+			}
+			continue // another operation is in flight here: wait for it
 		case rec.State == events.StateApproved:
 			return rec, &actions.ConflictError{Current: rec,
 				Msg: fmt.Sprintf("action %s is still being applied; revert it once it is active", rec.ID)}
@@ -431,23 +446,28 @@ func (e *Engine) compensate(rec actions.Record, drv drivers.Driver, applyErr err
 }
 
 // startRevert persists the intent and runs the revert in the background.
-// It returns false when another operation is in flight.
-func (e *Engine) startRevert(rec actions.Record, actor, reason string) (*op, bool) {
+// The intent is recorded before it returns, so whoever answers while the
+// revert is still under way reads it (in_flight "revert"): written from
+// the background, a 202 could go out first and show an active action with
+// nothing in flight. It returns false when another operation is in flight,
+// or with the store's error when the intent could not be recorded; nothing
+// was started then.
+func (e *Engine) startRevert(rec actions.Record, actor, reason string) (actions.Record, bool, error) {
 	o, ok := e.begin(rec.ID, actions.OpRevert)
 	if !ok {
-		return o, false
+		return rec, false, nil
+	}
+	cur, err := e.store.BeginOp(rec.ID, actions.OpRevert, actor, reason,
+		e.now().Add(e.cfg.DriverTimeout), events.StateActive, events.StateRevertFailed)
+	if err != nil {
+		e.end(rec.ID, o)
+		return rec, false, err
 	}
 	go func() {
 		defer e.end(rec.ID, o)
-		cur, err := e.store.BeginOp(rec.ID, actions.OpRevert, actor, reason,
-			e.now().Add(e.cfg.DriverTimeout), events.StateActive, events.StateRevertFailed)
-		if err != nil {
-			e.logErr(err)
-			return
-		}
 		e.runRevert(cur, actor, reason)
 	}()
-	return o, true
+	return cur, true, nil
 }
 
 // runRevert calls the driver. Only its confirmation makes the action

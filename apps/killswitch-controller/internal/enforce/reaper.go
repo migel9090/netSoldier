@@ -99,7 +99,9 @@ func (e *Engine) Reap(ctx context.Context) {
 		if r.State == events.StateRevertFailed {
 			reason = "retry of a failed revert"
 		}
-		e.startRevert(r, actions.ActorTTL, reason)
+		if _, _, err := e.startRevert(r, actions.ActorTTL, reason); err != nil {
+			e.logErr(err)
+		}
 	}
 	for _, r := range due.Overdue {
 		rec := r
