@@ -564,7 +564,8 @@ func TestNoPacketCaptureInTheBinary(t *testing.T) {
 
 // Without a configured AdGuard account the service must not try one of its
 // own: it used to log in as admin/changeme, AdGuard's well-known default
-// (audit DP-5).
+// (audit DP-5). Half-configured polling now refuses the start, naming what
+// is missing, and AdGuard is never asked.
 func TestRunHasNoDefaultAdGuardCredential(t *testing.T) {
 	var polls atomic.Int32
 	var sawDefault atomic.Bool
@@ -577,15 +578,68 @@ func TestRunHasNoDefaultAdGuardCredential(t *testing.T) {
 	}))
 	t.Cleanup(ag.Close)
 	q := &querylog{u: ag.URL}
-	env := baseEnv(t, q, startReceiver(t), startInventory(t, "192.0.2.1", "aa:bb:cc:00:00:01", "x").url,
-		filepath.Join(t.TempDir(), "de.db"))
-	delete(env, "ADGUARD_USER")
-	delete(env, "ADGUARD_PASSWORD")
-	start(t, env)
+	inv := startInventory(t, "192.0.2.1", "aa:bb:cc:00:00:01", "x").url
 
-	waitFor(t, "a query-log poll", func() bool { return polls.Load() > 0 })
-	if sawDefault.Load() {
-		t.Fatal("the engine authenticated to AdGuard as admin/changeme without being configured to")
+	for _, missing := range [][]string{
+		{"ADGUARD_USER", "ADGUARD_PASSWORD"},
+		{"ADGUARD_PASSWORD"},
+		{"ADGUARD_USER"},
+		// Credentials without an address: the in-cluster name used to be
+		// polled.
+		{"ADGUARD_URL"},
+	} {
+		t.Run(strings.Join(missing, "+"), func(t *testing.T) {
+			env := baseEnv(t, q, startReceiver(t), inv, filepath.Join(t.TempDir(), "de.db"))
+			for _, k := range missing {
+				delete(env, k)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			err := run(ctx, func(k string) string { return env[k] }, func(string) {
+				t.Error("the service started listening with AdGuard polling half-configured")
+			})
+			if err == nil || !strings.Contains(err.Error(), strings.Join(missing, "/")+" not set") {
+				t.Fatalf("run = %v, want a start-up error naming %v", err, missing)
+			}
+		})
+	}
+	if polls.Load() != 0 || sawDefault.Load() {
+		t.Fatalf("AdGuard was asked %d times (admin/changeme: %v) by a service that refused to start",
+			polls.Load(), sawDefault.Load())
+	}
+}
+
+// TestRunWithoutAdGuardPollsNothing: with no ADGUARD_* at all the service
+// runs — sensor ingest and feedback do not need AdGuard — and polls nothing.
+// It used to poll http://adguard-web.dns.svc:3000 as admin/changeme, a name
+// that resolves to nothing outside the cluster.
+func TestRunWithoutAdGuardPollsNothing(t *testing.T) {
+	env := baseEnv(t, &querylog{}, startReceiver(t), startInventory(t, "192.0.2.1", "aa:bb:cc:00:00:01", "x").url,
+		filepath.Join(t.TempDir(), "de.db"))
+	for _, k := range []string{"ADGUARD_URL", "ADGUARD_USER", "ADGUARD_PASSWORD"} {
+		delete(env, k)
+	}
+	env["POLL_INTERVAL"] = "20ms"
+	addr, stop := start(t, env)
+
+	pages := metric(t, addr, "detection_engine_querylog_pages_total")
+	failures := metric(t, addr, "detection_engine_poll_errors_total")
+	time.Sleep(300 * time.Millisecond) // a poller would have tried many times by now
+	if p, f := metric(t, addr, "detection_engine_querylog_pages_total"), metric(t, addr,
+		"detection_engine_poll_errors_total"); p != pages || f != failures {
+		t.Fatalf("query-log polls happened without AdGuard configured: pages %v → %v, errors %v → %v",
+			pages, p, failures, f)
+	}
+	resp, err := http.Get("http://" + addr + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/healthz = %d", resp.StatusCode)
+	}
+	if err := stop(); err != nil {
+		t.Errorf("clean shutdown returned %v", err)
 	}
 }
 

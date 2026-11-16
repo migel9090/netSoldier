@@ -116,14 +116,13 @@ func run(ctx context.Context, getenv func(string) string, onListen func(addr str
 		}
 	}
 
-	// No fallback credential: admin/changeme used to be tried whenever the
-	// account was not configured (audit DP-5).
-	agUser, agPass := getenv("ADGUARD_USER"), getenv("ADGUARD_PASSWORD")
-	if agUser == "" || agPass == "" {
-		slog.Error("ADGUARD_USER/ADGUARD_PASSWORD not set — AdGuard will refuse the query-log " +
-			"reads and DNS detection is off until they are")
+	// No fallback credential and no guessed address: admin/changeme used to
+	// be tried against the in-cluster AdGuard name whenever nothing was
+	// configured (audit DP-5). nil means AdGuard polling is off.
+	agClient, err := adguardFromEnv(getenv)
+	if err != nil {
+		return err
 	}
-	agClient := adguard.NewClient(env("ADGUARD_URL", "http://adguard-web.dns.svc:3000"), agUser, agPass)
 
 	matcher := iocmatch.New()
 	tlPath := env("THREATLIST_PATH", "/etc/detection-engine/domains.txt")
@@ -266,7 +265,11 @@ func run(ctx context.Context, getenv func(string) string, onListen func(addr str
 	}
 	engine.OnAlert = pipe.Handle
 
-	goProduce(func() { engine.Run(ctx) })
+	// The engine also routes sensor detections (Ingest), so it exists either
+	// way; only its query-log poller needs AdGuard.
+	if agClient != nil {
+		goProduce(func() { engine.Run(ctx) })
+	}
 
 	// Unified sensor ingest (step 109): Suricata EVE alerts, Zeek Intel and
 	// SSL, RITA beacons and Isolation-Forest anomalies landed in ClickHouse,
@@ -408,6 +411,41 @@ func openStore(getenv func(string) string) (*store.Store, error) {
 		"and LOST on restart; mount a volume at the default path's directory or set DB_PATH",
 		"path", defaultDBPath, "error", err)
 	return store.OpenMemory()
+}
+
+// adguardFromEnv builds the query-log client from ADGUARD_URL, ADGUARD_USER
+// and ADGUARD_PASSWORD. None of them set means AdGuard polling is off (nil),
+// which is said once. Any of them set means polling is wanted, so all three
+// must be: there is no address or account to fall back on, and a poller
+// with a guessed one would either read nothing — AdGuard refuses an
+// anonymous query-log read — or try a well-known password against whatever
+// answers.
+func adguardFromEnv(getenv func(string) string) (*adguard.Client, error) {
+	addr, user, pass := getenv("ADGUARD_URL"), getenv("ADGUARD_USER"), getenv("ADGUARD_PASSWORD")
+	if addr == "" && user == "" && pass == "" {
+		slog.Warn("ADGUARD_URL/ADGUARD_USER/ADGUARD_PASSWORD not set — AdGuard query-log polling is off: " +
+			"DNS lookups are not checked against the threat list")
+		return nil, nil
+	}
+	var missing []string
+	for _, v := range []struct{ key, value string }{
+		{"ADGUARD_URL", addr}, {"ADGUARD_USER", user}, {"ADGUARD_PASSWORD", pass},
+	} {
+		if v.value == "" {
+			missing = append(missing, v.key)
+		}
+	}
+	if len(missing) > 0 {
+		what := "cannot authenticate"
+		if addr == "" {
+			what = "has no address to poll"
+		}
+		return nil, fmt.Errorf("refusing to start: %s not set — the AdGuard query-log poller %s, and there is "+
+			"no default; set ADGUARD_URL, ADGUARD_USER and ADGUARD_PASSWORD, or none of them to run without "+
+			"AdGuard polling", strings.Join(missing, "/"), what)
+	}
+	slog.Info("AdGuard query-log polling enabled", "url", addr, "user", user)
+	return adguard.NewClient(addr, user, pass), nil
 }
 
 // maintain applies retention to the alert history and the analysts'
