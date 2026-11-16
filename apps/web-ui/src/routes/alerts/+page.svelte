@@ -1,15 +1,29 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import {
+    SUPPRESSION_DAYS,
     alertClient,
     alertClientText,
     alertHeadline,
     alertObservedDomain,
+    falsePositiveQuestion,
+    falsePositiveVerdict,
+    liftQuestion,
+    liftVerdict,
     signalClasses,
+    suppressionFor,
   } from '$lib/alerts'
-  import { fetchAlerts, formatTime, normaliseMac, submitFeedback } from '$lib/api'
+  import {
+    ALERTS_LIMIT,
+    ALERTS_MAX_LIMIT,
+    fetchAlerts,
+    fetchSuppressions,
+    formatTime,
+    normaliseMac,
+    submitFeedback,
+  } from '$lib/api'
   import { newestFirst } from '$lib/order'
-  import type { Alert } from '$lib/types'
+  import type { Alert, Suppression } from '$lib/types'
 
   const SEVERITIES = ['critical', 'high', 'medium', 'low'] as const
 
@@ -78,35 +92,87 @@
       timeFilter !== 'all',
   )
 
-  // Step 118: FP feedback. Track which (ioc|client) pairs the analyst has
-  // marked so the row reflects it immediately without a reload.
-  let marked: Set<string> = $state(new Set())
+  // False-positive feedback (step 118). The engine's active suppressions
+  // say which alerts are silenced; a verdict made here shows at once.
+  let suppressions: Suppression[] = $state([])
+  let suppressionsError: string = $state('')
+  let feedbackNotes: { key: number; tone: 'ok' | 'warn' | 'fail'; text: string }[] = $state([])
+  let feedbackSeq = 0
+  let sending: Set<string> = $state(new Set())
 
-  function fpKey(a: Alert): string {
-    return `${a.matched_ioc ?? ''}|${a.client_ip ?? ''}`
+  function note(tone: 'ok' | 'warn' | 'fail', text: string) {
+    feedbackNotes = [{ key: ++feedbackSeq, tone, text }, ...feedbackNotes].slice(0, 5)
+  }
+
+  function persistedNote(persisted: boolean | null): string {
+    if (persisted === false) {
+      return ' It is in force now but was NOT saved: the detection engine forgets it when it restarts (its ClickHouse store is unavailable).'
+    }
+    return persisted ? ' Saved.' : ''
   }
 
   async function markFalsePositive(a: Alert) {
-    const key = fpKey(a)
+    if (!a.matched_ioc) return
+    if (!confirm(falsePositiveQuestion(a))) return
+    sending = new Set(sending).add(a.id)
     try {
-      await submitFeedback({
-        alert_id: a.id,
-        matched_ioc: a.matched_ioc ?? '',
-        client_ip: a.client_ip,
-        verdict: 'false_positive',
-      })
-      const next = new Set(marked)
-      next.add(key)
-      marked = next
+      const { persisted } = await submitFeedback(falsePositiveVerdict(a))
+      note(
+        persisted === false ? 'warn' : 'ok',
+        `Marked ${a.matched_ioc} as a false positive for ${SUPPRESSION_DAYS} days.${persistedNote(persisted)}`,
+      )
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to submit feedback'
+      note('fail', e instanceof Error ? e.message : 'Failed to submit feedback')
+    } finally {
+      const next = new Set(sending)
+      next.delete(a.id)
+      sending = next
+      await loadSuppressions()
     }
+  }
+
+  async function lift(s: Suppression) {
+    if (!confirm(liftQuestion(s))) return
+    try {
+      const { persisted } = await submitFeedback(liftVerdict(s))
+      note(
+        persisted === false ? 'warn' : 'ok',
+        `Lifted the suppression of ${s.matched_ioc}.${persistedNote(persisted)}`,
+      )
+    } catch (e) {
+      note('fail', e instanceof Error ? e.message : 'Failed to lift the suppression')
+    } finally {
+      await loadSuppressions()
+    }
+  }
+
+  async function loadSuppressions() {
+    try {
+      // GET /feedback comes in map order: newest first, stably.
+      suppressions = (await fetchSuppressions()).sort(
+        (x, y) =>
+          Date.parse(y.timestamp) - Date.parse(x.timestamp) ||
+          x.matched_ioc.localeCompare(y.matched_ioc) ||
+          (x.client_ip ?? '').localeCompare(y.client_ip ?? ''),
+      )
+      suppressionsError = ''
+    } catch (e) {
+      suppressionsError = e instanceof Error ? e.message : 'Failed to load suppressions'
+    }
+  }
+
+  // GET /alerts returns the newest `limit` alerts; "show more" asks for more.
+  let limit = $state(ALERTS_LIMIT)
+  let more = $derived(allAlerts.length >= limit && limit < ALERTS_MAX_LIMIT)
+
+  async function showMore() {
+    limit = Math.min(ALERTS_MAX_LIMIT, limit * 2)
+    await load()
   }
 
   async function load() {
     try {
-      // The detection engine appends, so its list is oldest-first.
-      allAlerts = newestFirst(await fetchAlerts())
+      allAlerts = newestFirst(await fetchAlerts(limit))
       error = ''
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load alerts'
@@ -119,7 +185,11 @@
     void load().finally(() => {
       loading = false
     })
-    const interval = setInterval(load, 30_000)
+    void loadSuppressions()
+    const interval = setInterval(() => {
+      void load()
+      void loadSuppressions()
+    }, 30_000)
     return () => clearInterval(interval)
   })
 </script>
@@ -130,6 +200,14 @@
     >{filtered.length}{filtered.length !== allAlerts.length ? ` / ${allAlerts.length}` : ''}</span
   >
 </div>
+
+{#if feedbackNotes.length > 0}
+  <ul class="notes" aria-live="polite">
+    {#each feedbackNotes as n (n.key)}
+      <li class="note note-{n.tone}" data-testid="feedback-note">{n.text}</li>
+    {/each}
+  </ul>
+{/if}
 
 {#if loading}
   <p class="loading">Loading…</p>
@@ -215,6 +293,7 @@
           {@const mac = normaliseMac(client.mac)}
           {@const observed = alertObservedDomain(a)}
           {@const classes = signalClasses(a)}
+          {@const suppressed = suppressionFor(a, suppressions)}
           <tr data-alert-id={a.id}>
             <td class="nowrap">{formatTime(a.timestamp)}</td>
             <td>
@@ -253,12 +332,20 @@
             </td>
             <td>{a.source || '—'}</td>
             <td class="nowrap">
-              {#if marked.has(fpKey(a))}
-                <span class="fp-marked" title="Reported as false positive">✓ FP</span>
-              {:else}
+              {#if suppressed}
+                <span
+                  class="fp-marked"
+                  data-testid="fp-marked"
+                  title="Suppressed as a false positive by {suppressed.analyst ||
+                    'someone'} on {formatTime(
+                    suppressed.timestamp,
+                  )}: it no longer reaches the killswitch">✓ FP</span
+                >
+              {:else if a.matched_ioc}
                 <button
                   class="fp-btn"
-                  title="Mark as false positive — suppresses this indicator for this client"
+                  title="Mark as false positive — suppresses this indicator on this device for {SUPPRESSION_DAYS} days"
+                  disabled={sending.has(a.id)}
                   onclick={() => markFalsePositive(a)}
                 >
                   Mark FP
@@ -269,8 +356,55 @@
         {/each}
       </tbody>
     </table>
+    {#if more}
+      <p class="paging">
+        <span class="muted">The newest {allAlerts.length} alerts.</span>
+        <button class="more-btn" onclick={showMore}>Show older alerts</button>
+      </p>
+    {/if}
   {/if}
 {/if}
+
+<section class="suppressions">
+  <h2>Active suppressions ({suppressions.length})</h2>
+  <p class="muted">
+    A false-positive verdict keeps detections of that indicator and signal from reaching the
+    killswitch — on one device, or on every device when none is named — for {SUPPRESSION_DAYS} days after
+    it was made (the detection engine's default). They are still listed above.
+  </p>
+  {#if suppressionsError}
+    <p class="error">{suppressionsError}</p>
+  {:else if suppressions.length === 0}
+    <p class="empty">Nothing is suppressed.</p>
+  {:else}
+    <table data-testid="suppressions-table">
+      <thead>
+        <tr>
+          <th>Indicator</th>
+          <th>Signal</th>
+          <th>Device</th>
+          <th>Marked by</th>
+          <th>Marked</th>
+          <th>Reason</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each suppressions as s (`${s.matched_ioc}|${s.client_ip ?? ''}|${s.signal_class}`)}
+          <tr data-ioc={s.matched_ioc}>
+            <td class="mono truncate" title={s.matched_ioc}>{s.matched_ioc}</td>
+            <td>{s.signal_class}</td>
+            <td class="mono">{s.client_ip || 'every device'}</td>
+            <td>{s.analyst || '—'}</td>
+            <td class="nowrap">{formatTime(s.timestamp)}</td>
+            <td class="truncate" title={s.reason}>{s.reason || '—'}</td>
+            <td><button class="fp-btn" onclick={() => lift(s)}>Lift</button></td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  {/if}
+</section>
 
 <style>
   .headline {
@@ -449,6 +583,54 @@
     font-size: 0.6875rem;
     color: var(--success);
     font-weight: 600;
+  }
+  .fp-btn:disabled {
+    opacity: 0.5;
+    cursor: wait;
+  }
+
+  .notes {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-bottom: 1rem;
+  }
+  .note {
+    padding: 0.5rem 0.75rem;
+    border-radius: 4px;
+    border-left: 3px solid var(--success);
+    background: var(--bg-secondary);
+    font-size: 0.875rem;
+  }
+  .note-warn {
+    border-left-color: var(--warning);
+  }
+  .note-fail {
+    border-left-color: var(--danger);
+    color: var(--danger);
+  }
+  .paging {
+    margin-top: 1rem;
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+  }
+  .more-btn {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.3rem 0.8rem;
+    cursor: pointer;
+    font-size: 0.8125rem;
+  }
+  .suppressions {
+    margin-top: 2rem;
+  }
+  .suppressions .muted {
+    max-width: 48rem;
+    margin-bottom: 1rem;
   }
 
   .badge-critical {

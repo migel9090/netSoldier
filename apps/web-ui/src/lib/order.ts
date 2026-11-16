@@ -1,11 +1,11 @@
 /**
  * Deterministic ordering for lists that are re-fetched on a timer.
  *
- * The killswitch controller returns actions in Go map order, which differs on
- * every call; re-rendering in arrival order made rows swap under the cursor
- * every 10 s, next to an Approve button. Every list is therefore sorted on
- * the client by a timestamp with the id as tie-break, whatever order the
- * backend promises.
+ * The killswitch controller used to return actions in Go map order, which
+ * differed on every call; re-rendering in arrival order made rows swap under
+ * the cursor every 10 s, next to an Approve button. The lists are therefore
+ * sorted on the client by a timestamp with the id as tie-break, whatever
+ * order the backend promises (GET /feedback still comes in map order).
  */
 
 function millis(value: string | null | undefined): number {
@@ -32,18 +32,4 @@ export function newestFirst<T extends { id: string }>(
   timeOf: TimeOf<T> = (i) => (i as { timestamp?: string }).timestamp,
 ): T[] {
   return [...items].sort((a, b) => millis(timeOf(b)) - millis(timeOf(a)) || byId(a.id, b.id))
-}
-
-/** Concatenates lists keeping the first occurrence of each id. */
-export function mergeById<T extends { id: string }>(...lists: readonly (readonly T[])[]): T[] {
-  const seen = new Set<string>()
-  const out: T[] = []
-  for (const list of lists) {
-    for (const item of list) {
-      if (seen.has(item.id)) continue
-      seen.add(item.id)
-      out.push(item)
-    }
-  }
-  return out
 }

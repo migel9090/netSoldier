@@ -1,12 +1,13 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, tick } from 'svelte'
   import {
     fetchPendingActions,
     fetchActiveActions,
     fetchFailedActions,
-    fetchActionHistory,
     fetchAction,
+    fetchAudit,
     fetchDevices,
+    fetchPolicy,
     approveAction,
     rejectAction,
     revertAction,
@@ -14,84 +15,72 @@
     formatActionType,
     type ActionResult,
   } from '$lib/api'
+  import KillswitchNav from '$lib/components/KillswitchNav.svelte'
   import {
-    approveConfirmText,
+    actionTypeChoices,
+    approveQuestion,
+    awaitingConfirmation,
+    defaultChoice,
+    describeActor,
     describeBlock,
     describeDevice,
     describeOutcome,
+    describeSettled,
     deviceOf,
-    endedAt,
     enforcedSince,
     failureKind,
-    isFailure,
-    isStillEnforced,
-    revertLeftEnforced,
+    hasSettled,
+    type ActionTypeChoice,
     type Outcome,
     type Verb,
   } from '$lib/killswitch'
-  import { mergeById, newestFirst, oldestFirst } from '$lib/order'
-  import type { EnforcementAction } from '$lib/types'
-
-  /** A contract v2 list an older controller may not serve (it answers 404). */
-  type OptionalList =
-    | { kind: 'ok'; items: EnforcementAction[] }
-    | { kind: 'unavailable' }
-    | { kind: 'error'; message: string }
+  import { newestFirst, oldestFirst } from '$lib/order'
+  import type { EnforcementAction, KillswitchPolicy } from '$lib/types'
 
   let pendingRaw: EnforcementAction[] = $state([])
   let activeRaw: EnforcementAction[] = $state([])
-  let failedList: OptionalList = $state({ kind: 'ok', items: [] })
-  let historyList: OptionalList = $state({ kind: 'ok', items: [] })
+  let failedRaw: EnforcementAction[] = $state([])
+  let failedError: string = $state('')
   let loading: boolean = $state(true)
   let error: string = $state('')
   /** MAC → hostname from the device inventory, for actions without a client_name. */
   let names: Map<string, string> = $state(new Map())
-  /** Apply failures reported by approvals made on this page (terminal, never stale). */
-  let applyFailures: Map<string, EnforcementAction> = $state(new Map())
-  /**
-   * Actions whose revert failed. Older controllers drop them from
-   * /actions/active although the block is still in place, so they are kept
-   * here — re-read on every refresh — until the controller lists them again
-   * or reports a state that no longer enforces.
-   */
-  let revertFailures: Map<string, EnforcementAction> = $state(new Map())
+  let policy: KillswitchPolicy | null = $state(null)
+  let policyError: string = $state('')
   let outcomes: (Outcome & { key: number; at: Date })[] = $state([])
   let busy: Set<string> = $state(new Set())
   let outcomeSeq = 0
 
+  /**
+   * Operations the controller answered with 202, and approvals found in the
+   * audit log that have no outcome yet. An `approved` action is in no list
+   * (GET /actions/active leaves it out), so it is read by id until it
+   * settles. `ours`: started on this page, so its outcome is reported.
+   */
+  interface Tracked {
+    verb: Verb
+    action: EnforcementAction
+    since: Date
+    ours: boolean
+  }
+  let tracking: Map<string, Tracked> = $state(new Map())
+
   // Sorted on the client whatever order the controller sends: rows must not
   // swap under the cursor on each refresh.
   let pending = $derived(oldestFirst(pendingRaw))
-  let enforced = $derived(
-    newestFirst(mergeById(activeRaw, [...revertFailures.values()]), enforcedSince),
+  let enforced = $derived(newestFirst(activeRaw, enforcedSince))
+  let failures = $derived(newestFirst(failedRaw))
+  let inProgress = $derived(
+    [...tracking.values()].sort((a, b) => a.since.getTime() - b.since.getTime()),
   )
-  let failures = $derived(
-    newestFirst(
-      mergeById(
-        failedList.kind === 'ok' ? failedList.items : [],
-        enforced.filter((a) => failureKind(a) === 'revert'),
-        [...applyFailures.values()],
-      ).filter(isFailure),
-    ),
-  )
-  let history = $derived(historyList.kind === 'ok' ? newestFirst(historyList.items, endedAt) : [])
 
   function device(a: EnforcementAction) {
     return deviceOf(a, names)
   }
 
-  function optional(r: PromiseSettledResult<EnforcementAction[] | null>): OptionalList {
-    if (r.status === 'rejected') {
-      return { kind: 'error', message: r.reason instanceof Error ? r.reason.message : 'failed' }
-    }
-    return r.value === null ? { kind: 'unavailable' } : { kind: 'ok', items: r.value }
+  function message(e: unknown, fallback: string): string {
+    return e instanceof Error ? e.message : fallback
   }
-
-  // A controller without the v2 lists answers 404; ask again every few
-  // minutes rather than on every 10 s refresh.
-  const RECHECK_UNAVAILABLE_MS = 5 * 60_000
-  let failedRecheckAt = 0
-  let historyRecheckAt = 0
 
   // One refresh at a time. A request made while one is in flight (say, right
   // after an approve) queues exactly one more pass, so the tables never show
@@ -116,47 +105,94 @@
   }
 
   async function loadOnce() {
-    const now = Date.now()
-    const [p, a, f, h] = await Promise.allSettled([
+    const [p, a, f, audit] = await Promise.allSettled([
       fetchPendingActions(),
       fetchActiveActions(),
-      now < failedRecheckAt ? Promise.resolve(null) : fetchFailedActions(),
-      now < historyRecheckAt ? Promise.resolve(null) : fetchActionHistory(),
+      fetchFailedActions(),
+      fetchAudit({ limit: 100 }),
     ])
     if (p.status === 'rejected' || a.status === 'rejected') {
       // An outage is shown as an error, never as empty tables.
       const reason = p.status === 'rejected' ? p.reason : (a as PromiseRejectedResult).reason
-      error = reason instanceof Error ? reason.message : 'Failed to load actions'
+      error = message(reason, 'Failed to load actions')
     } else {
       pendingRaw = p.value
       activeRaw = a.value
       error = ''
-      await reconcileRevertFailures(a.value)
     }
-    failedList = optional(f)
-    historyList = optional(h)
-    if (failedList.kind === 'unavailable' && now >= failedRecheckAt) {
-      failedRecheckAt = now + RECHECK_UNAVAILABLE_MS
+    if (f.status === 'fulfilled') {
+      failedRaw = f.value
+      failedError = ''
+    } else {
+      failedError = message(f.reason, 'Failed to load failures')
     }
-    if (historyList.kind === 'unavailable' && now >= historyRecheckAt) {
-      historyRecheckAt = now + RECHECK_UNAVAILABLE_MS
+    if (audit.status === 'fulfilled') {
+      const found = awaitingConfirmation(audit.value).filter((id) => !tracking.has(id))
+      if (found.length > 0) {
+        const next = new Map(tracking)
+        for (const id of found) {
+          next.set(id, { verb: 'approve', action: placeholder(id), since: new Date(), ours: false })
+        }
+        tracking = next
+        await pollTracked()
+      }
     }
   }
 
-  async function reconcileRevertFailures(active: EnforcementAction[]) {
-    if (revertFailures.size === 0) return
-    const listed = new Set(active.map((a) => a.id))
-    const next = new Map<string, EnforcementAction>()
-    for (const [id, known] of revertFailures) {
-      if (listed.has(id)) continue // the controller reports it itself now
-      try {
-        const current = await fetchAction(id)
-        if (current && isStillEnforced(current)) next.set(id, current)
-      } catch {
-        next.set(id, known) // keep what we know rather than hide a live block
-      }
+  function placeholder(id: string): EnforcementAction {
+    return {
+      id,
+      timestamp: '',
+      detection_id: '',
+      action_type: '',
+      state: 'approved',
+      target_mac: '',
+      policy_rule: '',
+      auto_approved: false,
     }
-    revertFailures = next
+  }
+
+  let polling = false
+
+  /** Reads every tracked action by id; reports and drops those that settled. */
+  async function pollTracked() {
+    if (polling || tracking.size === 0) return
+    polling = true
+    let settled = false
+    try {
+      // What each entry polled became: null when it is done. Applied to the
+      // map as it is afterwards, and only to entries nobody replaced in the
+      // meantime (an operation started while this ran is kept).
+      const updates = new Map<Tracked, Tracked | null>()
+      for (const [id, t] of tracking) {
+        let current: EnforcementAction | null
+        try {
+          current = await fetchAction(id)
+        } catch {
+          continue // keep it; try again on the next tick
+        }
+        if (!current) {
+          updates.set(t, null)
+        } else if (hasSettled(t.verb, current)) {
+          updates.set(t, null)
+          settled = true
+          if (t.ours) record(describeSettled(t.verb, current, device(current)))
+        } else {
+          updates.set(t, { ...t, action: current })
+        }
+      }
+      const next = new Map(tracking)
+      for (const [id, t] of tracking) {
+        if (!updates.has(t)) continue
+        const u = updates.get(t)
+        if (u) next.set(id, u)
+        else next.delete(id)
+      }
+      tracking = next
+    } finally {
+      polling = false
+    }
+    if (settled) await load()
   }
 
   function record(o: Outcome) {
@@ -167,27 +203,23 @@
     busy = new Set(busy).add(a.id)
     try {
       const result = await call()
-      record(describeOutcome(verb, a, device(a), result))
-      if (verb === 'approve' && result.action && failureKind(result.action) === 'apply') {
-        applyFailures = new Map(applyFailures).set(a.id, result.action)
+      const outcome = describeOutcome(verb, a, device(a), result)
+      record(outcome)
+      if (outcome.settling && result.action) {
+        tracking = new Map(tracking).set(a.id, {
+          verb,
+          action: result.action,
+          since: new Date(),
+          ours: true,
+        })
       }
-      if (verb === 'revert' && revertLeftEnforced(result)) {
-        const still = result.action ?? {
-          ...a,
-          state: 'revert_failed',
-          failure_reason: result.error || a.failure_reason,
-        }
-        revertFailures = new Map(revertFailures).set(a.id, still)
-      } else if (verb === 'revert' && result.ok && revertFailures.has(a.id)) {
-        const next = new Map(revertFailures)
-        next.delete(a.id)
-        revertFailures = next
-      }
+      if (result.status === 422) void refreshPolicy()
     } catch (e) {
       record({
         tone: 'fail',
         state: 'error',
-        text: `${verb} ${a.id}: ${e instanceof Error ? e.message : 'request failed'}`,
+        text: `${verb} ${a.id}: ${message(e, 'request failed')}`,
+        settling: false,
       })
     } finally {
       const next = new Set(busy)
@@ -197,9 +229,55 @@
     }
   }
 
+  async function refreshPolicy() {
+    try {
+      policy = await fetchPolicy()
+      policyError = ''
+    } catch (e) {
+      policyError = message(e, 'could not read the killswitch policy')
+    }
+  }
+
+  // ── Approval dialog ────────────────────────────────────────────────
+
+  interface Approving {
+    action: EnforcementAction
+    choices: ActionTypeChoice[]
+    selected: string
+    defaultType: string
+  }
+  let approving: Approving | null = $state(null)
+  let dialog: HTMLDialogElement | undefined = $state()
+  let chosen = $derived.by(() => {
+    const open = approving as Approving | null
+    return open?.choices.find((c) => c.type === open.selected && c.usable)
+  })
+
   async function handleApprove(a: EnforcementAction) {
-    if (!confirm(approveConfirmText(a, device(a)))) return
-    await act(a, 'approve', () => approveAction(a.id))
+    await refreshPolicy()
+    const d = device(a)
+    // Without a current policy only the proposed type can be offered; the
+    // controller still refuses it (422) if it cannot carry it out.
+    const available = policy && !policyError ? policy.available_action_types : [a.action_type]
+    const choices = actionTypeChoices(a, d, available)
+    const defaultType = defaultChoice(choices)
+    approving = { action: a, choices, selected: defaultType, defaultType }
+    await tick()
+    dialog?.showModal()
+  }
+
+  function closeDialog() {
+    dialog?.close()
+    approving = null
+  }
+
+  async function confirmApprove(e: Event) {
+    e.preventDefault()
+    const current = approving
+    const type = chosen?.type
+    if (!current || !type) return
+    closeDialog()
+    await act(current.action, 'approve', () => approveAction(current.action.id, type))
   }
 
   async function handleReject(a: EnforcementAction) {
@@ -222,25 +300,44 @@
     await act(a, 'revert', () => revertAction(a.id, reason))
   }
 
+  function approver(a: EnforcementAction): string {
+    if (a.approved_by) return describeActor(a.approved_by)
+    return a.auto_approved ? describeActor('auto-policy') : '—'
+  }
+
+  function progressText(t: Tracked): string {
+    const a = t.action
+    if (t.verb === 'revert') return 'being lifted — still in force until the controller confirms'
+    if (!a.action_type) return 'approved — checking…'
+    return `being applied as ${formatActionType(a.action_type)} — not enforced until confirmed`
+  }
+
   onMount(() => {
     void load().finally(() => {
       loading = false
     })
-    // Best effort: names make the confirmation readable for actions from
-    // controllers that do not carry client_name yet.
+    void refreshPolicy()
+    // Best effort: names make the confirmation readable for actions that
+    // carry no client_name.
     fetchDevices()
-      .then((devices) => {
+      .then(({ devices }) => {
         names = new Map(
           devices.filter((d) => d.hostname).map((d) => [d.mac.toLowerCase(), d.hostname]),
         )
       })
       .catch(() => {})
-    const interval = setInterval(load, 10_000)
-    return () => clearInterval(interval)
+    const refresh = setInterval(load, 10_000)
+    // Unconfirmed operations are read more often, until they settle.
+    const settle = setInterval(() => void pollTracked(), 2_000)
+    return () => {
+      clearInterval(refresh)
+      clearInterval(settle)
+    }
   })
 </script>
 
 <h1>Killswitch</h1>
+<KillswitchNav />
 
 {#if outcomes.length > 0}
   <section class="outcomes" aria-live="polite">
@@ -264,6 +361,83 @@
     {#if d.ip}<span class="mono">{d.ip}</span>{/if}
   </td>
 {/snippet}
+
+<dialog bind:this={dialog} data-testid="approve-dialog" onclose={() => (approving = null)}>
+  {#if approving}
+    {@const a = approving.action}
+    {@const d = device(a)}
+    <form onsubmit={confirmApprove}>
+      <h2>Approve {a.id}?</h2>
+      <dl class="facts">
+        <dt>Device</dt>
+        <dd>{d.name || 'unknown name'}</dd>
+        <dt>MAC</dt>
+        <dd class="mono">{d.mac || 'unknown'}</dd>
+        <dt>IP</dt>
+        <dd class="mono">{d.ip || 'unknown'}</dd>
+        {#if a.detection_summary}
+          <dt>Detection</dt>
+          <dd>{a.detection_summary}</dd>
+        {/if}
+        <dt>Proposed</dt>
+        <dd>{formatActionType(a.action_type)} — {a.policy_rule || 'no rule recorded'}</dd>
+        {#if a.ttl_seconds}
+          <dt>Lifted after</dt>
+          <dd>{Math.round(a.ttl_seconds / 60)} min</dd>
+        {/if}
+      </dl>
+
+      {#if policyError}
+        <p class="warn">
+          Could not read which enforcement types are available ({policyError}); only the proposed
+          one is offered.
+        </p>
+      {/if}
+
+      <fieldset>
+        <legend>How to enforce it</legend>
+        {#if approving.choices.length === 0}
+          <p class="warn">The killswitch reports no enforcement type available right now.</p>
+        {/if}
+        {#each approving.choices as c (c.type)}
+          <label class="choice" class:strong={c.strong} class:unusable={!c.usable}>
+            <input
+              type="radio"
+              name="action_type"
+              value={c.type}
+              bind:group={approving.selected}
+              disabled={!c.usable}
+            />
+            <span class="choice-text">
+              <span class="choice-name"
+                >{c.name}{c.type === approving.defaultType ? ' (default)' : ''}</span
+              >
+              <span class="choice-does">{c.does}</span>
+              <span class="choice-needs">{c.needs}</span>
+              {#if !c.usable}<span class="choice-why">{c.why}</span>{/if}
+            </span>
+          </label>
+        {/each}
+      </fieldset>
+
+      {#if chosen}
+        <p class="question" class:strong={chosen.strong} data-testid="approve-question">
+          {approveQuestion(chosen, d)}
+          {chosen.strong ? '' : `It blocks ${describeBlock({ ...a, action_type: chosen.type })}.`}
+        </p>
+      {:else}
+        <p class="question">Choose how to enforce it.</p>
+      {/if}
+
+      <div class="dialog-buttons">
+        <button type="button" class="btn-cancel" onclick={closeDialog}>Cancel</button>
+        <button type="submit" class="btn-approve" disabled={!chosen}
+          >{chosen ? `Approve: ${chosen.name}` : 'Approve'}</button
+        >
+      </div>
+    </form>
+  {/if}
+</dialog>
 
 {#if loading}
   <p class="loading">Loading…</p>
@@ -297,7 +471,7 @@
               {@render target(a)}
               <td><span class="badge badge-medium">{formatActionType(a.action_type)}</span></td>
               <td>{a.ttl_seconds ? `${Math.round(a.ttl_seconds / 60)}m` : '—'}</td>
-              <td class="reason">{a.policy_rule}</td>
+              <td class="reason" title={a.policy_rule}>{a.policy_rule}</td>
               <td class="actions-cell">
                 <button
                   class="btn-approve"
@@ -315,21 +489,53 @@
     {/if}
   </section>
 
-  {#if failures.length > 0 || failedList.kind !== 'ok'}
+  {#if inProgress.length > 0}
+    <section class="progress-section">
+      <h2>In Progress ({inProgress.length})</h2>
+      <p class="muted">
+        The controller has not confirmed these yet. An approval is <strong>not</strong> enforced
+        until it is confirmed; a block being lifted stays <strong>in force</strong> until then. This page
+        keeps checking.
+      </p>
+      <table data-testid="progress-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Since</th>
+            <th>Target</th>
+            <th>Action</th>
+            <th>What is happening</th>
+            <th>Approved by</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each inProgress as t (t.action.id)}
+            {@const a = t.action}
+            <tr data-action-id={a.id} data-state={a.state} data-verb={t.verb}>
+              <td class="mono">{a.id}</td>
+              <td>{t.since.toLocaleTimeString()}</td>
+              {@render target(a)}
+              <td>{a.action_type ? formatActionType(a.action_type) : '—'}</td>
+              <td><span class="badge badge-medium">in progress</span> {progressText(t)}</td>
+              <td>{approver(a)}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </section>
+  {/if}
+
+  {#if failures.length > 0 || failedError}
     <section class="failed-section">
       <h2>Enforcement Failures ({failures.length})</h2>
       <p class="warn">
         An <strong>apply</strong> failure means the block was never put in place: the device is
         <strong>not</strong> blocked. A <strong>revert</strong> failure means the block could not be
-        lifted: it is <strong>still in force</strong>. Check the driver before relying on either.
+        lifted: it is <strong>still in force</strong>, and the controller keeps retrying. Check the
+        driver before relying on either.
       </p>
-      {#if failedList.kind === 'unavailable'}
-        <p class="muted">
-          This killswitch controller does not report past failures yet; only failures from actions
-          taken on this page are listed.
-        </p>
-      {:else if failedList.kind === 'error'}
-        <p class="error">{failedList.message}</p>
+      {#if failedError}
+        <p class="error">{failedError}</p>
       {/if}
       {#if failures.length > 0}
         <table data-testid="failures-table">
@@ -384,6 +590,7 @@
         </thead>
         <tbody>
           {#each enforced as a (a.id)}
+            {@const reverting = tracking.get(a.id)?.verb === 'revert'}
             <tr data-action-id={a.id} data-state={a.state}>
               <td class="mono">{a.id}</td>
               <td>{formatTime(enforcedSince(a))}</td>
@@ -396,52 +603,19 @@
                     >revert failed — still enforced</span
                   >
                 {/if}
+                {#if reverting}
+                  <span class="badge badge-medium">revert in progress</span>
+                {/if}
               </td>
               <td>{a.expires_at ? formatTime(a.expires_at) : 'never'}</td>
-              <td>{a.auto_approved ? 'auto-policy' : a.approved_by || '—'}</td>
+              <td data-testid="approved-by">{approver(a)}</td>
               <td class="actions-cell">
-                <button class="btn-revert" disabled={busy.has(a.id)} onclick={() => handleRevert(a)}
-                  >Revert</button
+                <button
+                  class="btn-revert"
+                  disabled={busy.has(a.id) || reverting}
+                  onclick={() => handleRevert(a)}>Revert</button
                 >
               </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    {/if}
-  </section>
-
-  <section>
-    <h2>History ({history.length})</h2>
-    {#if historyList.kind === 'unavailable'}
-      <p class="muted">History is not available from this killswitch controller yet.</p>
-    {:else if historyList.kind === 'error'}
-      <p class="error">{historyList.message}</p>
-    {:else if history.length === 0}
-      <p class="empty">No finished actions yet.</p>
-    {:else}
-      <table data-testid="history-table">
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Ended</th>
-            <th>Domain / IoC</th>
-            <th>Target</th>
-            <th>Action</th>
-            <th>Outcome</th>
-            <th>By</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each history as a (a.id)}
-            <tr data-action-id={a.id} data-state={a.state}>
-              <td class="mono">{a.id}</td>
-              <td>{formatTime(endedAt(a))}</td>
-              <td class="mono" title={a.detection_summary}>{a.blocked_domain || a.detection_id}</td>
-              {@render target(a)}
-              <td>{formatActionType(a.action_type)}</td>
-              <td title={a.failure_reason || a.reason}>{a.state.replace('_', ' ')}</td>
-              <td>{a.reverted_by || a.rejected_by || a.approved_by || '—'}</td>
             </tr>
           {/each}
         </tbody>
@@ -453,6 +627,10 @@
 <style>
   .failed-section {
     border-left: 3px solid #c0392b;
+    padding-left: 1rem;
+  }
+  .progress-section {
+    border-left: 3px solid var(--warning);
     padding-left: 1rem;
   }
   .warn {
@@ -482,7 +660,8 @@
   .outcome-ok {
     border-left-color: var(--success);
   }
-  .outcome-warn {
+  .outcome-warn,
+  .outcome-progress {
     border-left-color: var(--warning);
   }
   .outcome-fail {
@@ -518,7 +697,7 @@
   }
   button:disabled {
     opacity: 0.5;
-    cursor: wait;
+    cursor: not-allowed;
   }
   .btn-approve {
     background: var(--color-success, #238636);
@@ -541,5 +720,98 @@
   }
   .btn-revert:hover {
     filter: brightness(1.2);
+  }
+  .btn-cancel {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+  }
+
+  dialog {
+    max-width: 40rem;
+    width: calc(100% - 2rem);
+    margin: auto;
+    padding: 1.25rem 1.5rem;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  dialog::backdrop {
+    background: rgba(0, 0, 0, 0.6);
+  }
+  dialog h2 {
+    margin-top: 0;
+    color: var(--text-primary);
+  }
+  .facts {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.25rem 1rem;
+    font-size: 0.875rem;
+    margin-bottom: 1rem;
+  }
+  .facts dt {
+    color: var(--text-secondary);
+  }
+  fieldset {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 1rem;
+  }
+  legend {
+    padding: 0 0.25rem;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    font-weight: 600;
+  }
+  .choice {
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-start;
+    padding: 0.5rem 0;
+    cursor: pointer;
+  }
+  .choice + .choice {
+    border-top: 1px solid var(--border);
+  }
+  .choice input {
+    margin-top: 0.3rem;
+  }
+  .choice-text span {
+    display: block;
+  }
+  .choice-name {
+    font-weight: 600;
+  }
+  .choice.strong .choice-name {
+    color: var(--danger);
+  }
+  .choice-does {
+    font-size: 0.875rem;
+  }
+  .choice-needs,
+  .choice-why {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+  }
+  .choice.unusable {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+  .question {
+    font-weight: 600;
+    margin-bottom: 1rem;
+  }
+  .question.strong {
+    color: var(--danger);
+  }
+  .dialog-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
   }
 </style>
