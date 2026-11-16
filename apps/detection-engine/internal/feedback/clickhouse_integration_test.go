@@ -19,12 +19,11 @@ import (
 //	DETECTION_ENGINE_TEST_CLICKHOUSE_USER      a user that may SELECT/INSERT
 //	DETECTION_ENGINE_TEST_CLICKHOUSE_PASSWORD  netsoldier.detection_feedback
 //
-// The table must exist as migrations 017 and 022 create it, plus the
-// signal_class column:
+// The table must exist as migrations 017, 022 and 024 create it.
 //
-//	ALTER TABLE netsoldier.detection_feedback
-//	    ADD COLUMN IF NOT EXISTS signal_class LowCardinality(String) AFTER client_ip,
-//	    MODIFY ORDER BY (matched_ioc, client_ip, timestamp, signal_class);
+// Verdicts are recorded in a local journal and copied by the Forwarder;
+// ClickHouse's copy is what a journal that has never held a verdict is
+// seeded from (Restore), so the replay below is that import.
 func TestClickHouseFeedbackRoundTrip(t *testing.T) {
 	url := os.Getenv("DETECTION_ENGINE_TEST_CLICKHOUSE_URL")
 	if url == "" {
@@ -42,21 +41,31 @@ func TestClickHouseFeedbackRoundTrip(t *testing.T) {
 	run := time.Now().UnixNano()
 	c2 := fmt.Sprintf("c2-%d.real-threat.example", run)
 	vendor := fmt.Sprintf("telemetry-%d.vendor.example", run)
+	lifted := fmt.Sprintf("lifted-%d.example", run)
 	forged := fmt.Sprintf("forged-%d.example", run)
 
-	// As shipped before: no credentials. The verdict applies in memory, the
-	// write is refused, and the caller is told it did not persist.
-	s0 := New(NewCHSink(bare))
-	if persisted, err := s0.record(fp(c2+".bare", "", ioc)); err != nil || persisted {
-		t.Errorf("unauthenticated write: persisted=%v err=%v, want a reported failure", persisted, err)
+	// As shipped before: no credentials. The copy is refused and stays
+	// queued; the verdict is in force and on disk regardless.
+	st0 := diskStore(t, journalFile(t))
+	s0 := New(st0.Feedback())
+	if persisted, err := s0.record(fp(c2+".bare", "", ioc)); err != nil || !persisted {
+		t.Errorf("record: persisted=%v err=%v, want it on disk", persisted, err)
+	}
+	if NewForwarder(st0.Feedback(), NewCHSink(bare)).step(ctx) {
+		t.Error("an unauthenticated copy reported success")
+	}
+	if n, _ := st0.Feedback().Unforwarded(); n != 1 {
+		t.Errorf("a refused copy must stay queued, %d queued", n)
 	}
 	if _, err := LoadInto(ctx, bare, New(nil)); err == nil {
 		t.Error("an unauthenticated replay must fail, not come back empty")
 	}
 
 	// With credentials. The false positive and the "confirmed" land in the
-	// same second; replay must still end on "confirmed".
-	s1 := New(NewCHSink(authed))
+	// same second; replay must still end on "confirmed", and likewise for a
+	// lift.
+	st1 := diskStore(t, journalFile(t))
+	s1 := New(st1.Feedback())
 	same := time.Now().UTC().Truncate(time.Second)
 	s1.now = func() time.Time { return same }
 	fake := fp(c2, "", ioc)
@@ -66,6 +75,18 @@ func TestClickHouseFeedbackRoundTrip(t *testing.T) {
 	// Two classes for one indicator in the same second must both survive.
 	mustRecord(t, s1, fp(vendor, "192.168.1.50", detection.SignalBeacon))
 	mustRecord(t, s1, fp(vendor, "192.168.1.50", detection.SignalTLS))
+	mustRecord(t, s1, fp(lifted, "", ioc))
+	lift := fp(lifted, "", ioc)
+	lift.Analyst = "carol"
+	if _, _, err := s1.Lift(lift); err != nil {
+		t.Fatal(err)
+	}
+	f := NewForwarder(st1.Feedback(), NewCHSink(authed))
+	for f.step(ctx) {
+	}
+	if n, _ := st1.Feedback().Unforwarded(); n != 0 {
+		t.Fatalf("%d verdicts not copied", n)
+	}
 	// A row dated 2099, as the old client-supplied timestamps could write.
 	if err := authed.Insert(ctx, "detection_feedback", map[string]any{
 		"timestamp": time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC).Unix(), "matched_ioc": forged,
@@ -76,15 +97,19 @@ func TestClickHouseFeedbackRoundTrip(t *testing.T) {
 	// Merges must not change the outcome either.
 	_ = authed.QueryJSONEachRow(ctx, "OPTIMIZE TABLE detection_feedback FINAL", func(json.RawMessage) error { return nil })
 
-	// Restart.
-	s2 := New(nil)
-	n, err := LoadInto(ctx, authed, s2)
+	// The first start of a journal that has never held a verdict.
+	st2 := diskStore(t, journalFile(t))
+	s2 := New(st2.Feedback())
+	res, err := s2.Restore(ctx, authed)
 	if err != nil {
-		t.Fatalf("replay with credentials: %v", err)
+		t.Fatalf("import with credentials: %v", err)
 	}
-	t.Logf("replayed %d verdicts", n)
+	t.Logf("imported %d verdicts", res.Imported)
 	if s2.Suppressed(alertOf(c2, "192.168.1.77", ioc)) {
-		t.Error("after restart the confirmed C2 indicator is suppressed again")
+		t.Error("after the import the confirmed C2 indicator is suppressed again")
+	}
+	if s2.Suppressed(alertOf(lifted, "192.168.1.77", ioc)) {
+		t.Error("after the import a lifted suppression is back")
 	}
 	if !s2.Suppressed(alertOf(vendor, "192.168.1.50", detection.SignalBeacon)) ||
 		!s2.Suppressed(alertOf(vendor, "192.168.1.50", detection.SignalTLS)) {

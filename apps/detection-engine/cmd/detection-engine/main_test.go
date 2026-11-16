@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/feedback"
 	"github.com/migel9090/netSoldier/libs/events"
 )
 
@@ -414,6 +416,118 @@ func TestRunFeedbackTakesClassFromStoredAlert(t *testing.T) {
 	}
 	if ts, _ := time.Parse(time.RFC3339Nano, active[0]["timestamp"].(string)); ts.Year() != time.Now().Year() {
 		t.Errorf("verdict timestamp %v: the caller's 2099 was used", ts)
+	}
+}
+
+// postJSON sends an authenticated operator POST and decodes the answer.
+func postJSON(t *testing.T, addr, path string, body any) (int, map[string]any) {
+	t.Helper()
+	raw, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, "http://"+addr+path, strings.NewReader(string(raw)))
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	req.Header.Set("X-Netsoldier-Actor", "analyst")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp.StatusCode, out
+}
+
+func getSuppressions(t *testing.T, addr string) []map[string]any {
+	t.Helper()
+	resp, err := http.Get("http://" + addr + "/feedback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestRunVerdictSurvivesRestartWithoutClickHouse is the lite profile: no
+// ClickHouse. POST /feedback answered persisted=true while the verdict was
+// only in memory, and after a restart the detection the analyst had marked
+// benign reached the killswitch again. Now the verdict is in the local
+// store, and the next process still suppresses it — until it is lifted.
+func TestRunVerdictSurvivesRestartWithoutClickHouse(t *testing.T) {
+	var mu sync.Mutex
+	entries := []map[string]any{{
+		"question": map[string]string{"host": "evil.example.com", "type": "A"},
+		"client":   "192.168.1.42", "time": time.Now().Add(-time.Second),
+	}}
+	ag := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": entries})
+	}))
+	t.Cleanup(ag.Close)
+	inv := startInventory(t, "192.168.1.42", "aa:bb:cc:00:00:42", "kids-tablet")
+	rx := startReceiver(t)
+	env := baseEnv(t, &querylog{u: ag.URL}, rx, inv.url, filepath.Join(t.TempDir(), "de.db"))
+
+	addr, stop := start(t, env)
+	waitFor(t, "a recorded alert", func() bool { return len(getAlerts(t, addr)) > 0 })
+	a := getAlerts(t, addr)[0]
+	status, resp := postJSON(t, addr, "/feedback", map[string]string{"alert_id": a.ID,
+		"matched_ioc": a.MatchedIoC, "client_ip": a.ClientIP, "verdict": "false_positive"})
+	if status != http.StatusAccepted || resp["persisted"] != true {
+		t.Fatalf("POST /feedback = %d %v, want 202 persisted", status, resp)
+	}
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The device looks the name up again while nothing is running.
+	mu.Lock()
+	entries = append([]map[string]any{{
+		"question": map[string]string{"host": "evil.example.com", "type": "A"},
+		"client":   "192.168.1.42", "time": time.Now(),
+	}}, entries...)
+	mu.Unlock()
+
+	addr, stop = start(t, env)
+	sup := getSuppressions(t, addr)
+	if len(sup) != 1 || sup[0]["matched_ioc"] != a.MatchedIoC || sup[0]["analyst"] != "analyst" {
+		t.Fatalf("GET /feedback after restart = %v, want the verdict", sup)
+	}
+	recorded, _ := time.Parse(time.RFC3339Nano, sup[0]["timestamp"].(string))
+	expires, err := time.Parse(time.RFC3339Nano, fmt.Sprint(sup[0]["expires_at"]))
+	if err != nil || !expires.Equal(recorded.Add(feedback.DefaultSuppressionTTL)) {
+		t.Errorf("expires_at %v, want the verdict's time + the TTL (%v)", sup[0]["expires_at"], err)
+	}
+	suppressed := metric(t, addr, "detection_engine_alerts_suppressed_total")
+	waitFor(t, "the new lookup to be detected", func() bool { return len(getAlerts(t, addr)) >= 2 })
+	if n := metric(t, addr, "detection_engine_alerts_suppressed_total"); n <= suppressed {
+		t.Fatalf("the detection after the restart was not suppressed (%v -> %v)", suppressed, n)
+	}
+
+	// Lifting it is explicit, authenticated, and lasts across a restart too.
+	anon, err := http.Post("http://"+addr+"/feedback/lift", "application/json",
+		strings.NewReader(`{"matched_ioc":"`+a.MatchedIoC+`","client_ip":"`+a.ClientIP+`","signal_class":"ioc"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	anon.Body.Close()
+	if anon.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("an unauthenticated lift was answered %d", anon.StatusCode)
+	}
+	status, resp = postJSON(t, addr, "/feedback/lift", map[string]string{"matched_ioc": a.MatchedIoC,
+		"client_ip": a.ClientIP, "signal_class": a.SignalClass})
+	if status != http.StatusOK || resp["status"] != "lifted" || resp["persisted"] != true {
+		t.Fatalf("POST /feedback/lift = %d %v", status, resp)
+	}
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	addr, _ = start(t, env)
+	if sup := getSuppressions(t, addr); len(sup) != 0 {
+		t.Errorf("GET /feedback after the lift and a restart = %v", sup)
 	}
 }
 

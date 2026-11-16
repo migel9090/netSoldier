@@ -1,7 +1,8 @@
 // Package store is detection-engine's local state: the alert history served
 // by GET /alerts, the outbox of detections still owed to the killswitch, how
-// far each input (the AdGuard querylog, each sensor table) has been read, and
-// which input records have already made a detection.
+// far each input (the AdGuard querylog, each sensor table) has been read,
+// which input records have already made a detection, and the analysts'
+// verdicts that suppress detections.
 //
 // It is one SQLite file (pure Go, modernc.org/sqlite) on the pod's volume.
 // Both halves used to live in memory — a 1000-entry ring and a 64-slot
@@ -34,7 +35,7 @@ var (
 	durableGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "detection_engine",
 		Name:      "store_durable",
-		Help:      "1 when alerts and undelivered detections are kept on disk, 0 when only in memory (lost on restart).",
+		Help:      "1 when alerts, undelivered detections and analyst verdicts are kept on disk, 0 when only in memory (lost on restart).",
 	})
 )
 
@@ -84,6 +85,24 @@ var schema = []string{
 		seen_at INTEGER NOT NULL     -- unix ms, server clock
 	) WITHOUT ROWID;
 	CREATE INDEX ingest_records_age ON ingest_records (seen_at);`,
+
+	`CREATE TABLE feedback (
+		seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+		recorded_at     INTEGER NOT NULL,           -- unix ms, server clock
+		alert_id        TEXT NOT NULL DEFAULT '',
+		matched_ioc     TEXT NOT NULL,
+		client_ip       TEXT NOT NULL DEFAULT '',
+		signal_class    TEXT NOT NULL,
+		verdict         TEXT NOT NULL,              -- false_positive | confirmed | lifted
+		reason          TEXT NOT NULL DEFAULT '',
+		analyst         TEXT NOT NULL DEFAULT '',
+		forwarded       INTEGER NOT NULL DEFAULT 0, -- 1 once ClickHouse accepted it
+		attempts        INTEGER NOT NULL DEFAULT 0,
+		next_attempt_at INTEGER NOT NULL DEFAULT 0, -- unix ms
+		last_error      TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX feedback_replay ON feedback (recorded_at, seq);
+	CREATE INDEX feedback_outbox ON feedback (forwarded, seq);`,
 }
 
 // Store is an open local database.

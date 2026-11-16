@@ -8,8 +8,7 @@ import (
 	"time"
 )
 
-// feedbackTable is netsoldier.detection_feedback (migrations 017, 022; the
-// signal_class column needs the migration that adds it).
+// feedbackTable is netsoldier.detection_feedback (migrations 017, 022, 024).
 const feedbackTable = "detection_feedback"
 
 // clockSkew is how far in the future a stored verdict may be dated and
@@ -28,8 +27,9 @@ type Querier interface {
 	QueryJSONEachRow(ctx context.Context, query string, fn func(json.RawMessage) error) error
 }
 
-// CHSink persists verdicts to detection_feedback so suppressions survive
-// restarts (replayed by LoadInto).
+// CHSink copies verdicts to detection_feedback, the history behind
+// dashboards and audits. It is not what makes a verdict survive a restart:
+// the local journal is.
 type CHSink struct {
 	ch Inserter
 }
@@ -37,10 +37,8 @@ type CHSink struct {
 func NewCHSink(ch Inserter) *CHSink { return &CHSink{ch: ch} }
 
 // Write inserts one verdict. A failure is already logged and counted by
-// the client; the caller only learns that the verdict is not durable.
-func (s *CHSink) Write(v Verdict) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+// the client; the Forwarder retries it.
+func (s *CHSink) Write(ctx context.Context, v Verdict) error {
 	return s.ch.Insert(ctx, feedbackTable, map[string]any{
 		"timestamp":    v.Timestamp.Unix(),
 		"alert_id":     v.AlertID,
@@ -53,22 +51,24 @@ func (s *CHSink) Write(v Verdict) error {
 	})
 }
 
-// LoadInto rebuilds the active suppressions after a restart by replaying
-// the verdicts still inside the TTL in the order this service recorded
-// them, so the last word wins — and within one second a "confirmed" counts
-// as the later one: an ambiguous tie must not keep a detection silenced.
+// LoadInto replays the verdicts ClickHouse holds within the TTL in the
+// order this service recorded them, so the last word wins — and within one
+// second a "confirmed" or a lift counts as the later one: an ambiguous tie
+// must not keep a detection silenced. Restore uses it once, to seed a
+// journal that has never held a verdict from what earlier versions kept
+// only in ClickHouse.
 //
 // The timestamp is only ever the server's (Record assigns it). A row dated
 // in the future therefore did not come from Record and is ignored.
-func LoadInto(ctx context.Context, ch Querier, store *Store) (int, error) {
+func LoadInto(ctx context.Context, ch Querier, s *Store) (int, error) {
 	q := fmt.Sprintf(`SELECT matched_ioc, client_ip, signal_class, verdict, reason, analyst,
   toUnixTimestamp(timestamp) AS ts
 FROM %s
 WHERE timestamp >= now() - INTERVAL %d SECOND
-ORDER BY timestamp ASC, verdict = 'confirmed' ASC
-FORMAT JSONEachRow`, feedbackTable, int64(store.TTL()/time.Second))
+ORDER BY timestamp ASC, verdict = 'false_positive' DESC
+FORMAT JSONEachRow`, feedbackTable, int64(s.TTL()/time.Second))
 
-	horizon := store.now().Add(clockSkew)
+	horizon := s.now().Add(clockSkew)
 	var loaded, future, invalid int
 	err := ch.QueryJSONEachRow(ctx, q, func(raw json.RawMessage) error {
 		var r struct {
@@ -94,7 +94,7 @@ FORMAT JSONEachRow`, feedbackTable, int64(store.TTL()/time.Second))
 			future++
 			return nil
 		}
-		if err := store.applyLoaded(Verdict{
+		if err := s.applyLoaded(Verdict{
 			MatchedIoC:  r.MatchedIoC,
 			ClientIP:    r.ClientIP,
 			SignalClass: r.SignalClass,
