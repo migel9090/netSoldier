@@ -133,6 +133,26 @@ func TestCredentialsInURLMoveToHeaders(t *testing.T) {
 	}
 }
 
+// TestStringCarriesNoSecret: String is what the start-up log prints
+// ("clickhouse configured"). Wherever the deployment put the password —
+// CLICKHOUSE_PASSWORD, the URL's userinfo, a password query parameter
+// ClickHouse's HTTP interface would also accept — it is not in there.
+func TestStringCarriesNoSecret(t *testing.T) {
+	for _, cfg := range []Config{
+		{URL: "http://ch.lan:8123", Database: "netsoldier", User: "de", Password: "env-5ecret"},
+		{URL: "http://de:url-5ecret@ch.lan:8123/", Database: "netsoldier"},
+		{URL: "http://ch.lan:8123/?user=de&password=query-5ecret#frag-5ecret", Database: "netsoldier"},
+	} {
+		c, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s := c.String(); strings.Contains(s, "5ecret") || !strings.Contains(s, "http://ch.lan:8123") {
+			t.Errorf("String() = %q for %s: want the endpoint and no secret", s, redact(cfg.URL))
+		}
+	}
+}
+
 // TestFailedWriteIsCounted: write failures were Debug lines next to
 // counters that kept rising.
 func TestFailedWriteIsCounted(t *testing.T) {

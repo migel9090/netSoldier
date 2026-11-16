@@ -62,6 +62,40 @@ func TestRecentIsNewestFirstWithLimit(t *testing.T) {
 	}
 }
 
+// TestRecentIsBoundedForEveryCaller: only HandleList bounded the limit. A
+// negative one panicked in make, and reached SQLite as "no limit"; a huge
+// one was passed through.
+func TestRecentIsBoundedForEveryCaller(t *testing.T) {
+	a := memStore(t).Alerts(0, MaxListLimit+100)
+	tx, err := a.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < MaxListLimit+10; i++ {
+		body, _ := json.Marshal(alert(i, events.SeverityLow))
+		if _, err := tx.Exec(`INSERT INTO alerts (id, recorded_at, sev_rank, body) VALUES (?, ?, ?, ?)`,
+			fmt.Sprintf("DET-t-%d", i), time.Now().UnixMilli(), 1, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for _, limit := range []int{-1, 0, MaxListLimit + 1, 1 << 40} {
+		got, err := a.Recent(limit)
+		if err != nil {
+			t.Fatalf("Recent(%d): %v", limit, err)
+		}
+		want := MaxListLimit
+		if limit < 1 {
+			want = 0
+		}
+		if len(got) != want || got == nil {
+			t.Errorf("Recent(%d) returned %d alerts (nil=%v), want %d", limit, len(got), got == nil, want)
+		}
+	}
+}
+
 // TestHandleListSaysSuppressed: an alert recorded under an analyst's verdict
 // carries "suppressed": true in GET /alerts; every other alert has no such
 // key, so readers of the old shape see nothing new.

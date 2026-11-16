@@ -114,8 +114,18 @@ func (a *Alerts) Prune() (int64, error) {
 	return aged + over, nil
 }
 
-// Recent returns up to limit alerts, most recently recorded first.
+// Recent returns up to limit alerts, most recently recorded first, and
+// never more than MaxListLimit, whoever asks: the result is built in
+// memory, and SQLite reads a negative LIMIT as no limit at all. A limit
+// below 1 asks for nothing. (HandleList validates ?limit= as well; this is
+// the bound that holds for every caller.)
 func (a *Alerts) Recent(limit int) ([]detection.Alert, error) {
+	if limit < 1 {
+		return []detection.Alert{}, nil
+	}
+	if limit > MaxListLimit {
+		limit = MaxListLimit
+	}
 	rows, err := a.db.Query(`SELECT body FROM alerts ORDER BY seq DESC LIMIT ?`, limit)
 	if err != nil {
 		storeErrors.WithLabelValues("alert_read").Inc()
