@@ -34,6 +34,7 @@ func startKillswitch(t *testing.T, ksBin, agURL string, extra map[string]string)
 		"KILLSWITCH_INGEST_TOKEN": e2eIngestToken,
 		"WEBHOOK_SECRET":          e2eWebhookSecret,
 		"ALLOWLIST_IPS":           "192.168.1.1",
+		"POLICY_AUTO_BLOCK":       "on",
 	}
 	for k, v := range extra {
 		env[k] = v

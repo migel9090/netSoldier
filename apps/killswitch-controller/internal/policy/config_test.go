@@ -35,6 +35,7 @@ func TestAllowlistTypoPendingOnlyOverride(t *testing.T) {
 	t.Setenv("ALLOWLIST_MACS", "aa:bb:cc:dd:ee:fg")
 	t.Setenv("ALLOWLIST_IPS", "192.168.1.53")
 	t.Setenv("ALLOWLIST_ON_INVALID", OnInvalidPendingOnly)
+	t.Setenv("POLICY_AUTO_BLOCK", AutoBlockOn)       // switched on, and still held
 	t.Setenv("POLICY_ALLOW_EMPTY_ALLOWLIST", "true") // must not reopen it either
 
 	p := mustLoad(t)
@@ -61,6 +62,7 @@ func TestAllowlistOnInvalidRejectsUnknownMode(t *testing.T) {
 	}
 	// and an override with nothing to override is harmless
 	t.Setenv("ALLOWLIST_MACS", "aa:bb:cc:dd:ee:ff")
+	t.Setenv("POLICY_AUTO_BLOCK", AutoBlockOn)
 	if p := mustLoad(t); !p.AutoBlockEnabled() {
 		t.Error("a valid allowlist with the override set should enable auto-block")
 	}
@@ -111,12 +113,95 @@ func TestGatewayConfigRejections(t *testing.T) {
 }
 
 func TestAllowEmptyAllowlistFromEnv(t *testing.T) {
+	t.Setenv("POLICY_AUTO_BLOCK", AutoBlockOn)
 	if p := mustLoad(t); p.AutoBlockEnabled() {
 		t.Fatal("an empty allowlist disables auto-block by default")
 	}
 	t.Setenv("POLICY_ALLOW_EMPTY_ALLOWLIST", "true")
 	if p := mustLoad(t); !p.AutoBlockEnabled() {
 		t.Fatal("POLICY_ALLOW_EMPTY_ALLOWLIST=true should enable it")
+	}
+}
+
+// TestAllowlistDoesNotSwitchAutoBlockOn: a non-empty allowlist used to be
+// what enabled automation, so "never touch this server" — or an installer
+// protecting the host's own address — turned it on as a side effect. Only
+// POLICY_AUTO_BLOCK=on does; the allowlist keeps protecting either way.
+func TestAllowlistDoesNotSwitchAutoBlockOn(t *testing.T) {
+	t.Setenv("ALLOWLIST_IPS", "192.168.1.1,192.168.1.53")
+	t.Setenv("ALLOWLIST_MACS", "aa:bb:cc:dd:ee:ff")
+	protected := feedMatch(99, events.SeverityCritical)
+	protected.ClientIP = "192.168.1.53"
+
+	for _, setting := range []string{"", AutoBlockOff} {
+		t.Run("POLICY_AUTO_BLOCK="+setting, func(t *testing.T) {
+			t.Setenv("POLICY_AUTO_BLOCK", setting)
+			p := mustLoad(t)
+			if p.AutoBlock || p.AutoBlockEnabled() {
+				t.Fatal("auto-block is on without POLICY_AUTO_BLOCK=on")
+			}
+			d := p.Evaluate(feedMatch(99, events.SeverityCritical))
+			if d.Action != "pending" || d.Withheld != WithheldAutoBlockOff ||
+				!strings.Contains(d.Reason, "auto-block disabled: POLICY_AUTO_BLOCK=off; every other auto-block condition held") {
+				t.Fatalf("got %+v, want pending withheld by %s", d, WithheldAutoBlockOff)
+			}
+			if reason, label := p.AutoBlockHold(); label != WithheldAutoBlockOff || reason == "" {
+				t.Errorf("AutoBlockHold = %q, %q", reason, label)
+			}
+			if d := p.Evaluate(protected); d.Action != "ignore" {
+				t.Errorf("an allowlisted device must still be ignored, got %+v", d)
+			}
+			if d := p.Evaluate(feedMatch(60, events.SeverityMedium)); d.Action != "pending" || d.Withheld != "" {
+				t.Errorf("only events that would have auto-blocked are withheld, got %+v", d)
+			}
+		})
+	}
+
+	t.Setenv("POLICY_AUTO_BLOCK", AutoBlockOn)
+	p := mustLoad(t)
+	if d := p.Evaluate(feedMatch(99, events.SeverityCritical)); d.Action != "auto_block" {
+		t.Fatalf("POLICY_AUTO_BLOCK=on with an allowlist should auto-block, got %+v", d)
+	}
+	if d := p.Evaluate(protected); d.Action != "ignore" {
+		t.Errorf("an allowlisted device must still be ignored, got %+v", d)
+	}
+}
+
+// TestAutoBlockOnStillNeedsProtection: switching automation on does not
+// waive the conditions that held it before.
+func TestAutoBlockOnStillNeedsProtection(t *testing.T) {
+	t.Setenv("POLICY_AUTO_BLOCK", AutoBlockOn)
+	if _, label := mustLoad(t).AutoBlockHold(); label != WithheldEmptyAllowlist {
+		t.Errorf("on with an empty allowlist: held by %q, want %q", label, WithheldEmptyAllowlist)
+	}
+	t.Setenv("ALLOWLIST_MACS", "aa:bb:cc:dd:ee:fg")
+	t.Setenv("ALLOWLIST_ON_INVALID", OnInvalidPendingOnly)
+	if _, label := mustLoad(t).AutoBlockHold(); label != WithheldInvalidProtection {
+		t.Errorf("on with a rejected entry: held by %q, want %q", label, WithheldInvalidProtection)
+	}
+	// Off is the first reason: fixing the entry alone would not enable it.
+	t.Setenv("POLICY_AUTO_BLOCK", "")
+	if _, label := mustLoad(t).AutoBlockHold(); label != WithheldAutoBlockOff {
+		t.Errorf("off with a rejected entry: held by %q, want %q", label, WithheldAutoBlockOff)
+	}
+}
+
+// TestAutoBlockSettingIsOnOrOff: anything else refuses the start. Read as
+// off it would silently drop the automation the operator asked for; read as
+// on it would enforce without a human nobody agreed to.
+func TestAutoBlockSettingIsOnOrOff(t *testing.T) {
+	t.Setenv("ALLOWLIST_IPS", "192.168.1.1")
+	for _, v := range []string{"true", "1", "yes", "ON", "On", " on", "off ", "disabled"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("POLICY_AUTO_BLOCK", v)
+			p, err := LoadFromEnv()
+			if err == nil {
+				t.Fatalf("POLICY_AUTO_BLOCK=%q loaded a policy with AutoBlock=%v", v, p.AutoBlock)
+			}
+			if !strings.Contains(err.Error(), "POLICY_AUTO_BLOCK") || !strings.Contains(err.Error(), `"on" or "off"`) {
+				t.Errorf("error %q should name the setting and its values", err)
+			}
+		})
 	}
 }
 

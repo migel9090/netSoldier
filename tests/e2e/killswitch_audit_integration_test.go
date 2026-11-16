@@ -37,6 +37,7 @@ func TestKillswitchAuditReachesClickHouse(t *testing.T) {
 		"KILLSWITCH_INGEST_TOKEN": e2eIngestToken,
 		"WEBHOOK_SECRET":          e2eWebhookSecret,
 		"ALLOWLIST_IPS":           "192.168.1.1",
+		"POLICY_AUTO_BLOCK":       "on",
 		"CLICKHOUSE_URL":          chURL,
 		"CLICKHOUSE_DATABASE":     "netsoldier",
 	}))

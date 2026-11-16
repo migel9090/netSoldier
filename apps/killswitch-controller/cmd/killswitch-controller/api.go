@@ -83,6 +83,7 @@ func (s *server) handleGetPolicy(w http.ResponseWriter, _ *http.Request) {
 		"pend_min_severity":           pol.PendMinSeverity,
 		"default_ttl":                 pol.DefaultTTL,
 		"default_action":              pol.DefaultAction,
+		"auto_block":                  autoBlockSetting(pol), // off by choice, told apart from held back
 		"auto_block_allowed":          hold == "",
 		"auto_block_disabled_reason":  hold,
 		"allowlist_entries":           pol.Allowlist.Len(),

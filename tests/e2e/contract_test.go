@@ -222,7 +222,9 @@ func TestEmptyAllowlistDisablesAutoBlock(t *testing.T) {
 		"KILLSWITCH_API_KEY":      e2eAPIKey,
 		"KILLSWITCH_INGEST_TOKEN": e2eIngestToken,
 		"WEBHOOK_SECRET":          e2eWebhookSecret,
-		// No ALLOWLIST_* at all: nothing is protected.
+		// Automation switched on, and no ALLOWLIST_* at all: nothing is
+		// protected, which still holds it back.
+		"POLICY_AUTO_BLOCK": "on",
 	})
 	t.Cleanup(stopKs)
 	waitHealthy(t, "http://"+ksAddr+"/healthz")
@@ -232,15 +234,16 @@ func TestEmptyAllowlistDisablesAutoBlock(t *testing.T) {
 
 	var result struct {
 		Decision struct {
-			Action string
+			Action   string
+			Withheld string
 		} `json:"decision"`
 		Action *events.EnforcementAction `json:"action"`
 	}
 	postAuthedJSON(t, "http://"+ksAddr+"/evaluate", e2eIngestToken, ev, &result)
 
-	if result.Decision.Action != "pending" {
-		t.Fatalf("decision = %q, want pending: with an empty allowlist the target could "+
-			"be the router, so auto-block must be withheld", result.Decision.Action)
+	if result.Decision.Action != "pending" || result.Decision.Withheld != "empty_allowlist" {
+		t.Fatalf("decision = %+v, want pending withheld by empty_allowlist: with an empty allowlist "+
+			"the target could be the router, so auto-block must be withheld", result.Decision)
 	}
 	if result.Action == nil || result.Action.State != events.StatePending {
 		t.Fatalf("action should be queued as pending, got %+v", result.Action)
@@ -282,6 +285,7 @@ func TestHeuristicsNeverAutoBlockE2E(t *testing.T) {
 		// Match the proxmox-soc overlay: corroboration required.
 		"POLICY_AUTO_MIN_SIGNALS": "2",
 		"ALLOWLIST_IPS":           "192.168.1.1",
+		"POLICY_AUTO_BLOCK":       "on",
 	})
 	t.Cleanup(stopKs)
 	waitHealthy(t, "http://"+ksAddr+"/healthz")
@@ -384,6 +388,8 @@ func TestAllowlistProtectsGatewayE2E(t *testing.T) {
 		// works: the detection pipeline emits lowercase colon form.
 		"ALLOWLIST_MACS": "AA-BB-CC-DD-EE-FF",
 		"ALLOWLIST_IPS":  "192.168.1.0/29",
+		// With automation on, which is when the allowlist matters most.
+		"POLICY_AUTO_BLOCK": "on",
 	})
 	t.Cleanup(stopKs)
 	waitHealthy(t, "http://"+ksAddr+"/healthz")

@@ -37,6 +37,7 @@ func auditEvent(id, client string, conf int, target string, signals ...events.Si
 func TestAuditCompositesNeverReachAdGuard(t *testing.T) {
 	ag := newMiniAdGuard(t)
 	pol := policy.DefaultPolicy()
+	pol.AutoBlock = true
 	pol.AutoMinSignals = 2
 	if err := pol.Allowlist.AddIP("192.168.1.1"); err != nil {
 		t.Fatal(err)
@@ -86,6 +87,7 @@ func TestAuditCompositesNeverReachAdGuard(t *testing.T) {
 // arp_isolate a single feed match isolated a device at layer 2 with no human.
 func TestDefaultActionNeverChangesAutoBlock(t *testing.T) {
 	pol := policy.DefaultPolicy()
+	pol.AutoBlock = true
 	pol.DefaultAction = events.ActionARPIsolate
 	if err := pol.Allowlist.AddIP("192.168.1.1"); err != nil {
 		t.Fatal(err)
@@ -118,6 +120,7 @@ func TestDefaultActionNeverChangesAutoBlock(t *testing.T) {
 // visible — once per detection, not once per delivery.
 func TestPendingOnlyModeCountsEveryWithheldAutoBlock(t *testing.T) {
 	pol := policy.DefaultPolicy()
+	pol.AutoBlock = true // switched on, and still held by the rejected entry
 	if err := pol.Allowlist.AddIP("192.168.1.1"); err != nil {
 		t.Fatal(err)
 	}
@@ -147,5 +150,53 @@ func TestPendingOnlyModeCountsEveryWithheldAutoBlock(t *testing.T) {
 	}
 	if drv.applied.Load() != 0 {
 		t.Fatal("nothing may be enforced in pending-only mode")
+	}
+}
+
+// TestAllowlistAloneQueuesForAHuman: an operator who only lists the devices
+// never to touch has not asked for automation. The allowlist used to switch
+// it on; now a detection that meets every other auto-block condition is
+// queued, counted and explained as POLICY_AUTO_BLOCK=off — and GET /policy
+// says the switch is off rather than that something is wrong.
+func TestAllowlistAloneQueuesForAHuman(t *testing.T) {
+	pol := policy.DefaultPolicy()
+	if err := pol.Allowlist.AddIP("192.168.1.1"); err != nil {
+		t.Fatal(err)
+	}
+	drv := &recordingDriver{}
+	env := newHarness(t, harnessOpts{pol: pol, driver: drv})
+	label := map[string]string{"reason": policy.WithheldAutoBlockOff}
+	before := metricValue(t, "killswitch_auto_block_withheld_total", label)
+
+	got := env.evaluate(criticalIoCEvent())
+	if got.Decision.Action != "pending" || got.Decision.Withheld != policy.WithheldAutoBlockOff ||
+		got.Action == nil || got.Action.State != events.StatePending || got.Action.AutoApproved {
+		t.Fatalf("got %+v, want a pending action withheld by %s", got, policy.WithheldAutoBlockOff)
+	}
+	if !strings.Contains(got.Action.PolicyRule, "auto-block disabled: POLICY_AUTO_BLOCK=off") {
+		t.Errorf("policy_rule should say why: %q", got.Action.PolicyRule)
+	}
+	if n := metricValue(t, "killswitch_auto_block_withheld_total", label); n != before+1 {
+		t.Errorf("withheld counter moved %v → %v, want +1", before, n)
+	}
+	if drv.applied.Load() != 0 {
+		t.Fatal("nothing may be enforced without a human while auto-block is off")
+	}
+
+	var view map[string]any
+	if status := env.get("/policy", &view); status != 200 {
+		t.Fatalf("GET /policy: %d", status)
+	}
+	if view["auto_block"] != policy.AutoBlockOff || view["auto_block_allowed"] != false ||
+		view["auto_block_disabled_reason"] != "auto-block disabled: POLICY_AUTO_BLOCK=off" {
+		t.Errorf("GET /policy: auto_block=%v allowed=%v reason=%v", view["auto_block"],
+			view["auto_block_allowed"], view["auto_block_disabled_reason"])
+	}
+
+	view = nil
+	on := newHarness(t, harnessOpts{}) // switched on, allowlist 192.168.1.1
+	if status := on.get("/policy", &view); status != 200 || view["auto_block"] != policy.AutoBlockOn ||
+		view["auto_block_allowed"] != true || view["auto_block_disabled_reason"] != "" {
+		t.Errorf("GET /policy once switched on: %d %v", status, view)
 	}
 }
