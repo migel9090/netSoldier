@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +23,8 @@ import (
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/feedback"
 	"github.com/migel9090/netSoldier/libs/events"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 const (
@@ -661,6 +664,83 @@ func TestTracingEnabled(t *testing.T) {
 		if got := tracingEnabled(getenv); got != want {
 			t.Errorf("OTEL_SDK_DISABLED=%q: tracingEnabled = %v, want %v", v, got, want)
 		}
+	}
+}
+
+// collectorStub stands in for an OTLP collector: it only counts the
+// connections the exporter opens.
+func collectorStub(t *testing.T) (addr string, dials *atomic.Int32) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	dials = &atomic.Int32{}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			dials.Add(1)
+			_ = c.Close()
+		}
+	}()
+	return ln.Addr().String(), dials
+}
+
+// TestTracingOnlyWithAnEndpoint: no endpoint configured means no exporter at
+// all. The endpoint used to default to the in-cluster collector's name, and
+// outside Kubernetes the exporter dialled it in the background forever. A
+// configured endpoint, in either form, is still exported to.
+func TestTracingOnlyWithAnEndpoint(t *testing.T) {
+	prev := otel.GetTracerProvider()
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+	plain, plainDials := collectorStub(t)
+
+	for name, env := range map[string]map[string]string{
+		"nothing configured": {},
+		"OTEL_SDK_DISABLED":  {"OTEL_SDK_DISABLED": "true", "OTEL_EXPORTER_OTLP_ENDPOINT": plain},
+	} {
+		if shutdown := startTracing(context.Background(), func(k string) string { return env[k] }); shutdown != nil {
+			_ = shutdown(context.Background())
+			t.Fatalf("%s: an exporter was started", name)
+		}
+	}
+	if _, sdk := otel.GetTracerProvider().(*sdktrace.TracerProvider); sdk || plainDials.Load() != 0 {
+		t.Fatalf("tracing off, yet a provider was installed (%v) or the collector dialled (%d)", sdk, plainDials.Load())
+	}
+
+	urlForm, urlDials := collectorStub(t)
+	for _, tc := range []struct {
+		key, value string
+		dials      *atomic.Int32
+	}{
+		{"OTEL_EXPORTER_OTLP_ENDPOINT", plain, plainDials},
+		{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://" + urlForm, urlDials},
+	} {
+		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
+			shutdown := startTracing(context.Background(), func(k string) string {
+				if k == tc.key {
+					return tc.value
+				}
+				return ""
+			})
+			if shutdown == nil {
+				t.Fatal("no exporter with an endpoint configured")
+			}
+			_, span := otel.Tracer("test").Start(context.Background(), "probe")
+			span.End()
+			// The collector stub speaks no OTLP, so the export fails; what
+			// matters is that it was attempted at the configured address.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = shutdown(ctx)
+			if tc.dials.Load() == 0 {
+				t.Errorf("the exporter never dialled %s", tc.value)
+			}
+		})
 	}
 }
 
