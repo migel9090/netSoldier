@@ -4,6 +4,10 @@ includes:
   # Proxmox lab VM with k3s and gVisor (infra/README.md): lab:plan, lab:up,
   # lab:down, lab:kubeconfig, lab:smoke, ...
   lab: ./infra/lab/Taskfile.yml
+  # The lite profile (Podman, no Kubernetes) on a lab host with a simulated
+  # home LAN (deploy/README.md): lite:e2e, lite:scenario, lite:uninstall, ...
+  # Needs LITE_HOST, the lab host's address.
+  lite: ./infra/lab/lite/Taskfile.yml
 
 vars:
   REGISTRY: ghcr.io/migel9090
