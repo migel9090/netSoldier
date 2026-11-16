@@ -1,0 +1,6 @@
+# netSoldier lite configuration — written by the podman_edge role from
+# podman_edge_settings; edit the inventory, not this file. Keys and their
+# meaning: deploy/podman/netsoldier.conf.example.
+{% for key, value in podman_edge_settings | dictsort %}
+{{ key }}={{ value if value is string else (value | join(',') if value is iterable else value) }}
+{% endfor %}

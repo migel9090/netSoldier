@@ -1,0 +1,16 @@
+---
+- name: Find the installed netsoldier-lite
+  ansible.builtin.stat:
+    path: /usr/local/sbin/netsoldier-lite
+  register: podman_edge_cli
+
+- name: Run netsoldier-lite uninstall
+  ansible.builtin.command: /usr/local/sbin/netsoldier-lite uninstall
+  register: podman_edge_uninstall
+  changed_when: true
+  when: podman_edge_cli.stat.exists
+
+- name: Uninstaller output
+  ansible.builtin.debug:
+    var: podman_edge_uninstall.stdout_lines
+  when: podman_edge_uninstall is not skipped
