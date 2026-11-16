@@ -562,6 +562,27 @@ func TestNoPacketCaptureInTheBinary(t *testing.T) {
 	}
 }
 
+// A deployment without an OpenTelemetry collector (the core profile) turns
+// tracing off with the standard switch. Before, nothing could: an empty
+// endpoint fell back to the collector's in-cluster name, and the exporter
+// logged a failed export every ten seconds.
+func TestTracingEnabled(t *testing.T) {
+	for v, want := range map[string]bool{
+		"": true, "false": true, "0": true, "nonsense": true,
+		"true": false, "TRUE": false, "1": false, " true ": false,
+	} {
+		getenv := func(k string) string {
+			if k == "OTEL_SDK_DISABLED" {
+				return v
+			}
+			return ""
+		}
+		if got := tracingEnabled(getenv); got != want {
+			t.Errorf("OTEL_SDK_DISABLED=%q: tracingEnabled = %v, want %v", v, got, want)
+		}
+	}
+}
+
 // metric scrapes one sample from /metrics (0 when absent).
 func metric(t *testing.T, addr, series string) float64 {
 	t.Helper()
