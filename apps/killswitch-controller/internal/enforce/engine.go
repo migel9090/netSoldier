@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -43,6 +44,10 @@ type Config struct {
 	// past a TTL or a backoff gives the engine and the store one clock it
 	// moves, instead of sleeping through it.
 	Now func() time.Time
+	// Withheld names the action types the service left without a driver on
+	// purpose, and why (credentials missing, a prerequisite not met). The
+	// reason is what an operator is told when the type is not offered.
+	Withheld map[string]string
 }
 
 func (c *Config) defaults() {
@@ -134,14 +139,35 @@ func (e *Engine) Available() []string {
 	return out
 }
 
+// knownTypes are the action types a driver exists for.
+var knownTypes = []string{events.ActionDNSSinkhole, events.ActionARPIsolate, events.ActionSwitchACL}
+
+// Unavailable says, for every action type an operator cannot choose now,
+// why not.
+func (e *Engine) Unavailable() map[string]string {
+	out := map[string]string{}
+	for _, t := range knownTypes {
+		var u *UnavailableError
+		if errors.As(e.checkType(t), &u) {
+			out[t] = u.Reason
+		}
+	}
+	return out
+}
+
+// Usable returns nil when action type t can be carried out now, and the
+// reason (an *UnavailableError) when it cannot.
+func (e *Engine) Usable(t string) error { return e.unavailable(t) }
+
 func (e *Engine) checkType(t string) error {
 	d, ok := e.drivers[t]
 	if !ok {
-		reason := "no driver is configured for it"
-		switch t {
-		case events.ActionDNSSinkhole, events.ActionARPIsolate, events.ActionSwitchACL:
-		default:
-			reason = "unknown action type"
+		reason := "unknown action type"
+		if slices.Contains(knownTypes, t) {
+			reason = "no driver is configured for it"
+			if why := e.cfg.Withheld[t]; why != "" {
+				reason = why
+			}
 		}
 		return &UnavailableError{Type: t, Reason: reason}
 	}

@@ -88,9 +88,11 @@ func (s *server) handleGetPolicy(w http.ResponseWriter, _ *http.Request) {
 		"auto_block_disabled_reason":  hold,
 		"allowlist_entries":           pol.Allowlist.Len(),
 		"rejected_protection_entries": len(pol.RejectedEntries),
-		// What an operator may choose in an approve right now.
-		"available_action_types": s.engine.Available(),
-		"pending_ttl_seconds":    int(s.store.PendingTTL().Seconds()),
+		// What an operator may choose in an approve right now, and why each
+		// of the others is not offered.
+		"available_action_types":   s.engine.Available(),
+		"unavailable_action_types": s.engine.Unavailable(),
+		"pending_ttl_seconds":      int(s.store.PendingTTL().Seconds()),
 	})
 }
 

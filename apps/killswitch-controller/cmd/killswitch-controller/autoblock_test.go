@@ -2,11 +2,14 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/actions"
 	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/drivers"
+	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/enforce"
 	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/policy"
 	"github.com/migel9090/netSoldier/libs/events"
 )
@@ -198,5 +201,55 @@ func TestAllowlistAloneQueuesForAHuman(t *testing.T) {
 	if status := on.get("/policy", &view); status != 200 || view["auto_block"] != policy.AutoBlockOn ||
 		view["auto_block_allowed"] != true || view["auto_block_disabled_reason"] != "" {
 		t.Errorf("GET /policy once switched on: %d %v", status, view)
+	}
+}
+
+// TestWithoutAUsableSinkholeAnAutoBlockIsQueued: without ADGUARD_USER and
+// ADGUARD_PASSWORD the sinkhole was registered anyway — offered to
+// operators, chosen by the policy, failing every apply. Left out, it is
+// not offered, GET /policy says why, and a detection the policy would have
+// blocked is a pending action whose policy_rule says nothing usable is
+// configured; the service records, queues and audits as ever.
+func TestWithoutAUsableSinkholeAnAutoBlockIsQueued(t *testing.T) {
+	h := newHarness(t, harnessOpts{
+		drivers: map[string]drivers.Driver{},
+		engine:  enforce.Config{Withheld: map[string]string{events.ActionDNSSinkhole: noAdGuardCredentials}},
+	})
+	got := h.evaluate(criticalIoCEvent())
+	if got.status != http.StatusOK || got.Decision.Action != "pending" || got.Decision.Withheld != policy.WithheldNoEnforcement {
+		t.Fatalf("decision: %d %+v", got.status, got.Decision)
+	}
+	if got.Action == nil || got.Action.State != events.StatePending ||
+		!strings.Contains(got.Action.PolicyRule, "no usable enforcement is configured") ||
+		!strings.Contains(got.Action.PolicyRule, "ADGUARD_USER/ADGUARD_PASSWORD not set") {
+		t.Fatalf("action: %+v", got.Action)
+	}
+
+	var pol struct {
+		Available   []string          `json:"available_action_types"`
+		Unavailable map[string]string `json:"unavailable_action_types"`
+		Allowed     bool              `json:"auto_block_allowed"`
+		Reason      string            `json:"auto_block_disabled_reason"`
+	}
+	if status := h.get("/policy", &pol); status != http.StatusOK {
+		t.Fatalf("GET /policy: %d", status)
+	}
+	if len(pol.Available) != 0 || pol.Unavailable[events.ActionDNSSinkhole] != noAdGuardCredentials ||
+		pol.Allowed || !strings.Contains(pol.Reason, "no usable enforcement is configured") {
+		t.Errorf("GET /policy: %+v", pol)
+	}
+
+	// An operator is told the same when approving it as proposed.
+	status, a := h.approve(got.Action.ID, nil)
+	if status != http.StatusUnprocessableEntity || !strings.Contains(a.Error, "ADGUARD_USER/ADGUARD_PASSWORD not set") ||
+		a.AvailableActionTypes == nil || len(a.AvailableActionTypes) != 0 {
+		t.Errorf("approve: %d %+v", status, a)
+	}
+	if st := h.action(got.Action.ID).State; st != events.StatePending {
+		t.Errorf("a refused approve moved the action: %s", st)
+	}
+	var trail []actions.AuditEntry
+	if h.get("/audit?action_id="+got.Action.ID, &trail); len(trail) != 1 || trail[0].ToState != events.StatePending {
+		t.Errorf("audit: %+v", trail)
 	}
 }

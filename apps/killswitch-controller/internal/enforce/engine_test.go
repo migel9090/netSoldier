@@ -301,6 +301,32 @@ func TestApplyWithoutDriver(t *testing.T) {
 	}
 }
 
+// TestWithheldTypesSayWhy: a type the service left out on purpose is
+// refused with the reason it was left out, and Unavailable lists every
+// type an operator cannot choose, with its reason.
+func TestWithheldTypesSayWhy(t *testing.T) {
+	s, err := actions.Open(filepath.Join(t.TempDir(), "ks.db"), actions.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	e := New(s, map[string]drivers.Driver{}, Config{Withheld: map[string]string{
+		events.ActionDNSSinkhole: "ADGUARD_USER/ADGUARD_PASSWORD not set"}})
+	var u *UnavailableError
+	if err := e.Usable(events.ActionDNSSinkhole); !errors.As(err, &u) || u.Reason != "ADGUARD_USER/ADGUARD_PASSWORD not set" ||
+		u.Available == nil || len(u.Available) != 0 {
+		t.Fatalf("Usable(dns_sinkhole) = %v", err)
+	}
+	got := e.Unavailable()
+	if len(got) != 3 || got[events.ActionDNSSinkhole] != "ADGUARD_USER/ADGUARD_PASSWORD not set" ||
+		got[events.ActionSwitchACL] != "no driver is configured for it" {
+		t.Errorf("Unavailable() = %v", got)
+	}
+	if len(e.Available()) != 0 {
+		t.Errorf("Available() = %v", e.Available())
+	}
+}
+
 // TestFailedRevertIsRetriedAndNeverReportedReverted: AdGuard answering 502
 // during a manual revert made the action failed; the reaper never retried
 // and a second revert reported "reverted" without calling the driver.

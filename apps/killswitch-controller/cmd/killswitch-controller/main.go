@@ -83,7 +83,8 @@ var (
 func init() {
 	prometheus.MustRegister(allowlistEntries, autoBlockEnabled, autoBlockConfigured, rejectedRequests, duplicateEvents,
 		autoBlockWithheld, protectionEntriesRejected)
-	for _, r := range []string{policy.WithheldAutoBlockOff, policy.WithheldEmptyAllowlist, policy.WithheldInvalidProtection} {
+	for _, r := range []string{policy.WithheldAutoBlockOff, policy.WithheldEmptyAllowlist, policy.WithheldInvalidProtection,
+		policy.WithheldNoEnforcement} {
 		autoBlockWithheld.WithLabelValues(r)
 	}
 }
@@ -134,14 +135,14 @@ func main() {
 		slog.Info("auto-block is OFF (POLICY_AUTO_BLOCK=off): every action requires human approval; " +
 			"set POLICY_AUTO_BLOCK=on to let the policy sinkhole attested known-bad domains on its own")
 	}
-	switch hold, _ := pol.AutoBlockHold(); {
+	switch {
 	case len(pol.RejectedEntries) > 0:
 		slog.Error("auto-block DISABLED: started with rejected protection entries "+
 			"(ALLOWLIST_ON_INVALID=pending-only); every action requires human approval",
 			"rejected", pol.RejectedEntries)
 	case !pol.AutoBlock:
 		// Said above; the allowlist only matters to automation once it is on.
-	case hold != "":
+	case pol.Allowlist.Len() == 0 && !pol.AllowEmptyAllowlist:
 		slog.Error("allowlist is EMPTY — auto-block disabled, every action requires " +
 			"human approval. Set ALLOWLIST_MACS/ALLOWLIST_IPS to protect critical " +
 			"devices, or POLICY_ALLOW_EMPTY_ALLOWLIST=true to override.")
@@ -149,11 +150,6 @@ func main() {
 		slog.Warn("allowlist is EMPTY and POLICY_ALLOW_EMPTY_ALLOWLIST is set — " +
 			"auto-block may target devices the operator never listed")
 	}
-	autoBlockAllowed := pol.AutoBlockEnabled()
-	allowlistEntries.Set(float64(pol.Allowlist.Len()))
-	autoBlockEnabled.Set(boolGauge(autoBlockAllowed))
-	autoBlockConfigured.Set(boolGauge(pol.AutoBlock))
-	protectionEntriesRejected.Set(float64(len(pol.RejectedEntries)))
 
 	agURL := envOr("ADGUARD_URL", "http://adguard-web.dns.svc:3000")
 
@@ -165,21 +161,6 @@ func main() {
 		slog.Error("could not determine every infrastructure address to protect — "+
 			"arp_isolate and switch_acl will be refused", "error", infraErr)
 	}
-
-	slog.Info("policy loaded",
-		"auto_confidence", pol.AutoMinConfidence,
-		"auto_severity", pol.AutoMinSeverity,
-		"auto_min_signals", pol.AutoMinSignals,
-		"auto_action", events.ActionDNSSinkhole,
-		"default_ttl", pol.DefaultTTL,
-		"default_action", pol.DefaultAction,
-		"allowlist_entries", pol.Allowlist.Len(),
-		"gateway_ip", pol.GatewayIP.String(),
-		"gateway_mac", pol.GatewayMAC,
-		"infrastructure", append(pol.Infrastructure.IPs(), pol.Infrastructure.MACs()...),
-		"auto_block", autoBlockSetting(pol),
-		"auto_block_allowed", autoBlockAllowed,
-	)
 
 	// Protected endpoints shared by every driver: the policy allowlist is the
 	// primary guard, but a driver that can reach the gateway must also refuse
@@ -214,9 +195,16 @@ func main() {
 	defer store.Close()
 	slog.Info("action database open", "path", dbPath, "instance", store.Instance())
 
-	driverMap := buildDrivers(pol, guard, store, agURL, creds, infraErr)
+	driverMap, withheld := buildDrivers(pol, guard, store, agURL, creds, infraErr)
 	for name := range driverMap {
 		slog.Info("driver configured", "driver", name)
+	}
+	if len(driverMap) == 0 {
+		// Not a reason to stop: detections are still evaluated, queued for
+		// approval and audited, and an operator can see why nothing can be
+		// enforced (GET /policy).
+		slog.Warn("no enforcement driver is usable: actions are recorded, queued and audited, "+
+			"but nothing can be enforced", "unavailable", withheld)
 	}
 
 	chURL := os.Getenv("CLICKHOUSE_URL")
@@ -234,7 +222,31 @@ func main() {
 			AuditForwarding:     chURL != "",
 			CommandRetention:    24 * time.Hour,
 		},
+		Withheld: withheld,
 	})
+	wireAutoEnforcement(pol, engine)
+
+	autoBlockAllowed := pol.AutoBlockEnabled()
+	allowlistEntries.Set(float64(pol.Allowlist.Len()))
+	autoBlockEnabled.Set(boolGauge(autoBlockAllowed))
+	autoBlockConfigured.Set(boolGauge(pol.AutoBlock))
+	protectionEntriesRejected.Set(float64(len(pol.RejectedEntries)))
+	slog.Info("policy loaded",
+		"auto_confidence", pol.AutoMinConfidence,
+		"auto_severity", pol.AutoMinSeverity,
+		"auto_min_signals", pol.AutoMinSignals,
+		"auto_action", events.ActionDNSSinkhole,
+		"default_ttl", pol.DefaultTTL,
+		"default_action", pol.DefaultAction,
+		"allowlist_entries", pol.Allowlist.Len(),
+		"gateway_ip", pol.GatewayIP.String(),
+		"gateway_mac", pol.GatewayMAC,
+		"infrastructure", append(pol.Infrastructure.IPs(), pol.Infrastructure.MACs()...),
+		"auto_block", autoBlockSetting(pol),
+		"auto_block_allowed", autoBlockAllowed,
+		"auto_block_disabled_reason", func() string { h, _ := pol.AutoBlockHold(); return h }(),
+	)
+
 	engine.Recover()
 	go engine.Run(ctx)
 
@@ -289,18 +301,29 @@ func main() {
 	}
 }
 
-// buildDrivers configures the enforcement drivers.
-func buildDrivers(pol *policy.Policy, guard *drivers.TargetGuard, store *actions.Store, agURL string,
-	creds credentials, infraErr error) map[string]drivers.Driver {
-	driverMap := make(map[string]drivers.Driver)
+// noAdGuardCredentials is why the DNS sinkhole is not offered without
+// ADGUARD_USER and ADGUARD_PASSWORD.
+const noAdGuardCredentials = "ADGUARD_USER/ADGUARD_PASSWORD not set: the DNS sinkhole cannot authenticate to AdGuard Home"
 
+// buildDrivers configures the enforcement drivers. A driver that cannot
+// work as configured is not registered; withheld says, for each action type
+// left out, why — the engine tells operators so, and GET /policy lists it.
+func buildDrivers(pol *policy.Policy, guard *drivers.TargetGuard, store *actions.Store, agURL string,
+	creds credentials, infraErr error) (driverMap map[string]drivers.Driver, withheld map[string]string) {
+	driverMap = make(map[string]drivers.Driver)
+	withheld = make(map[string]string)
+
+	// A sinkhole that cannot authenticate would accept approvals and fail
+	// every one of them; offering it is worse than saying it is not there.
 	agUser := os.Getenv("ADGUARD_USER")
 	agPass := os.Getenv("ADGUARD_PASSWORD")
 	if agUser == "" || agPass == "" {
-		slog.Error("ADGUARD_USER/ADGUARD_PASSWORD not set — the DNS sinkhole driver " +
-			"cannot authenticate and enforcement will fail")
+		withheld[events.ActionDNSSinkhole] = noAdGuardCredentials
+		slog.Error("dns_sinkhole is NOT offered: " + noAdGuardCredentials + "; detections are still " +
+			"recorded, queued for approval and audited, and auto-block holds them for a human")
+	} else {
+		driverMap[events.ActionDNSSinkhole] = drivers.NewSinkholeDriver(agURL, agUser, agPass, store)
 	}
-	driverMap[events.ActionDNSSinkhole] = drivers.NewSinkholeDriver(agURL, agUser, agPass, store)
 
 	if v := os.Getenv("ARP_INTERFACE"); v != "" {
 		slog.Error("ARP_INTERFACE is no longer read: this service sends no frames. ARP isolation "+
@@ -316,14 +339,17 @@ func buildDrivers(pol *policy.Policy, guard *drivers.TargetGuard, store *actions
 			slog.Error("arp_isolate will be REFUSED (releases still work)", "error", notOffered)
 		}
 		driverMap[events.ActionARPIsolate] = drivers.NewARPIsolateDriver(store, guard, notOffered)
+	} else {
+		withheld[events.ActionARPIsolate] = "NETAGENT_KILLSWITCH_TOKEN not set: no netagent can carry out an isolation"
 	}
 
 	swURL := os.Getenv("SWITCH_WEBHOOK_URL")
-	if swURL != "" {
-		if err := deviceDriverReady(pol, infraErr); err != nil {
-			slog.Error("switch driver unavailable — switch_acl actions will be REFUSED", "error", err)
-			swURL = ""
-		}
+	if swURL == "" {
+		withheld[events.ActionSwitchACL] = "SWITCH_WEBHOOK_URL not set"
+	} else if err := deviceDriverReady(pol, infraErr); err != nil {
+		slog.Error("switch driver unavailable — switch_acl actions will be REFUSED", "error", err)
+		withheld[events.ActionSwitchACL] = err.Error()
+		swURL = ""
 	}
 	if swURL != "" {
 		vlan := 0
@@ -332,6 +358,7 @@ func buildDrivers(pol *policy.Policy, guard *drivers.TargetGuard, store *actions
 			if err != nil || n < 0 || n > 4094 {
 				slog.Error("invalid SWITCH_QUARANTINE_VLAN — refusing to guess; "+
 					"the driver would silently disable the port instead of moving it", "value", v)
+				withheld[events.ActionSwitchACL] = "invalid SWITCH_QUARANTINE_VLAN: want 0-4094"
 				n = -1
 			}
 			vlan = n
@@ -345,7 +372,15 @@ func buildDrivers(pol *policy.Policy, guard *drivers.TargetGuard, store *actions
 			}
 		}
 	}
-	return driverMap
+	return driverMap, withheld
+}
+
+// wireAutoEnforcement tells the policy whether its automatic path can be
+// carried out: auto-block always enforces through the DNS sinkhole, and a
+// detection it would block while the sinkhole is not usable is queued for
+// a human, saying so, instead of approved into an apply that can only fail.
+func wireAutoEnforcement(pol *policy.Policy, engine *enforce.Engine) {
+	pol.AutoEnforcement = func() error { return engine.Usable(events.ActionDNSSinkhole) }
 }
 
 // authMiddleware enforces the three roles. POST /evaluate takes the ingest

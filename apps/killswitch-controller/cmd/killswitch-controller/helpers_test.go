@@ -158,6 +158,7 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 	}
 	eng := enforce.New(store, o.drivers, o.engine)
 	t.Cleanup(func() { eng.Shutdown(5 * time.Second) })
+	wireAutoEnforcement(o.pol, eng)
 	s := &server{pol: o.pol, engine: eng, store: store,
 		ledger: newEvaluationLedger(store, ledgerRetention(0)), responseWait: o.wait}
 	if s.responseWait == 0 {

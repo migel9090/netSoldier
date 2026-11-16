@@ -32,6 +32,7 @@ const (
 	WithheldAutoBlockOff      = "auto_block_off"
 	WithheldEmptyAllowlist    = "empty_allowlist"
 	WithheldInvalidProtection = "invalid_protection_config"
+	WithheldNoEnforcement     = "no_enforcement"
 )
 
 // POLICY_AUTO_BLOCK values. Unset means AutoBlockOff.
@@ -57,7 +58,8 @@ const OnInvalidPendingOnly = "pending-only"
 //     least AutoMinSignals distinct signal classes when it is a composite;
 //  4. the client is neither allowlisted nor protected infrastructure;
 //  5. the operator switched auto-block on (POLICY_AUTO_BLOCK=on) and nothing
-//     holds it service-wide (AutoBlockHold).
+//     holds it service-wide (AutoBlockHold) — among which: the DNS sinkhole
+//     can actually be carried out (AutoEnforcement).
 //
 // The automatic path always enforces through the DNS sinkhole. Everything
 // else that clears the thresholds becomes a pending action whose
@@ -107,6 +109,15 @@ type Policy struct {
 	// (ALLOWLIST_ON_INVALID=pending-only), and while it is, auto-block is
 	// disabled: the device the operator meant to protect is not protected.
 	RejectedEntries []string
+
+	// AutoEnforcement says why the automatic path's enforcement (the DNS
+	// sinkhole) cannot be carried out now, or nil when it can. The service
+	// sets it from the drivers it configured; nil means nothing stands in
+	// the way. A detection that would be auto-blocked while it reports a
+	// reason is queued for a human instead, the reason in its policy_rule,
+	// the way every other service-wide hold is: an approved action with no
+	// driver to apply it could only fail.
+	AutoEnforcement func() error
 }
 
 // DefaultPolicy returns a production-safe policy with conservative thresholds.
@@ -349,6 +360,11 @@ func parseSeverity(key, v string) (string, bool) {
 func (p *Policy) AutoBlockHold() (reason, label string) {
 	if !p.AutoBlock {
 		return "auto-block disabled: POLICY_AUTO_BLOCK=" + AutoBlockOff, WithheldAutoBlockOff
+	}
+	if p.AutoEnforcement != nil {
+		if err := p.AutoEnforcement(); err != nil {
+			return "auto-block disabled: no usable enforcement is configured: " + err.Error(), WithheldNoEnforcement
+		}
 	}
 	if n := len(p.RejectedEntries); n > 0 {
 		reason = fmt.Sprintf("auto-block disabled: %d protection entr%s rejected at start-up, ALLOWLIST_ON_INVALID=%s",

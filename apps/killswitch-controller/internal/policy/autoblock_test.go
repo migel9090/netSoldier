@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"errors"
 	"math/rand/v2"
 	"strings"
 	"testing"
@@ -516,6 +517,38 @@ func TestRejectedEntriesWithholdAutoBlock(t *testing.T) {
 	if d.Action != "pending" || d.Withheld != WithheldInvalidProtection ||
 		!strings.Contains(d.Reason, "1 protection entry was rejected at start-up") {
 		t.Fatalf("got %+v", d)
+	}
+}
+
+// TestNoUsableEnforcementWithholdsAutoBlock: with the DNS sinkhole not
+// configured, a detection that met every condition was approved by the
+// policy and then failed for want of a driver. It is queued for a human,
+// and its policy_rule says why.
+func TestNoUsableEnforcementWithholdsAutoBlock(t *testing.T) {
+	p := newTestPolicy()
+	missing := errors.New(`action type "dns_sinkhole" is not available: ADGUARD_USER/ADGUARD_PASSWORD not set`)
+	p.AutoEnforcement = func() error { return missing }
+	d := p.Evaluate(feedMatch(95, events.SeverityCritical))
+	if d.Action != "pending" || d.Withheld != WithheldNoEnforcement ||
+		!strings.Contains(d.Reason, "no usable enforcement is configured") || !strings.Contains(d.Reason, "ADGUARD_USER") {
+		t.Fatalf("got %+v", d)
+	}
+	if p.AutoBlockEnabled() {
+		t.Error("AutoBlockEnabled with nothing to enforce through")
+	}
+	if hold, label := p.AutoBlockHold(); label != WithheldNoEnforcement || !strings.Contains(hold, "no usable enforcement") {
+		t.Errorf("AutoBlockHold = %q, %q", hold, label)
+	}
+	// Switched off, the switch is the reason: nothing would have used it.
+	p.AutoBlock = false
+	if _, label := p.AutoBlockHold(); label != WithheldAutoBlockOff {
+		t.Errorf("auto-block off: held by %q", label)
+	}
+	// Usable again: auto-block.
+	p.AutoBlock = true
+	p.AutoEnforcement = func() error { return nil }
+	if d := p.Evaluate(feedMatch(95, events.SeverityCritical)); d.Action != "auto_block" {
+		t.Fatalf("with the sinkhole usable: %+v", d)
 	}
 }
 

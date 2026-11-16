@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/policy"
+	"github.com/migel9090/netSoldier/libs/events"
 )
 
 func noLookup(context.Context, string) ([]netip.Addr, error) {
@@ -201,6 +203,87 @@ func secureEnv(addr string) map[string]string {
 		"KILLSWITCH_INGEST_TOKEN": "in",
 		"WEBHOOK_SECRET":          "s",
 		"ALLOWLIST_IPS":           "192.168.1.1",
+		"ADGUARD_USER":            "u",
+		"ADGUARD_PASSWORD":        "p",
+	}
+}
+
+// TestStartsWithoutAUsableSinkhole: without ADGUARD_USER/ADGUARD_PASSWORD
+// the service logged an error and registered the DNS sinkhole anyway, so
+// GET /policy offered it and every action approved for it failed. Now it
+// is left out and the service says why — once in the log, in GET /policy,
+// and in the policy_rule of a detection auto-block would have taken — and
+// still records, queues and audits.
+func TestStartsWithoutAUsableSinkhole(t *testing.T) {
+	addr := freeTCPAddr(t)
+	env := secureEnv(addr)
+	env["ADGUARD_USER"], env["ADGUARD_PASSWORD"] = "", ""
+	env["POLICY_AUTO_BLOCK"] = policy.AutoBlockOn
+	cmd, out := startMain(t, env)
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+	metrics := scrapeMetrics(t, addr, out)
+	for _, want := range []string{"killswitch_auto_block_configured 1", "killswitch_auto_block_enabled 0"} {
+		if !strings.Contains(metrics, want) {
+			t.Errorf("/metrics should contain %q", want)
+		}
+	}
+	said := 0
+	for _, line := range strings.Split(startupLog(t, out), "\n") {
+		if strings.Contains(line, "ADGUARD_USER") && strings.Contains(line, `"level":"ERROR"`) {
+			said++
+		}
+	}
+	if said != 1 {
+		t.Errorf("the missing AdGuard credentials were logged at error level %d times, want once:\n%s", said, out)
+	}
+
+	call := func(method, path, token string, body []byte, hdr map[string]string, dst any) int {
+		t.Helper()
+		req, _ := http.NewRequest(method, "http://"+addr+path, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		return resp.StatusCode
+	}
+	var pol struct {
+		Available   []string          `json:"available_action_types"`
+		Unavailable map[string]string `json:"unavailable_action_types"`
+		Allowed     bool              `json:"auto_block_allowed"`
+		Reason      string            `json:"auto_block_disabled_reason"`
+	}
+	if status := call(http.MethodGet, "/policy", "op", nil, nil, &pol); status != http.StatusOK ||
+		len(pol.Available) != 0 || !strings.Contains(pol.Unavailable[events.ActionDNSSinkhole], "ADGUARD_USER/ADGUARD_PASSWORD not set") ||
+		pol.Allowed || !strings.Contains(pol.Reason, "no usable enforcement is configured") {
+		t.Fatalf("GET /policy: %d %+v", status, pol)
+	}
+
+	ev := criticalIoCEvent()
+	ev.ClientIP = "198.51.100.77" // no interface of this machine: not protected infrastructure
+	body, _ := json.Marshal(ev)
+	var res struct {
+		Decision policy.Decision           `json:"decision"`
+		Action   *events.EnforcementAction `json:"action"`
+	}
+	status := call(http.MethodPost, "/evaluate", "in", body,
+		map[string]string{events.SignatureHeader: events.SignPayload("s", body)}, &res)
+	if status != http.StatusOK || res.Decision.Withheld != policy.WithheldNoEnforcement || res.Action == nil ||
+		res.Action.State != events.StatePending || !strings.Contains(res.Action.PolicyRule, "no usable enforcement is configured") {
+		t.Fatalf("POST /evaluate: %d %+v %+v", status, res.Decision, res.Action)
+	}
+	if m := scrapeMetrics(t, addr, out); !strings.Contains(m, `killswitch_auto_block_withheld_total{reason="no_enforcement"} 1`) {
+		t.Error("the withheld auto-block is not counted")
 	}
 }
 
