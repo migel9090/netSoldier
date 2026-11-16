@@ -6,6 +6,7 @@
 package tlsheur
 
 import (
+	"container/list"
 	"fmt"
 	"log/slog"
 	"net"
@@ -23,16 +24,26 @@ import (
 const (
 	suppressWindow = time.Hour
 	maxSuppressed  = 16384
+	// sweepEvery is how often expired suppressions are dropped. Insertion
+	// order is expiry order, so a sweep only walks what has expired.
+	sweepEvery = time.Minute
 )
 
-var tlsFindings = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Namespace: "detection_engine",
-	Name:      "tls_heuristic_findings_total",
-	Help:      "Suspicious TLS client findings by reason.",
-}, []string{"reason"})
+var (
+	tlsFindings = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "detection_engine",
+		Name:      "tls_heuristic_findings_total",
+		Help:      "Suspicious TLS client findings by reason.",
+	}, []string{"reason"})
+	suppressEvicted = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "detection_engine",
+		Name:      "tls_suppressions_evicted_total",
+		Help:      "TLS finding suppressions dropped before expiry to keep the table bounded; the finding can fire again.",
+	})
+)
 
 func init() {
-	prometheus.MustRegister(tlsFindings)
+	prometheus.MustRegister(tlsFindings, suppressEvicted)
 }
 
 // Resolver answers "which name did this client resolve to this address"
@@ -50,8 +61,19 @@ type Analyzer struct {
 	localNets []*net.IPNet
 	emit      func(detection.Alert)
 
-	mu         sync.Mutex
-	suppressed map[string]time.Time
+	mu  sync.Mutex
+	now func() time.Time
+	// suppressed maps a finding key to its element in order, which holds
+	// the suppressions oldest first.
+	suppressed map[string]*list.Element
+	order      *list.List
+	nextSweep  time.Time
+}
+
+// suppression is one entry of the suppression table.
+type suppression struct {
+	key   string
+	until time.Time
 }
 
 func New(m *iocmatch.Matcher, r Resolver, localCIDRs []string, emit func(detection.Alert)) *Analyzer {
@@ -66,12 +88,15 @@ func New(m *iocmatch.Matcher, r Resolver, localCIDRs []string, emit func(detecti
 		resolver:   r,
 		localNets:  nets,
 		emit:       emit,
-		suppressed: make(map[string]time.Time),
+		now:        time.Now,
+		suppressed: make(map[string]*list.Element),
+		order:      list.New(),
 	}
 }
 
-// DefaultLocalCIDRs covers RFC1918 plus loopback.
-var DefaultLocalCIDRs = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8"}
+// DefaultLocalCIDRs is ingest's LOCAL_NETWORKS default: RFC 1918, IPv6
+// unique-local, loopback.
+var DefaultLocalCIDRs = ingest.DefaultLocalCIDRs
 
 // Handle inspects one TLS client observation.
 func (a *Analyzer) Handle(ev ingest.SensorEvent) {
@@ -165,6 +190,8 @@ func (a *Analyzer) alert(ev ingest.SensorEvent, f finding) {
 	confidence := detection.ClampConfidence(f.confidence)
 	source := firstNonEmpty(f.ioc.Source, "tls-heuristics")
 	alert := detection.Alert{
+		// One finding per handshake row, so the row names it.
+		Record:      ev.Record(),
 		Timestamp:   ev.Timestamp,
 		Summary:     f.summary + " (" + clientIP + " → " + ev.DstIP + ")",
 		Domain:      observedName(ev),
@@ -224,24 +251,54 @@ func destination(ev ingest.SensorEvent) *events.Target {
 	return nil
 }
 
-// suppress returns true when the same finding fired within the window.
+// suppress returns true when the same finding fired within the window, and
+// otherwise starts suppressing it.
+//
+// The table is bounded by maxSuppressed whatever the input: when it is full
+// the oldest suppression goes. It used to sweep the whole map on every
+// insert past the limit and insert anyway when the sweep freed nothing, so a
+// client presenting a fresh random SNI on every handshake — each one a new
+// key — grew it without bound and made every insert walk all of it.
+// Evicting early only means a finding can fire again sooner; it never
+// silences one.
 func (a *Analyzer) suppress(key string) bool {
-	now := time.Now()
+	now := a.now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if until, ok := a.suppressed[key]; ok && now.Before(until) {
-		return true
+	if !now.Before(a.nextSweep) {
+		a.sweep(now)
+		a.nextSweep = now.Add(sweepEvery)
 	}
-	if len(a.suppressed) >= maxSuppressed {
-		for k, until := range a.suppressed {
-			if now.After(until) {
-				delete(a.suppressed, k)
-			}
+	if el, ok := a.suppressed[key]; ok {
+		s := el.Value.(*suppression)
+		if now.Before(s.until) {
+			return true
 		}
+		s.until = now.Add(suppressWindow)
+		a.order.MoveToBack(el)
+		return false
 	}
-	a.suppressed[key] = now.Add(suppressWindow)
+	for a.order.Len() >= maxSuppressed {
+		oldest := a.order.Front()
+		delete(a.suppressed, oldest.Value.(*suppression).key)
+		a.order.Remove(oldest)
+		suppressEvicted.Inc()
+	}
+	a.suppressed[key] = a.order.PushBack(&suppression{key: key, until: now.Add(suppressWindow)})
 	return false
+}
+
+// sweep drops expired suppressions from the front of the order.
+func (a *Analyzer) sweep(now time.Time) {
+	for el := a.order.Front(); el != nil; el = a.order.Front() {
+		s := el.Value.(*suppression)
+		if now.Before(s.until) {
+			return
+		}
+		delete(a.suppressed, s.key)
+		a.order.Remove(el)
+	}
 }
 
 func (a *Analyzer) isLocal(ip string) bool {

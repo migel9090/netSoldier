@@ -16,7 +16,7 @@ import (
 
 func parseRow(t *testing.T, src Source, row string) SensorEvent {
 	t.Helper()
-	ev, _, err := src.Parse(json.RawMessage(row))
+	ev, err := src.Parse(json.RawMessage(row))
 	if err != nil {
 		t.Fatalf("%s: %v", src.Name(), err)
 	}
@@ -36,8 +36,7 @@ func onlySignal(t *testing.T, a detection.Alert) events.Signal {
 func TestSuricataAlertNamesItsRuleNotADestination(t *testing.T) {
 	ev := parseRow(t, SuricataAlerts{}, `{"ts":1789000000,"flow_id":"1","src_ip":"192.168.1.50","src_port":51544,
 		"dest_ip":"203.0.113.7","dest_port":443,"proto":"TCP","alert_signature":"ET MALWARE Cobalt Strike Beacon Observed",
-		"alert_category":"Malware C2","alert_severity":1,"alert_signature_id":2031999,
-		"threat_intel":"{\"source\":\"threatfox\",\"confidence\":250}"}`)
+		"alert_category":"Malware C2","alert_severity":1,"alert_signature_id":2031999,"threat_intel":""}`)
 	a := ToAlert(ev, nil)
 
 	if a.Domain != "" {
@@ -50,8 +49,8 @@ func TestSuricataAlertNamesItsRuleNotADestination(t *testing.T) {
 	if s.Class != detection.SignalIDS || s.Indicator != "2031999" || s.IndicatorType != events.IndicatorSID {
 		t.Errorf("signal = %+v, want the rule SID", s)
 	}
-	if s.Confidence != 100 || a.Confidence != 100 {
-		t.Errorf("out-of-range feed confidence must be clamped, got %d/%d", s.Confidence, a.Confidence)
+	if s.Confidence != 80 || a.Confidence != 80 {
+		t.Errorf("a severity-1 malware signature scores 80, got %d/%d", s.Confidence, a.Confidence)
 	}
 	if a.MatchedIoC != "2031999" || a.IoCType != events.IndicatorSID {
 		t.Errorf("matched = %q/%q", a.MatchedIoC, a.IoCType)

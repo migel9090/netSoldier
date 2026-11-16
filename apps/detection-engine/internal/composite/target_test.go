@@ -19,7 +19,7 @@ func beaconAlert(t *testing.T, src, domain string) detection.Alert {
 	t.Helper()
 	row := json.RawMessage(`{"ts":1800000000,"src_ip":"` + src + `","dst_ip":"198.51.100.20","dst_domain":"` +
 		domain + `","beacon_score":1.0,"connection_count":288,"confidence":75,"severity":"high","beacon_type":"","tags":["beacon"]}`)
-	ev, _, err := ingest.MLBeacons{}.Parse(row)
+	ev, err := ingest.MLBeacons{}.Parse(row)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func anomalyAlert(t *testing.T, src string) detection.Alert {
 	t.Helper()
 	row := json.RawMessage(`{"ts":1800000100,"window_start":"2027-01-15 08:00:00","src_ip":"` + src +
 		`","anomaly_score":0.95,"confidence":70,"severity":"high","conn_count":900,"bytes_out":1,"dst_fanout":3,"model_version":"v1","tags":["anomaly","upload-heavy"]}`)
-	ev, _, err := ingest.MLAnomalies{}.Parse(row)
+	ev, err := ingest.MLAnomalies{}.Parse(row)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func suricataAlert(t *testing.T, src, sig string, sev int) detection.Alert {
 	b, _ := json.Marshal(map[string]any{"ts": 1800000200, "flow_id": "7", "src_ip": src, "src_port": 50000,
 		"dest_ip": "93.184.216.34", "dest_port": 80, "proto": "TCP", "alert_signature": sig,
 		"alert_category": "x", "alert_severity": sev, "alert_signature_id": 2013028, "threat_intel": ""})
-	ev, _, err := ingest.SuricataAlerts{}.Parse(b)
+	ev, err := ingest.SuricataAlerts{}.Parse(b)
 	if err != nil {
 		t.Fatal(err)
 	}

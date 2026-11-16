@@ -174,7 +174,7 @@ func TestEveryProducerEmitsValidV2Events(t *testing.T) {
 
 	// Sensor paths.
 	parse := func(src ingest.Source, row string) ingest.SensorEvent {
-		ev, _, err := src.Parse(json.RawMessage(row))
+		ev, err := src.Parse(json.RawMessage(row))
 		if err != nil {
 			t.Fatalf("%s: %v", src.Name(), err)
 		}

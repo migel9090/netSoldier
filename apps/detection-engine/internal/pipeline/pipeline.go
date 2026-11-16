@@ -21,8 +21,16 @@ var invalidEvents = prometheus.NewCounter(prometheus.CounterOpts{
 	Help:      "Detections not forwarded because they break the event contract.",
 })
 
+// replayed counts detections dropped because their input record had already
+// made one: the record was read a second time.
+var replayed = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "detection_engine",
+	Name:      "replayed_detections_total",
+	Help:      "Detections dropped because their input record (querylog entry, sensor row) had already made one.",
+})
+
 func init() {
-	prometheus.MustRegister(invalidEvents)
+	prometheus.MustRegister(invalidEvents, replayed)
 }
 
 // AlertStore records alerts (*store.Alerts).
@@ -50,16 +58,41 @@ type Pipeline struct {
 	Correlate Correlator
 	// Forward delivers a detection; nil when no receiver is configured.
 	Forward func(detection.Alert)
+	// Records is the ledger of input records already handled; nil handles
+	// every detection.
+	Records RecordLedger
+}
+
+// RecordLedger remembers input records that made a detection
+// (*store.Records).
+type RecordLedger interface {
+	Seen(record string) bool
+	Remember(record string)
 }
 
 // Handle takes one single-signal detection.
 //
-// Every detection is recorded, suppressed or not: suppression decides what
-// reaches the killswitch, not what the analyst can see. A composite formed
-// by this detection supersedes it for delivery — unless the composite itself
-// is suppressed. A verdict on a combination says the combination is benign,
-// not that this detection is: it is then judged, and delivered, on its own.
+// A detection from an input record that already made one is that record
+// read again — the readers look a little behind where they stopped, and a
+// restart re-reads from the last stored position — and is dropped before it
+// can be recorded, correlated or delivered a second time. The record is
+// remembered only once the detection is queued, so a crash in between makes
+// it again rather than lose it.
+//
+// Every other detection is recorded, suppressed or not: suppression decides
+// what reaches the killswitch, not what the analyst can see. A composite
+// formed by this detection supersedes it for delivery — unless the composite
+// itself is suppressed. A verdict on a combination says the combination is
+// benign, not that this detection is: it is then judged, and delivered, on
+// its own.
 func (p *Pipeline) Handle(a detection.Alert) {
+	if a.Record != "" && p.Records != nil {
+		if p.Records.Seen(a.Record) {
+			replayed.Inc()
+			return
+		}
+		defer p.Records.Remember(a.Record)
+	}
 	p.record(a)
 	if p.suppressed(a) {
 		return

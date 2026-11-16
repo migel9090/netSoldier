@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -271,6 +272,85 @@ func TestRunKeepsHistoryAndBacklogAcrossRestart(t *testing.T) {
 	}
 	if alerts := getAlerts(t, addr2); len(alerts) != 1 || alerts[0].ID != id {
 		t.Errorf("history after restart = %+v, want the earlier alert", alerts)
+	}
+}
+
+// TestRunDoesNotRedetectAfterRestart: a restart resumes the querylog a little
+// behind where it stopped, and re-reads more when the stored position is lost
+// (a crash before it was written). Either way the lookup the first process
+// already detected and delivered is not detected, recorded or delivered
+// again — while one logged during the downtime is.
+func TestRunDoesNotRedetectAfterRestart(t *testing.T) {
+	logged := time.Now().Add(-2 * time.Second)
+	var mu sync.Mutex
+	entries := []map[string]any{{
+		"question": map[string]string{"host": "evil.example.com", "type": "A"},
+		"client":   "192.168.1.42", "time": logged,
+	}}
+	ag := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": entries})
+	}))
+	t.Cleanup(ag.Close)
+	q := &querylog{u: ag.URL}
+	inv := startInventory(t, "192.168.1.42", "aa:bb:cc:00:00:42", "kids-tablet")
+	rx := startReceiver(t)
+	dbPath := filepath.Join(t.TempDir(), "de.db")
+	env := baseEnv(t, q, rx, inv.url, dbPath)
+
+	_, stop := start(t, env)
+	waitFor(t, "the first delivery", func() bool { return len(rx.events()) == 1 })
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	first := rx.events()[0].ID
+
+	for _, lostPosition := range []bool{false, true} {
+		if lostPosition {
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`DELETE FROM ingest_cursors`); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+		}
+		// Metrics are per test binary, not per run: measure from here.
+		addr, stop := start(t, env)
+		pages := metric(t, addr, "detection_engine_querylog_pages_total")
+		replays := metric(t, addr, "detection_engine_replayed_detections_total")
+		waitFor(t, "a few polls", func() bool {
+			return metric(t, addr, "detection_engine_querylog_pages_total") >= pages+5
+		})
+		if got := rx.events(); len(got) != 1 {
+			t.Fatalf("lost position=%v: %d deliveries %v, want only the first", lostPosition, len(got), got)
+		}
+		if a := getAlerts(t, addr); len(a) != 1 || a[0].ID != first {
+			t.Fatalf("lost position=%v: history %+v, want only %s", lostPosition, a, first)
+		}
+		if n := metric(t, addr, "detection_engine_replayed_detections_total") - replays; n != 1 {
+			t.Errorf("lost position=%v: re-reads recognised %v times, want once (then the overlap's seen set)", lostPosition, n)
+		}
+		if err := stop(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Logged while nothing was running, by another device (the same device
+	// and name within ten minutes is folded into the first delivery by the
+	// outbox): detected by the next start.
+	mu.Lock()
+	entries = append([]map[string]any{{
+		"question": map[string]string{"host": "evil.example.com", "type": "A"},
+		"client":   "192.168.1.43", "time": time.Now().Add(-time.Second),
+	}}, entries...)
+	mu.Unlock()
+	start(t, env)
+	waitFor(t, "the lookup made while down", func() bool { return len(rx.events()) == 2 })
+	if got := rx.events(); got[1].ID == first {
+		t.Errorf("the new lookup reused the first id")
 	}
 }
 

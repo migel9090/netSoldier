@@ -14,12 +14,16 @@ func NewZeekSSL() ZeekSSL { return ZeekSSL{} }
 
 func (ZeekSSL) Name() string { return "zeek_ssl" }
 
-func (ZeekSSL) Query(since time.Time, limit int) string {
-	return fmt.Sprintf(`SELECT toUnixTimestamp(timestamp) AS ts, uid, src_ip, src_port,
-  dst_ip, dst_port, server_name, ja3, tls_client_fp
-FROM zeek_ssl WHERE timestamp >= %s AND established = 1
-ORDER BY timestamp LIMIT %d FORMAT JSONEachRow`, chTime(since), limit)
+func (ZeekSSL) Columns() string {
+	return `toUnixTimestamp(timestamp) AS ts, uid, src_ip, src_port, dst_ip, dst_port,
+  server_name, ja3, tls_client_fp`
 }
+
+func (ZeekSSL) Identity() string {
+	return `timestamp, uid, src_ip, src_port, dst_ip, dst_port, server_name, ja3, tls_client_fp`
+}
+
+func (ZeekSSL) Filter() string { return "established = 1" }
 
 type zeekSSLRow struct {
 	TS          json.Number `json:"ts"`
@@ -33,18 +37,18 @@ type zeekSSLRow struct {
 	TLSClientFP string      `json:"tls_client_fp"`
 }
 
-func (ZeekSSL) Parse(row json.RawMessage) (SensorEvent, string, error) {
+func (ZeekSSL) Parse(row json.RawMessage) (SensorEvent, error) {
 	var r zeekSSLRow
 	if err := json.Unmarshal(row, &r); err != nil {
-		return SensorEvent{}, "", fmt.Errorf("decode zeek ssl: %w", err)
+		return SensorEvent{}, fmt.Errorf("decode zeek ssl: %w", err)
 	}
 
 	ts, err := r.TS.Int64()
 	if err != nil {
-		return SensorEvent{}, "", fmt.Errorf("bad ts: %w", err)
+		return SensorEvent{}, fmt.Errorf("bad ts: %w", err)
 	}
 
-	ev := SensorEvent{
+	return SensorEvent{
 		Sensor:        "zeek",
 		Kind:          "tls-client",
 		Timestamp:     time.Unix(ts, 0).UTC(),
@@ -58,8 +62,5 @@ func (ZeekSSL) Parse(row json.RawMessage) (SensorEvent, string, error) {
 		IndicatorType: "tlsfp",
 		SNI:           r.ServerName,
 		JA3:           r.JA3,
-	}
-
-	key := fmt.Sprintf("%s/%s", r.UID, r.TS.String())
-	return ev, key, nil
+	}, nil
 }

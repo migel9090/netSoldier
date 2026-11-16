@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -147,8 +148,19 @@ func run(ctx context.Context, getenv func(string) string, onListen func(addr str
 		goProduce(func() { iocmatch.SyncLoop(ctx, matcher, tiURL, syncInterval) })
 	}
 
+	// Where each input resumes after a restart, and how far back it may
+	// reach: without a stored position, or with one older than this, reading
+	// starts this far back rather than at "now".
+	cursors := st.Cursors()
+	lookback := parseDuration(env("INGEST_LOOKBACK", "1h"), detection.DefaultLookback)
+	records := st.Records(lookback + time.Hour)
+
 	pollInterval := parseDuration(env("POLL_INTERVAL", "30s"), 30*time.Second)
 	engine := detection.New(agClient, matcher, pollInterval)
+	engine.Cursors = cursors
+	engine.Lookback = lookback
+	engine.MaxPages = parseInt(env("QUERYLOG_MAX_PAGES", ""), detection.DefaultQueryLogMaxPages)
+	engine.Overlap = parseDuration(env("QUERYLOG_OVERLAP", "15s"), detection.DefaultQueryLogOverlap)
 
 	// Which name each client resolved to which address, for the TLS
 	// heuristics.
@@ -224,6 +236,10 @@ func run(ctx context.Context, getenv func(string) string, onListen func(addr str
 		Suppress:  feedbackStore,
 		Correlate: composite.New(compWindow, nil),
 		Forward:   forward,
+		// A record read again — the overlap behind each cursor, the stretch
+		// re-read after a restart — is recognised here and not made, or
+		// delivered, twice. Kept as long as a record can be re-read.
+		Records: records,
 	}
 	engine.OnAlert = pipe.Handle
 
@@ -237,24 +253,34 @@ func run(ctx context.Context, getenv func(string) string, onListen func(addr str
 		emit := func(ev ingest.SensorEvent) {
 			engine.Ingest(ingest.ToAlert(ev, matcher))
 		}
-		localNets := strings.Split(env("LOCAL_NETWORKS",
-			strings.Join(tlsheur.DefaultLocalCIDRs, ",")), ",")
-		tlsAnalyzer := tlsheur.New(matcher, resolved, localNets, engine.Ingest)
+		cidrs := strings.Split(env("LOCAL_NETWORKS", strings.Join(ingest.DefaultLocalCIDRs, ",")), ",")
+		local, bad := ingest.ParseLocalNetworks(cidrs)
+		if len(bad) > 0 {
+			slog.Warn("LOCAL_NETWORKS entries ignored: not CIDRs", "entries", bad)
+		}
+		tlsAnalyzer := tlsheur.New(matcher, resolved, cidrs, engine.Ingest)
+		opts := ingest.PollerOptions{
+			Cursors:  cursors,
+			Lookback: lookback,
+			MaxPages: parseInt(env("SENSOR_POLL_MAX_PAGES", ""), ingest.DefaultMaxPages),
+			Overlap:  parseDuration(env("SENSOR_POLL_OVERLAP", "10s"), ingest.DefaultOverlap),
+		}
 		pollers := []*ingest.Poller{
-			ingest.NewPoller(ch, ingest.NewSuricataAlerts(), sensorInterval, emit),
-			ingest.NewPoller(ch, ingest.NewZeekIntel(), sensorInterval, emit),
-			ingest.NewPoller(ch, ingest.NewMLBeacons(), sensorInterval, emit),
-			ingest.NewPoller(ch, ingest.NewMLAnomalies(), sensorInterval, emit),
-			ingest.NewPoller(ch, ingest.NewZeekSSL(), sensorInterval, tlsAnalyzer.Handle),
+			ingest.NewPoller(ch, ingest.NewSuricataAlerts(local), sensorInterval, emit, opts),
+			ingest.NewPoller(ch, ingest.NewZeekIntel(), sensorInterval, emit, opts),
+			ingest.NewPoller(ch, ingest.NewMLBeacons(), sensorInterval, emit, opts),
+			ingest.NewPoller(ch, ingest.NewMLAnomalies(), sensorInterval, emit, opts),
+			ingest.NewPoller(ch, ingest.NewZeekSSL(), sensorInterval, tlsAnalyzer.Handle, opts),
 		}
 		for _, p := range pollers {
 			goProduce(func() { p.Run(ctx) })
 		}
-		slog.Info("unified sensor ingest enabled", "interval", sensorInterval)
+		slog.Info("unified sensor ingest enabled", "interval", sensorInterval, "lookback", lookback,
+			"overlap", opts.Overlap, "max_pages", opts.MaxPages)
 	}
 
 	maintained := make(chan struct{})
-	go func() { defer close(maintained); maintain(ctx, alerts, outbox) }()
+	go func() { defer close(maintained); maintain(ctx, alerts, outbox, records) }()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
@@ -357,9 +383,10 @@ func openStore(getenv func(string) string) (*store.Store, error) {
 	return store.OpenMemory()
 }
 
-// maintain applies retention to the alert history and forgets delivered
-// events once they can no longer absorb repeats.
-func maintain(ctx context.Context, alerts *store.Alerts, outbox *store.Outbox) {
+// maintain applies retention to the alert history, forgets delivered events
+// once they can no longer absorb repeats, and handled records once they can
+// no longer be read again.
+func maintain(ctx context.Context, alerts *store.Alerts, outbox *store.Outbox, records *store.Records) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
 	for {
@@ -374,6 +401,9 @@ func maintain(ctx context.Context, alerts *store.Alerts, outbox *store.Outbox) {
 				if _, err := outbox.Purge(); err != nil {
 					slog.Warn("outbox purge failed", "error", err)
 				}
+			}
+			if _, err := records.Prune(); err != nil {
+				slog.Warn("handled-record retention failed", "error", err)
 			}
 		}
 	}
@@ -434,4 +464,13 @@ func parseDuration(s string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// parseInt reads a positive integer setting.
+func parseInt(s string, fallback int) int {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
 }
