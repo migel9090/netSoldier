@@ -1,0 +1,11 @@
+---
+# `up` is idempotent, so a changed script is applied by running it again;
+# a full down/up would cut the netagent's capture for no reason.
+- name: Restart the simulated LAN
+  ansible.builtin.command: /usr/local/sbin/netsoldier-lab-lan up
+  changed_when: true
+
+- name: Restart the lab gateway
+  ansible.builtin.systemd_service:
+    name: netsoldier-lab-gateway
+    state: restarted
