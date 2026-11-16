@@ -1,9 +1,19 @@
+# threat-intel-sync: downloads the threat feeds and serves the merged
+# indicator set to the detection-engine (and the sensors). gVisor, no
+# capability. One replica with Recreate: the indicator store is a SQLite
+# file with a single writer.
+#
+# Sources: Spamhaus DROP always; the abuse.ch feeds unless COMMERCIAL_MODE
+# (ThreatFox and URLhaus also need ABUSECH_AUTH_KEY); MISP where a profile
+# adds MISP_URL (overlays/proxmox-soc).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: threat-intel-sync
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: threat-intel-sync
@@ -13,6 +23,9 @@ spec:
         app.kubernetes.io/name: threat-intel-sync
     spec:
       serviceAccountName: threat-intel-sync
+      automountServiceAccountToken: false
+      runtimeClassName: gvisor
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -30,32 +43,45 @@ spec:
           env:
             - name: LISTEN_ADDR
               value: ":8083"
+            - name: INDICATOR_DB_PATH
+              value: "/var/lib/threat-intel-sync/indicators.db"
             - name: SYNC_INTERVAL
               value: "6h"
-            - name: MISP_URL
-              value: "http://misp.netsoldier.svc"
             - name: THREATFOX_DAYS
               value: "7"
             - name: URLHAUS_LIMIT
               value: "1000"
-          envFrom:
-            - secretRef:
-                name: threat-intel-sync-secrets
-                optional: true
+            # The abuse.ch feeds are non-commercial only (COMPLIANCE.md); a
+            # site that is not a household turns them off here.
+            - name: COMMERCIAL_MODE
+              valueFrom:
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: COMMERCIAL_MODE
+                  optional: true
+            # Without it ThreatFox and URLhaus are disabled, loudly.
+            - name: ABUSECH_AUTH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: threat-intel-sync-credentials
+                  key: abusech-auth-key
+                  optional: true
           startupProbe:
             httpGet:
               path: /healthz
               port: http
             periodSeconds: 2
-            failureThreshold: 15
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
             periodSeconds: 30
+          # Ready once there is an indicator set to serve: a feed answered,
+          # or the persisted set was loaded.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             periodSeconds: 10
           securityContext:
@@ -67,14 +93,21 @@ spec:
                 - ALL
           resources:
             limits:
-              cpu: 200m
+              cpu: 300m
               memory: 256Mi
             requests:
               cpu: 50m
-              memory: 128Mi
+              memory: 96Mi
           volumeMounts:
+            - name: data
+              mountPath: /var/lib/threat-intel-sync
             - name: tmp
               mountPath: /tmp
       volumes:
+        # The last good indicator set survives a restart during a feed
+        # outage.
+        - name: data
+          persistentVolumeClaim:
+            claimName: threat-intel-sync-data
         - name: tmp
           emptyDir: {}

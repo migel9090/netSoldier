@@ -1,0 +1,16 @@
+# The web UI for the LAN: port 3000 on the node's LAN address only, plain
+# HTTP until TLS is set up (WEB_UI_ORIGIN must say http:// then). /metrics
+# answers on the same port, so it is reachable from the LAN as well; it
+# carries counters, no data.
+- op: test
+  path: /spec/template/spec/containers/0/name
+  value: web-ui
+- op: test
+  path: /spec/template/spec/containers/0/ports/0/name
+  value: http
+- op: add
+  path: /spec/template/spec/containers/0/ports/0/hostPort
+  value: 3000
+- op: add
+  path: /spec/template/spec/containers/0/ports/0/hostIP
+  value: "site:NODE_LAN_IP"

@@ -1,0 +1,16 @@
+# The nightly cold-tier export to Garage, split out of base/clickhouse so a
+# profile without Garage (overlays/core) does not run a job that cannot work.
+# Still broken as shipped (audit DP-13: the clickhouse-client image does not
+# exist and the job connects as `default`, which is localhost-only).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: netsoldier
+
+commonLabels:
+  app.kubernetes.io/name: clickhouse
+  app.kubernetes.io/part-of: netsoldier
+
+resources:
+  - cold-export-cm.yaml
+  - cold-export-cronjob.yaml

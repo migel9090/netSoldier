@@ -1,0 +1,19 @@
+# NetworkPolicies of the optional workloads, and the receiving halves of
+# their edges at the core workloads (core-edges.yaml). Included by the
+# profiles that run them (proxmox-soc, pi-edge), never by overlays/core.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - core-edges.yaml
+  - clickhouse-cold-export.yaml
+  - misp-core.yaml
+  - misp-mariadb.yaml
+  - misp-redis.yaml
+  - fluent-bit.yaml
+  - ntopng.yaml
+  - suricata.yaml
+  - zeek.yaml
+  - rita.yaml
+  - ml-anomaly.yaml
+  - backup.yaml

@@ -1,18 +1,42 @@
 # deploy/ — deployment artifacts
 
-Same images everywhere; the profiles differ in how they are run.
+Same images everywhere; what differs is the profile (which components run
+and on what: k3s or plain Podman) and the site (the household's addresses
+and interfaces).
 
-| Path | Purpose | Lands at |
-|---|---|---|
-| `helm/netsoldier/` | umbrella chart (subchart per service + dependencies) | step 36 |
-| `kustomize/base/` + `kustomize/overlays/{pi-edge,proxmox-soc}/` | profile overlays for k3s | steps 36, 84–85 |
-| `argocd/` | app-of-apps + ApplicationSet generating both profiles | step 37 |
-| `kyverno/` | admission policies: cosign `verifyImages` (signed images only), non-root, read-only rootfs, required limits | step 35 |
-| `podman/` | the **lite** profile: one host, Podman + systemd Quadlets, no Kubernetes, no ClickHouse | step 125.24 |
+| Path | Purpose |
+|---|---|
+| `kustomize/base/<component>/` | one directory per workload, site-agnostic: no address, interface or credential |
+| `kustomize/overlays/core/` | profile **core**: ClickHouse (+ migration Job), AdGuard, threat-intel-sync, detection-engine, device-inventory, netagent, killswitch-controller, web-ui and their NetworkPolicies |
+| `kustomize/overlays/proxmox-soc/` | core + sensors, ML, RITA, MISP, ntopng, Garage, fluent-bit, backup, observability objects (not exercised yet) |
+| `kustomize/overlays/pi-edge/` | Pi profile on k3s (not exercised; ADR-0004 runs the Pi on Podman: see lite) |
+| `kustomize/components/site/` | how a site's values reach the manifests: published ports on the node's LAN address, LAN- and host-network-facing NetworkPolicies |
+| `kustomize/sites/<site>/` | a deployable site: a profile + `site/site.env` (its only copy of the site values) |
+| `adguard/` | AdGuard Home (namespace `dns`), pulled in by the profiles |
+| `clickhouse/` | the migrations and their runner (`migrate.sh`), the only copies |
+| `podman/` | profile **lite**: the product on one host with Podman and systemd Quadlets, no Kubernetes, no ClickHouse; its own installer (below) |
+| `helm/`, `argocd/`, `kyverno/`, `observability/` | later steps; not used by the lab |
 
-Secrets of the k3s profiles are committed **only** SOPS-encrypted (age); see
-`security/`. The lite profile generates its secrets on the host at install
-time and never commits or copies them.
+A profile is not deployable on its own; a site is. The lab is the first
+site: `infra/lab/deploy.sh` deploys `kustomize/sites/lab` and
+`infra/lab/scenario.sh` tests it end to end (usage in each script's header;
+`task lab:deploy`, `task lab:scenario`, `task lab:undeploy`).
+
+**Runtime rules (ADR-0004).** Every first-party pod runs with
+`runtimeClassName: gvisor`, all capabilities dropped, non-root, read-only
+root filesystem, no host network — except `netagent` (host network,
+`NET_RAW` only, default runtime). ClickHouse and AdGuard run on the default
+runtime; AdGuard keeps `NET_BIND_SERVICE` because its image's binary carries
+it as a file capability.
+
+**Secrets** are never committed, not even encrypted examples with values:
+the `*.example.yaml` files only document keys. Every credential is
+generated randomly at deploy time and applied directly (`deploy.sh` for the
+lab). Roles stay separate: the killswitch's operator token (web UI), ingest
+token (detection-engine) and the netagent's own tokens are distinct
+credentials, and every ClickHouse account has its own password. The lite
+profile does the same on its host: its installer generates one secret per
+role there and never copies them anywhere.
 
 ## The lite profile (`podman/`)
 

@@ -5,9 +5,13 @@ commonLabels:
   app.kubernetes.io/name: killswitch-controller
   app.kubernetes.io/part-of: netsoldier
 
+# The allowlist and the gateway are site values (ConfigMap netsoldier-site,
+# deploy/kustomize/sites/<site>/site/site.env); base ships none, and an
+# empty allowlist means no auto-block. The Secrets are generated at deploy
+# time; secret.example.yaml documents their keys.
 resources:
   - serviceaccount.yaml
+  - pvc.yaml
   - deployment.yaml
   - service.yaml
   - pdb.yaml
-  - allowlist-configmap.yaml

@@ -1,3 +1,16 @@
+# AdGuard Home's initial configuration, as a template. The init container
+# of the StatefulSet renders it on the first start, and on every start
+# replaces the `users:` block with the account from the adguard-users Secret
+# (generated at deploy time): this file carries no credential and no
+# site address.
+#
+#   __UPSTREAM_DNS__  the site's resolvers (UPSTREAM_DNS in netsoldier-site),
+#                     one list entry each; first start only
+#   users             always rendered from the Secret
+#
+# After the first start AdGuard owns the file (the killswitch's block rules
+# live in user_rules); a changed upstream needs the setting changed in
+# AdGuard or the conf volume reset.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,27 +21,16 @@ data:
     http:
       address: 0.0.0.0:3000
       session_ttl: 720h
-    users:
-      - name: admin
-        password: "$2a$10$CLzU6RhWctvKwixMKjEzxukm.kq9OPVXMk7V603rKrtgqHEaL4.J6"
+    users: []
     dns:
       bind_hosts:
         - 0.0.0.0
       port: 53
       upstream_dns:
-        # Primary: DoH — HTTP/2 based, most compatible
-        - https://dns.cloudflare.com/dns-query
-        - https://dns.google/dns-query
-        # Additional: DoT — TLS-encrypted, lower overhead
-        - tls://dns.quad9.net
-      fallback_dns:
-        # Fallback: DoT endpoints for when DoH is unreachable
-        - tls://1dot1dot1dot1.cloudflare-dns.com
-        - tls://dns.google
+        - __UPSTREAM_DNS__
+      # Used only to resolve DoH/DoT upstream host names.
       bootstrap_dns:
-        # Plain DNS needed to resolve DoH/DoT hostnames on first start
         - 1.1.1.1
-        - 8.8.8.8
         - 9.9.9.9
       all_servers: true
       fastest_addr: false
@@ -62,79 +64,18 @@ data:
         url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt
         name: AdAway Default Blocklist
         id: 2
-      # threat-intel-sync (step 55) will manage dynamic IoC lists via the
-      # AdGuard API at runtime — no static entry needed here.
+    # The killswitch's DNS sinkhole adds and removes its rules here through
+    # the API.
     user_rules: []
     clients:
+      # In a pod the system resolver is the cluster's, which knows no LAN
+      # names, so reverse lookups of clients would only time out.
       runtime_sources:
         whois: false
         arp: true
-        rdns: true
+        rdns: false
         dhcp: true
         hosts: true
-      persistent:
-        # ── Infrastructure — no filtering, queries logged for baseline ──
-        - name: "router"
-          ids:
-            - "192.168.1.1"
-          tags:
-            - device_other
-          filtering_enabled: false
-          safebrowsing_enabled: false
-          parental_enabled: false
-          safesearch:
-            enabled: false
-          use_global_blocked_services: true
-          blocked_services: []
-          upstreams: []
-          ignore_querylog: false
-          ignore_statistics: false
-        - name: "pi-sensor"
-          ids:
-            - "192.168.1.10"
-          tags:
-            - device_other
-          filtering_enabled: false
-          safebrowsing_enabled: false
-          parental_enabled: false
-          safesearch:
-            enabled: false
-          use_global_blocked_services: true
-          blocked_services: []
-          upstreams: []
-          ignore_querylog: false
-          ignore_statistics: false
-        # ── Admin devices — standard filtering ──────────────────────────
-        - name: "workstation"
-          ids:
-            - "192.168.1.100"
-          tags:
-            - device_pc
-          filtering_enabled: true
-          safebrowsing_enabled: true
-          parental_enabled: false
-          safesearch:
-            enabled: false
-          use_global_blocked_services: true
-          blocked_services: []
-          upstreams: []
-          ignore_querylog: false
-          ignore_statistics: false
-        # ── IoT devices — strict filtering, security-focused upstream ───
-        - name: "iot-devices"
-          ids:
-            - "192.168.1.200/29"
-          tags:
-            - device_other
-          filtering_enabled: true
-          safebrowsing_enabled: true
-          parental_enabled: false
-          safesearch:
-            enabled: false
-          use_global_blocked_services: true
-          blocked_services: []
-          upstreams:
-            - tls://dns.quad9.net
-          ignore_querylog: false
-          ignore_statistics: false
+      # Per-device settings belong to the site; none are shipped.
+      persistent: []
     schema_version: 29

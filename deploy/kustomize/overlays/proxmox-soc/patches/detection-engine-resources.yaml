@@ -1,100 +1,21 @@
+# The SOC profile has an OpenTelemetry collector: tracing on. The capture
+# settings this patch used to carry (SPAN_INTERFACE, FLOW_IDLE_TIMEOUT,
+# NET_RAW) are gone with the capture itself; flows come from Zeek.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: detection-engine
+  namespace: netsoldier
 spec:
   template:
     spec:
       containers:
         - name: detection-engine
           env:
-            - name: LISTEN_ADDR
-              value: ":8080"
-            - name: ADGUARD_URL
-              value: "http://adguard-web.dns.svc:3000"
-            - name: ADGUARD_USER
-              valueFrom:
-                secretKeyRef:
-                  name: adguard-credentials
-                  key: username
-            - name: ADGUARD_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: adguard-credentials
-                  key: password
-            - name: THREATLIST_PATH
-              value: "/etc/detection-engine/domains.txt"
-            - name: POLL_INTERVAL
-              value: "30s"
+            - name: OTEL_SDK_DISABLED
+              value: "false"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "otel-collector.observability.svc:4317"
-            - name: SPAN_INTERFACE
-              value: "eth1"
-            - name: FLOW_IDLE_TIMEOUT
-              value: "30s"
-            - name: CLICKHOUSE_URL
-              value: "http://clickhouse.netsoldier.svc:8123"
-            - name: CLICKHOUSE_DATABASE
-              value: "netsoldier"
-            # Own account: SELECT on the sensor/ML/feedback tables it tails,
-            # INSERT on detection_feedback and connections, no DDL.
-            - name: CLICKHOUSE_USER
-              value: "detection"
-            - name: CLICKHOUSE_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: clickhouse-credentials
-                  key: detection-password
-            - name: DEVICE_INVENTORY_URL
-              value: "http://device-inventory:8081"
-            # Base URL only: iocmatch.SyncLoop appends /export/json. This
-            # previously carried the full path, so the request went to
-            # /export/json/export/json and 404'd — the live IoC feeds were
-            # disconnected while the engine quietly matched only the static
-            # domains.txt. Matches the form suricata/deployment.yaml uses.
-            - name: THREAT_INTEL_URL
-              value: "http://threat-intel-sync.netsoldier.svc:8083"
-            - name: IOC_SYNC_INTERVAL
-              value: "5m"
-            - name: WEBHOOK_URL
-              value: "http://killswitch-controller:8084/evaluate"
-            # WEBHOOK_SECRET signs the body (HMAC-SHA256) so the killswitch
-            # can prove the event was not altered in transit. WEBHOOK_TOKEN
-            # is the bearer credential its authMiddleware requires on POSTs —
-            # without it every delivery would 401 and enforcement would stop
-            # silently the moment the API key was configured.
-            - name: WEBHOOK_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: killswitch-credentials
-                  key: webhook-secret
-            - name: WEBHOOK_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: killswitch-credentials
-                  key: api-key
-            # Authenticates POST /feedback. A false-positive verdict
-            # suppresses detections before they reach the killswitch, so this
-            # endpoint can disable enforcement for any indicator.
-            - name: DETECTION_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: detection-engine-credentials
-                  key: api-key
-            # Step 116: window over which per-client signals corroborate
-            # into a composite. C2 beacon + its volumetric burst can be
-            # minutes apart, so keep it generous but bounded.
-            - name: COMPOSITE_WINDOW
-              value: "15m"
-          securityContext:
-            runAsNonRoot: true
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              add:
-                - NET_RAW
-              drop:
-                - ALL
           resources:
             limits:
               cpu: 500m

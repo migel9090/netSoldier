@@ -1,0 +1,111 @@
+# The site-dependent edges. Each `cidr` is filled from the site's values
+# (kustomization.yaml); the placeholders are not CIDRs, so an unfilled one
+# is refused by the API server rather than admitting anything.
+#
+# Published ports keep the client's source address (the host-port DNAT does
+# not masquerade), so the LAN can be named by its CIDR.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web-ui-from-lan
+  namespace: netsoldier
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: web-ui
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: "site:LAN_CIDR"
+      ports:
+        - port: 3000
+          protocol: TCP
+---
+# netagent runs on the host network; a host-network client reaches a pod on
+# its own node from the node's address on the pod network.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-netagent-to-device-inventory
+  namespace: netsoldier
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: device-inventory
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: "site:HOST_NETWORK_SOURCE_CIDR"
+      ports:
+        - port: 8081
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-netagent-to-killswitch
+  namespace: netsoldier
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: killswitch-controller
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: "site:HOST_NETWORK_SOURCE_CIDR"
+      ports:
+        - port: 8084
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-adguard-dns-from-lan
+  namespace: dns
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: adguard-home
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: "site:LAN_CIDR"
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# AdGuard's queries to the site's upstream resolvers: plain DNS, DoT, DoH.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-adguard-upstream
+  namespace: dns
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: adguard-home
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: "site:UPSTREAM_DNS_CIDR"
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+        - port: 853
+          protocol: TCP
+        - port: 443
+          protocol: TCP

@@ -1,3 +1,7 @@
+# ClickHouse's edges in the core stack. The sensors, ML, RITA, backup,
+# cold-export and observability edges live in extras/ with the workloads
+# they serve; NetworkPolicies are additive, so a profile that runs those
+# gets both.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -15,6 +19,9 @@ spec:
     - Ingress
     - Egress
   ingress:
+    # HTTP clients, each with its own account: the killswitch's audit
+    # forwarder, the detection-engine's ingest and feedback, the
+    # inventory's writer and detail queries.
     - from:
         - podSelector:
             matchLabels:
@@ -28,20 +35,6 @@ spec:
       ports:
         - port: 8123
           protocol: TCP
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: suricata
-      ports:
-        - port: 8123
-          protocol: TCP
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: zeek
-      ports:
-        - port: 8123
-          protocol: TCP
     # The schema migration Job (migrate-job.yaml): clickhouse-client only.
     - from:
         - podSelector:
@@ -51,63 +44,6 @@ spec:
       ports:
         - port: 9000
           protocol: TCP
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: clickhouse
-              app.kubernetes.io/component: cold-export
-      ports:
-        - port: 8123
-          protocol: TCP
-        - port: 9000
-          protocol: TCP
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: backup
-              app.kubernetes.io/component: clickhouse-backup
-      ports:
-        - port: 9000
-          protocol: TCP
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: rita
-      ports:
-        - port: 9000
-          protocol: TCP
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: ml-anomaly
-      ports:
-        - port: 8123
-          protocol: TCP
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: observability
-      ports:
-        - port: 8123
-          protocol: TCP
-        - port: 9000
-          protocol: TCP
-  egress:
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
-        - port: 53
-          protocol: UDP
-        - port: 53
-          protocol: TCP
-    # Garage cold tier: background TTL moves and historical reads from the
-    # s3_cold disk (step 119).
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: storage
-      ports:
-        - port: 3900
-          protocol: TCP
+  # The server opens no connection in the core stack (the cold tier on
+  # Garage is an extra, extras/clickhouse.yaml).
+  egress: []

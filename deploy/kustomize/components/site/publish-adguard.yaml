@@ -1,0 +1,24 @@
+# DNS for the LAN: port 53 on the node's LAN address only. hostIP is filled
+# from the site's NODE_LAN_IP (see kustomization.yaml); the placeholder is
+# not an address, so it can never reach a cluster.
+- op: test
+  path: /spec/template/spec/containers/0/name
+  value: adguard-home
+- op: test
+  path: /spec/template/spec/containers/0/ports/0/name
+  value: dns-tcp
+- op: test
+  path: /spec/template/spec/containers/0/ports/1/name
+  value: dns-udp
+- op: add
+  path: /spec/template/spec/containers/0/ports/0/hostPort
+  value: 53
+- op: add
+  path: /spec/template/spec/containers/0/ports/0/hostIP
+  value: "site:NODE_LAN_IP"
+- op: add
+  path: /spec/template/spec/containers/0/ports/1/hostPort
+  value: 53
+- op: add
+  path: /spec/template/spec/containers/0/ports/1/hostIP
+  value: "site:NODE_LAN_IP"

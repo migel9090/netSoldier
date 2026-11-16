@@ -1,6 +1,9 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+# The users come from the Secret adguard-users (namespace dns: username,
+# password-bcrypt), generated at deploy time; the upstream resolvers from the
+# site's netsoldier-site ConfigMap. Neither is committed.
 resources:
   - namespace.yaml
   - configmap.yaml
@@ -8,3 +11,4 @@ resources:
   - service-dns.yaml
   - service-web.yaml
   - pdb.yaml
+  - network-policy.yaml

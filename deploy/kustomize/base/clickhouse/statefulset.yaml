@@ -146,11 +146,14 @@ spec:
                 secretKeyRef:
                   name: clickhouse-credentials
                   key: rita-password-sha256
+            # The cluster's pod network, a site value: every account but the
+            # localhost-only `default` may log in from it, and from nowhere
+            # else.
             - name: POD_CIDR
               valueFrom:
-                secretKeyRef:
-                  name: clickhouse-credentials
-                  key: pod-cidr
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: POD_CIDR
           securityContext:
             runAsNonRoot: true
             runAsUser: 101

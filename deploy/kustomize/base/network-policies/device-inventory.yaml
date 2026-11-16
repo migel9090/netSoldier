@@ -1,3 +1,6 @@
+# device-inventory's edges. The agent's ingest (netagent, on the host
+# network, so not selectable by a podSelector) is admitted by an ipBlock in
+# components/site, from the site's HOST_NETWORK_SOURCE_CIDR.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -17,16 +20,6 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: detection-engine
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: backup
-      ports:
-        - port: 8081
-          protocol: TCP
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: observability
       ports:
         - port: 8081
           protocol: TCP
@@ -43,6 +36,9 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
       ports:
         - port: 53
           protocol: UDP

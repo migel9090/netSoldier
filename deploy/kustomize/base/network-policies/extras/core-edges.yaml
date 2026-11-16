@@ -1,0 +1,199 @@
+# The receiving halves, at core workloads, of the edges the optional
+# workloads need. They used to sit inside the core policies, so every
+# profile admitted them whether or not the client ran. NetworkPolicies are
+# additive: these widen the core policies only in profiles that include
+# extras/.
+#
+# ClickHouse: the sensors' Vector sidecars, ML, RITA, backup, cold export,
+# and the observability namespace (Vector aggregator, Grafana); its cold
+# tier on Garage.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-clickhouse-extras
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: clickhouse
+      app.kubernetes.io/component: server
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: suricata
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: zeek
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ml-anomaly
+      ports:
+        - port: 8123
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: rita
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: backup
+              app.kubernetes.io/component: clickhouse-backup
+      ports:
+        - port: 9000
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: clickhouse
+              app.kubernetes.io/component: cold-export
+      ports:
+        - port: 8123
+          protocol: TCP
+        - port: 9000
+          protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - port: 8123
+          protocol: TCP
+        - port: 9000
+          protocol: TCP
+  egress:
+    # Garage cold tier: background TTL moves and historical reads.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: storage
+      ports:
+        - port: 3900
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# threat-intel-sync: the sensors' intel downloads and the metrics scrape; its
+# MISP source.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-threat-intel-sync-extras
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: threat-intel-sync
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: suricata
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: zeek
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: 8083
+          protocol: TCP
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: misp
+              app.kubernetes.io/component: core
+      ports:
+        - port: 8080
+          protocol: TCP
+---
+# Metrics scrapes of the core services by Prometheus only (not the whole
+# observability namespace: audit DP-23), and the detection-engine's traces.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-core-metrics-scrape
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [detection-engine, device-inventory, killswitch-controller, web-ui]
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: 8080
+          protocol: TCP
+        - port: 8081
+          protocol: TCP
+        - port: 8084
+          protocol: TCP
+        - port: 3000
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-detection-engine-traces
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: detection-engine
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - port: 4317
+          protocol: TCP
+---
+# The state backup reads the inventory's API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-device-inventory-backup
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: device-inventory
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: backup
+      ports:
+        - port: 8081
+          protocol: TCP
