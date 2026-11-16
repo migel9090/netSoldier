@@ -19,6 +19,7 @@ updates:
       - /apps/device-inventory
       - /apps/killswitch-controller
       - /apps/threat-intel-sync
+      - /apps/netagent
       - /libs/events
       - /tests/e2e
     schedule:
@@ -72,6 +73,7 @@ updates:
       - /apps/device-inventory
       - /apps/killswitch-controller
       - /apps/threat-intel-sync
+      - /apps/netagent
       - /apps/ml-anomaly
       - /apps/web-ui
       - /deploy/docker/zeek

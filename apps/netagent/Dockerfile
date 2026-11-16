@@ -25,7 +25,11 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 # caps are honoured even with allowPrivilegeEscalation:false (no_new_privs),
 # so no root init container and no runtime setcap are needed. This mirrors
 # deploy/docker/zeek/Dockerfile. amd64/arm64 both support xattr file caps.
-FROM alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f AS setcap
+# The stage runs on the BUILD platform like the compile stage: setcap only
+# writes an extended attribute, which does not depend on the binary's
+# architecture, so the arm64 image needs no emulator (QEMU) on the amd64
+# runner.
+FROM --platform=$BUILDPLATFORM alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f AS setcap
 RUN apk add --no-cache libcap
 COPY --from=build /netagent /netagent
 RUN setcap cap_net_raw+ep /netagent && getcap /netagent
