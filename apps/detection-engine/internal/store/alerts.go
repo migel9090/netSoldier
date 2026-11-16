@@ -132,7 +132,9 @@ func (a *Alerts) Recent(limit int) ([]detection.Alert, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make([]detection.Alert, 0, min(limit, 256))
+	// A fixed starting capacity: the slice grows with the rows the query
+	// returns, never with the number the caller asked for.
+	out := make([]detection.Alert, 0, 64)
 	for rows.Next() {
 		var body []byte
 		if err := rows.Scan(&body); err != nil {
