@@ -5,6 +5,7 @@
 #   lab.sh init         terraform init, state in $LAB_STATE
 #   lab.sh inventory    write $LAB_STATE/inventory.yml from Terraform outputs
 #   lab.sh provision    ansible-playbook site.yml against the lab VM
+#   lab.sh lan          ansible-playbook lab-lan.yml: the simulated home LAN
 #   lab.sh kubeconfig   copy the kubeconfig to $LAB_KUBECONFIG (0600)
 #   lab.sh ssh [cmd]    ssh to the lab VM (lab known_hosts, host key checked)
 #   lab.sh validate     static checks; needs no credentials and no VM
@@ -21,14 +22,15 @@ ANSIBLE_DIR=$REPO_DIR/infra/ansible
 
 cmd_tools() {
   local stamp
-  stamp=$(cat "$ANSIBLE_DIR/requirements.txt" "$ANSIBLE_DIR/requirements.yml" "${BASH_SOURCE[0]}" | sha256sum | cut -c1-16)
+  stamp=$(cat "$ANSIBLE_DIR/requirements.txt" "$ANSIBLE_DIR/requirements.yml" "$LAB_DIR/requirements.txt" \
+    "${BASH_SOURCE[0]}" | sha256sum | cut -c1-16)
   if [[ -f $LAB_VENV/.lab-tools && $(<"$LAB_VENV/.lab-tools") == "$stamp" ]]; then
     echo "tools up to date in $LAB_VENV"
     return
   fi
   python3 -m venv "$LAB_VENV"
   "$LAB_VENV/bin/pip" install --quiet --disable-pip-version-check \
-    --require-hashes -r "$ANSIBLE_DIR/requirements.txt"
+    --require-hashes -r "$ANSIBLE_DIR/requirements.txt" -r "$LAB_DIR/requirements.txt"
   "$LAB_VENV/bin/ansible-galaxy" collection install --force \
     -r "$ANSIBLE_DIR/requirements.yml" -p "$LAB_VENV/ansible-collections"
 
@@ -63,13 +65,18 @@ cmd_inventory() {
 
 ansible_env() {
   cd "$ANSIBLE_DIR"
-  export ANSIBLE_SSH_COMMON_ARGS="-o UserKnownHostsFile=$LAB_KNOWN_HOSTS"
+  export ANSIBLE_SSH_COMMON_ARGS="-o UserKnownHostsFile=$LAB_KNOWN_HOSTS${LAB_SSH_EXTRA_OPTS:+ $LAB_SSH_EXTRA_OPTS}"
   export ANSIBLE_PRIVATE_KEY_FILE=$LAB_SSH_KEY
 }
 
 cmd_provision() {
   ansible_env
   "$LAB_VENV/bin/ansible-playbook" -i "$LAB_INVENTORY" site.yml "$@"
+}
+
+cmd_lan() {
+  ansible_env
+  "$LAB_VENV/bin/ansible-playbook" -i "$LAB_INVENTORY" lab-lan.yml "$@"
 }
 
 cmd_kubeconfig() {
@@ -88,8 +95,8 @@ cmd_validate() {
   "$LAB_DIR/tf.sh" init -backend=false -input=false >/dev/null
   "$LAB_DIR/tf.sh" validate
   ansible_env
-  "$LAB_VENV/bin/ansible-playbook" -i localhost, --syntax-check site.yml kubeconfig.yml
-  "$LAB_VENV/bin/ansible-lint" site.yml kubeconfig.yml
+  "$LAB_VENV/bin/ansible-playbook" -i localhost, --syntax-check site.yml kubeconfig.yml lab-lan.yml
+  "$LAB_VENV/bin/ansible-lint" site.yml kubeconfig.yml lab-lan.yml
   for f in "$LAB_DIR"/*.sh; do bash -n "$f"; done
   echo "validate: ok"
 }
@@ -97,6 +104,6 @@ cmd_validate() {
 sub=${1:-}
 shift || true
 case $sub in
-  tools | init | inventory | provision | kubeconfig | ssh | validate) "cmd_$sub" "$@" ;;
-  *) lab_die "usage: $0 {tools|init|inventory|provision|kubeconfig|ssh|validate} [args]" ;;
+  tools | init | inventory | provision | lan | kubeconfig | ssh | validate) "cmd_$sub" "$@" ;;
+  *) lab_die "usage: $0 {tools|init|inventory|provision|lan|kubeconfig|ssh|validate} [args]" ;;
 esac

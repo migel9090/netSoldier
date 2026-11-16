@@ -19,6 +19,11 @@ LAB_VENV=${LAB_VENV:-$REPO_DIR/.venv}
 
 LAB_INVENTORY=$LAB_STATE/inventory.yml
 LAB_KNOWN_HOSTS=$LAB_STATE/known_hosts
+# Extra ssh options for this workstation's network, appended to every ssh
+# the lab scripts run (lab_ssh and Ansible), e.g. LAB_SSH_EXTRA_OPTS="-o
+# IPQoS=none" where a network drops OpenSSH's default DSCP marking. Split on
+# whitespace; empty by default.
+LAB_SSH_EXTRA_OPTS=${LAB_SSH_EXTRA_OPTS:-}
 
 lab_die() {
   echo "error: $*" >&2
@@ -37,11 +42,17 @@ lab_target() {
 }
 
 # lab_ssh ARGS...: ssh to the lab host, trusting only the lab's known_hosts.
+# Calls share one multiplexed connection (kept for a minute): the deploy and
+# scenario scripts make dozens of short calls.
 lab_ssh() {
   local user host port
+  local -a extra
   read -r user host port < <(lab_target)
+  read -ra extra <<<"$LAB_SSH_EXTRA_OPTS"
+  mkdir -p "$LAB_STATE"
   ssh -i "$LAB_SSH_KEY" -o IdentitiesOnly=yes \
     -o UserKnownHostsFile="$LAB_KNOWN_HOSTS" -o StrictHostKeyChecking=yes \
     -o BatchMode=yes -o ConnectTimeout=10 \
-    -p "$port" "$user@$host" "$@"
+    -o ControlMaster=auto -o ControlPersist=60s -o ControlPath="${XDG_RUNTIME_DIR:-$LAB_STATE}/nslab-%C" \
+    "${extra[@]}" -p "$port" "$user@$host" "$@"
 }

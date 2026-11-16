@@ -74,6 +74,33 @@ tasks:
     cmds:
       - '{{.LAB}}/smoke.sh'
 
+  lan:
+    desc: Build the simulated home LAN inside the lab VM (bridge, gateway, victims)
+    deps: [tools]
+    cmds:
+      - '{{.LAB}}/lab.sh lan'
+
+  images:
+    desc: Build the core stack's first-party images and import them into the node
+    cmds:
+      - '{{.LAB}}/images.sh {{.CLI_ARGS}}'
+
+  deploy:
+    desc: Deploy the core stack (sites/lab) with freshly generated Secrets (options after --)
+    deps: [tools]
+    cmds:
+      - '{{.LAB}}/deploy.sh {{.CLI_ARGS}}'
+
+  scenario:
+    desc: Run the end-to-end scenario against the deployed stack; PASS/FAIL per step
+    cmds:
+      - '{{.LAB}}/scenario.sh'
+
+  undeploy:
+    desc: Delete the core stack and its volumes (the VM and the simulated LAN stay)
+    cmds:
+      - '{{.LAB}}/deploy.sh down'
+
   ssh:
     desc: SSH to the lab VM (command after --)
     interactive: true
