@@ -350,11 +350,16 @@ export interface FeedbackVerdict {
 
 export interface FeedbackResult {
   /**
-   * False: the verdict is in force now but was not saved (ClickHouse
-   * unavailable), so it is forgotten when the detection engine restarts.
-   * Null when the engine did not say.
+   * False: it applies now but the detection engine could not record it in
+   * its local store, so a restart of the engine undoes it. Null when the
+   * engine did not say.
    */
   persisted: boolean | null
+}
+
+function persistedOf(body: unknown): boolean | null {
+  const v = (body as { persisted?: unknown } | null)?.persisted
+  return typeof v === 'boolean' ? v : null
 }
 
 export async function submitFeedback(v: FeedbackVerdict): Promise<FeedbackResult> {
@@ -364,8 +369,44 @@ export async function submitFeedback(v: FeedbackVerdict): Promise<FeedbackResult
     body: JSON.stringify(v),
   })
   if (!res.ok) await fail(res, 'Feedback failed')
-  const body = (await readJSON(res)) as { persisted?: unknown } | null
-  return { persisted: typeof body?.persisted === 'boolean' ? body.persisted : null }
+  return { persisted: persistedOf(await readJSON(res)) }
+}
+
+/**
+ * What POST /feedback/lift ends: exactly one suppression, named by its
+ * indicator, device (none: the indicator-wide one) and signal class. The
+ * analyst comes from X-Netsoldier-Actor, as for a verdict.
+ */
+export interface LiftRequest {
+  matched_ioc: string
+  client_ip?: string
+  signal_class: string
+  reason?: string
+}
+
+/** `inForce: false`: the engine had no such suppression (404) — lifted already, or expired. */
+export type LiftResult = { inForce: true; persisted: boolean | null } | { inForce: false }
+
+export async function liftSuppression(l: LiftRequest): Promise<LiftResult> {
+  const res = await request('/api/feedback/lift', {
+    method: 'POST',
+    headers: mutateHeaders(),
+    body: JSON.stringify(l),
+  })
+  if (res.status === 404) {
+    // The engine's "no such suppression is in force" is a JSON error. An
+    // engine without the route answers Go's plain-text 404 instead: then
+    // nothing was lifted, and saying "already lifted" would be a lie.
+    const body = await readJSON(res)
+    if (typeof (body as { error?: unknown } | null)?.error === 'string') return { inForce: false }
+    throw new ApiError(
+      404,
+      'Lifting the suppression failed: this detection engine has no POST /feedback/lift ' +
+        '(it is older than the web UI). Nothing was lifted.',
+    )
+  }
+  if (!res.ok) await fail(res, 'Lifting the suppression failed')
+  return { inForce: true, persisted: persistedOf(await readJSON(res)) }
 }
 
 /** The false-positive suppressions in force. */
@@ -377,6 +418,19 @@ export function formatTime(iso: string | null | undefined): string {
   if (!iso) return '—'
   const d = new Date(iso)
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString()
+}
+
+/** How long until `iso`, in rough words: "29 days left", "5 hours left". */
+export function formatTimeLeft(iso: string | null | undefined, now = Date.now()): string {
+  const t = iso ? Date.parse(iso) : NaN
+  if (Number.isNaN(t)) return ''
+  const minutes = (t - now) / 60_000
+  if (minutes <= 0) return 'ending now'
+  if (minutes < 1) return 'less than a minute left'
+  const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? '' : 's'} left`
+  if (minutes < 90) return plural(Math.round(minutes), 'minute')
+  if (minutes < 36 * 60) return plural(Math.round(minutes / 60), 'hour')
+  return plural(Math.round(minutes / (24 * 60)), 'day')
 }
 
 export function formatActionType(t: string): string {

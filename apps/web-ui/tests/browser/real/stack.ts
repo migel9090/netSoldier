@@ -222,12 +222,16 @@ interface AgentCommand {
 
 /**
  * netagent's side of contract v2 §8.2: polls, reports results and the
- * isolations it has in force. Isolations are held until confirm().
+ * isolations it has in force. Isolations are held until confirm(); releases
+ * are carried out at once, or — while holdReleases is set — held until
+ * confirm() too, which is what makes the controller answer a revert with 202.
  */
 class StandInAgent {
   private results: { id: string; ok: boolean; error: string }[] = []
   private active = new Map<string, { mac: string; ip: string; expires: string }>()
   private held: AgentCommand[] = []
+  private heldReleases: AgentCommand[] = []
+  holdReleases = false
   private timer: NodeJS.Timeout | null = null
   private polling = false
 
@@ -243,18 +247,28 @@ class StandInAgent {
   }
 
   confirm(): number {
-    const n = this.held.length
+    const n = this.held.length + this.heldReleases.length
     for (const c of this.held.splice(0)) this.isolate(c)
+    for (const c of this.heldReleases.splice(0)) this.release(c)
     return n
   }
 
   state() {
-    return { held: this.held.map((c) => c.mac), active: [...this.active.keys()] }
+    return {
+      held: this.held.map((c) => c.mac),
+      heldReleases: this.heldReleases.map((c) => c.mac),
+      active: [...this.active.keys()],
+    }
   }
 
   private isolate(c: AgentCommand) {
     const expires = new Date(Date.now() + (c.ttl_seconds ?? 3600) * 1000).toISOString()
     this.active.set(c.mac, { mac: c.mac, ip: c.ip, expires })
+    this.results.push({ id: c.id, ok: true, error: '' })
+  }
+
+  private release(c: AgentCommand) {
+    this.active.delete(c.mac)
     this.results.push({ id: c.id, ok: true, error: '' })
   }
 
@@ -276,8 +290,8 @@ class StandInAgent {
       for (const c of commands ?? []) {
         if (c.type === 'arp_isolate') this.held.push(c)
         else if (c.type === 'arp_release') {
-          this.active.delete(c.mac)
-          this.results.push({ id: c.id, ok: true, error: '' })
+          if (this.holdReleases) this.heldReleases.push(c)
+          else this.release(c)
         }
       }
     } catch {
@@ -417,7 +431,7 @@ export async function startRealStack(repoRoot: string, logDir: string): Promise<
     })
 
     // The test's levers: put a DNS query in AdGuard's log, read the
-    // sinkhole rules, confirm held isolations.
+    // sinkhole rules, confirm held isolations (and releases, when held).
     const control = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://control')
       const body = await readBody(req)
@@ -434,6 +448,10 @@ export async function startRealStack(repoRoot: string, logDir: string): Promise<
       if (req.method === 'GET' && url.pathname === '/rules') return sendJSON(res, 200, rules.list)
       if (req.method === 'POST' && url.pathname === '/agent/confirm') {
         return sendJSON(res, 200, { confirmed: agent!.confirm() })
+      }
+      if (req.method === 'POST' && url.pathname === '/agent/hold-releases') {
+        agent!.holdReleases = (JSON.parse(body) as { hold: boolean }).hold
+        return sendJSON(res, 200, { hold: agent!.holdReleases })
       }
       if (req.method === 'GET' && url.pathname === '/agent')
         return sendJSON(res, 200, agent!.state())

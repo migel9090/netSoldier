@@ -1,5 +1,5 @@
 import { test as base, expect, type Page } from '@playwright/test'
-import type { Scenario, Seen } from './stub/backends'
+import type { Scenario, SeededSuppression, Seen } from './stub/backends'
 
 /** Drives the stub backends' control port (see stub/backends.ts). */
 export class Stub {
@@ -28,6 +28,24 @@ export class Stub {
       body: JSON.stringify({ id, state }),
     })
     if (!res.ok) throw new Error(`stub settle ${id}: ${res.status}`)
+  }
+
+  /** A revert someone else started (another operator, the TTL reaper), not answered yet. */
+  async beginRevert(id: string, actor?: string): Promise<void> {
+    const res = await fetch(`${this.base}/begin-revert`, {
+      method: 'POST',
+      body: JSON.stringify({ id, actor }),
+    })
+    if (!res.ok) throw new Error(`stub begin-revert ${id}: ${res.status}`)
+  }
+
+  /** Replaces the suppressions in force (an empty list lifts them all behind the page's back). */
+  async suppressions(list: SeededSuppression[]): Promise<void> {
+    const res = await fetch(`${this.base}/suppressions`, {
+      method: 'POST',
+      body: JSON.stringify(list),
+    })
+    if (!res.ok) throw new Error(`stub suppressions: ${res.status}`)
   }
 
   async seen(): Promise<Seen[]> {

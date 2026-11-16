@@ -130,10 +130,12 @@ test('marking a false positive asks first, sends the signal class and says wheth
 
   page.once('dialog', (d) => void d.accept())
   await row.getByRole('button', { name: 'Mark FP' }).click()
+  // When it ends comes from the engine's list (expires_at), read back.
   await expect(page.getByTestId('feedback-note').first()).toHaveText(
-    'Marked 203.0.113.9 as a false positive for 30 days. Saved.',
+    /^Marked 203\.0\.113\.9 as a false positive: silenced until .+ \(30 days left\)\. Saved\.$/,
   )
   await expect(row.getByTestId('fp-marked')).toBeVisible()
+  await expect(row).toContainText('30 days left')
   const [sent] = await posts()
   expect(JSON.parse(sent.body)).toEqual({
     alert_id: 'DET-e2e-8',
@@ -164,10 +166,19 @@ test('a verdict the engine could not save is in force but flagged as not saved',
     .click()
   const note = page.getByTestId('feedback-note').first()
   await expect(note).toContainText('was NOT saved')
+  await expect(note).toContainText('forgotten when the engine restarts')
   await expect(note).toHaveClass(/note-warn/)
 })
 
-test('an active suppression can be lifted', async ({ page, stub }) => {
+const feedbackPosts = async (stub: { seen: () => Promise<{ path: string; method: string }[]> }) =>
+  (await stub.seen()).filter((s) => s.method === 'POST' && s.path.startsWith('/feedback'))
+
+// A "confirmed" verdict used to stand in for this, recording the indicator
+// as a true positive.
+test('lifting a suppression ends that one suppression, and records no verdict', async ({
+  page,
+  stub,
+}) => {
   await signIn(page)
   await page.goto('/alerts')
   const row = page.locator('tr[data-alert-id="DET-e2e-6"]')
@@ -182,16 +193,199 @@ test('an active suppression can be lifted', async ({ page, stub }) => {
   })
   const suppression = page.getByTestId('suppressions-table').locator('tr[data-ioc="d6.example"]')
   await suppression.getByRole('button', { name: 'Lift' }).click()
+  await expect(page.getByTestId('feedback-note').first()).toHaveText(
+    'Lifted the suppression of d6.example (ioc) on 192.168.1.77. Saved.',
+  )
   await expect(page.getByText('Nothing is suppressed.')).toBeVisible()
   expect(question).toContain('reach the killswitch again')
+  expect(question).toContain('does not record the indicator as malicious')
   await expect(row.getByRole('button', { name: 'Mark FP' })).toBeVisible()
-  const lifted = (await stub.seen()).filter((s) => s.path === '/feedback' && s.method === 'POST')
-  expect(JSON.parse(lifted.at(-1)!.body)).toMatchObject({
+
+  const [verdict, lifted, ...more] = await feedbackPosts(stub)
+  expect(more).toEqual([])
+  expect(verdict.path).toBe('/feedback')
+  expect(lifted.path).toBe('/feedback/lift')
+  const sent = (await stub.seen()).find((s) => s.path === '/feedback/lift')!
+  expect(JSON.parse(sent.body)).toEqual({
     matched_ioc: 'd6.example',
     client_ip: '192.168.1.77',
     signal_class: 'ioc',
-    verdict: 'confirmed',
+    reason: 'suppression lifted in the web UI',
   })
+  expect(sent.actor).toBe('Michal')
+})
+
+test('a suppression that is already gone: the page says so and shows the list as it is', async ({
+  page,
+  stub,
+}) => {
+  await stub.suppressions([
+    { matched_ioc: 'd6.example', client_ip: '192.168.1.77', signal_class: 'ioc' },
+  ])
+  await signIn(page)
+  await page.goto('/alerts')
+  const suppression = page.getByTestId('suppressions-table').locator('tr[data-ioc="d6.example"]')
+  await expect(suppression).toBeVisible()
+
+  // Lifted in another browser (or expired) while this page shows it.
+  await stub.suppressions([])
+  page.once('dialog', (d) => void d.accept())
+  await suppression.getByRole('button', { name: 'Lift' }).click()
+  const note = page.getByTestId('feedback-note').first()
+  await expect(note).toHaveText(
+    'Nothing to lift: the suppression of d6.example (ioc) on 192.168.1.77 was no longer in force (lifted already, or it expired).',
+  )
+  await expect(note).toHaveClass(/note-warn/)
+  await expect(page.getByText('Nothing is suppressed.')).toBeVisible()
+})
+
+test('a lift the engine could not save is flagged: the suppression comes back on restart', async ({
+  page,
+  stub,
+}) => {
+  await stub.set({ persistFeedback: false })
+  await stub.suppressions([{ matched_ioc: '203.0.113.9', signal_class: 'ids-signature' }])
+  await signIn(page)
+  await page.goto('/alerts')
+  page.once('dialog', (d) => void d.accept())
+  await page
+    .getByTestId('suppressions-table')
+    .locator('tr[data-ioc="203.0.113.9"]')
+    .getByRole('button', { name: 'Lift' })
+    .click()
+  const note = page.getByTestId('feedback-note').first()
+  await expect(note).toContainText(
+    'Lifted the suppression of 203.0.113.9 (ids-signature) on every device. It applies now but was NOT saved: when the detection engine restarts, the suppression comes back (until ',
+  )
+  await expect(note).toHaveClass(/note-warn/)
+})
+
+test('lifting a device’s suppression says when another one keeps it silenced', async ({
+  page,
+  stub,
+}) => {
+  await stub.suppressions([
+    { matched_ioc: 'd6.example', client_ip: '192.168.1.77', signal_class: 'ioc' },
+    { matched_ioc: 'd6.example', signal_class: 'ioc', ageMinutes: 120 },
+  ])
+  await signIn(page)
+  await page.goto('/alerts')
+  let question = ''
+  page.once('dialog', (d) => {
+    question = d.message()
+    void d.dismiss()
+  })
+  await page
+    .getByTestId('suppressions-table')
+    .locator('tr[data-ioc="d6.example"]', { hasText: '192.168.1.77' })
+    .getByRole('button', { name: 'Lift' })
+    .click()
+  await expect.poll(() => question).toContain('also suppressed on every device')
+  expect(question).not.toContain('reach the killswitch again')
+  expect(await feedbackPosts(stub)).toEqual([])
+})
+
+test('suppressions say when they end and how long is left, wherever they are shown', async ({
+  page,
+  stub,
+}) => {
+  // Made a day ago, by an engine that suppresses for 7 days.
+  await stub.set({ suppressionTtlDays: 7 })
+  await stub.suppressions([
+    { matched_ioc: 'd6.example', client_ip: '192.168.1.77', signal_class: 'ioc', ageMinutes: 1440 },
+  ])
+  await signIn(page)
+  await page.goto('/alerts')
+  const ends = page
+    .getByTestId('suppressions-table')
+    .locator('tr[data-ioc="d6.example"]')
+    .getByTestId('suppression-ends')
+  await expect(ends).toContainText('6 days left')
+  await expect(page.locator('section.suppressions')).toContainText('(7 days after it was made)')
+  const marked = page.locator('tr[data-alert-id="DET-e2e-6"]')
+  await expect(marked).toContainText('6 days left')
+  await expect(marked.getByTestId('fp-marked')).toHaveAttribute(
+    'title',
+    /, until .+ \(6 days left\)/,
+  )
+
+  // A new verdict is said to last as long as the engine's own do.
+  let question = ''
+  page.once('dialog', (d) => {
+    question = d.message()
+    void d.dismiss()
+  })
+  await page
+    .locator('tr[data-alert-id="DET-e2e-5"]')
+    .getByRole('button', { name: 'Mark FP' })
+    .click()
+  await expect.poll(() => question).toContain('For 7 days, detections')
+})
+
+test('an engine that does not say when a suppression ends gets an estimate, marked as one', async ({
+  page,
+  stub,
+}) => {
+  await stub.set({ suppressionExpiry: false })
+  await stub.suppressions([{ matched_ioc: 'd6.example', signal_class: 'ioc', ageMinutes: 1440 }])
+  await signIn(page)
+  await page.goto('/alerts')
+  const ends = page.getByTestId('suppression-ends')
+  await expect(ends).toContainText('about ')
+  await expect(ends).toContainText('estimated: the engine did not say; 30 days is its default')
+})
+
+test('alerts recorded while silenced are dimmed, labelled, lead to their suppression, and cannot be marked again', async ({
+  page,
+  stub,
+}) => {
+  // DET-e2e-5 was silenced by a suppression still in force; DET-e2e-4 by one
+  // that has ended since. The engine only stopped the response.
+  await stub.set({ silenced: ['DET-e2e-5', 'DET-e2e-4'] })
+  await stub.suppressions([
+    { matched_ioc: 'd5.example', client_ip: '192.168.1.77', signal_class: 'ioc', ageMinutes: 1440 },
+  ])
+  await signIn(page)
+
+  // The dashboard marks them too, and leads to them.
+  const recent = page.getByTestId('recent-alerts')
+  await expect(page.getByTestId('silenced-count')).toHaveText(
+    '2 of them silenced by a suppression, not sent to the killswitch',
+  )
+  const onDashboard = recent.locator('tr[data-alert-id="DET-e2e-5"]')
+  await expect(onDashboard).toHaveAttribute('data-silenced', 'true')
+  await expect(onDashboard.locator('td').first()).toHaveCSS('opacity', '0.55')
+  await expect(recent.locator('tr[data-alert-id="DET-e2e-6"]')).not.toHaveAttribute('data-silenced')
+  await onDashboard.getByTestId('silenced').click()
+  await expect(page).toHaveURL(/\/alerts#alert-[0-9a-f]{8}$/)
+  const row = page.locator('tr[data-alert-id="DET-e2e-5"]')
+  await expect(row).toHaveClass(/targeted/)
+  await expect(row).toBeInViewport()
+
+  await expect(row).toHaveAttribute('data-silenced', 'true')
+  await expect(row.locator('td').first()).toHaveCSS('opacity', '0.55')
+  await expect(row.getByTestId('silenced')).toHaveText('Silenced')
+  await expect(row.getByRole('button', { name: 'Mark FP' })).toHaveCount(0)
+  await expect(page.getByTestId('silenced-count')).toHaveText(
+    '2 silenced by a suppression (not sent to the killswitch)',
+  )
+
+  const ended = page.locator('tr[data-alert-id="DET-e2e-4"]')
+  await expect(ended.getByTestId('silenced-by')).toHaveText('the suppression has ended since')
+  await expect(ended.getByRole('button', { name: 'Mark FP' })).toHaveCount(0)
+
+  // No `suppressed`: an ordinary alert.
+  const open = page.locator('tr[data-alert-id="DET-e2e-6"]')
+  await expect(open).not.toHaveAttribute('data-silenced')
+  await expect(open.getByRole('button', { name: 'Mark FP' })).toBeVisible()
+
+  // From the alert to the suppression that silenced it.
+  await row.getByRole('link', { name: 'see the suppression (29 days left)' }).click()
+  await expect(page).toHaveURL(/#suppression-[0-9a-f]{8}$/)
+  const suppression = page.getByTestId('suppressions-table').locator('tr[data-ioc="d5.example"]')
+  await expect(suppression).toHaveClass(/targeted/)
+  await expect(suppression).toBeInViewport()
+  await expect(row).not.toHaveClass(/targeted/)
 })
 
 test('the alert pages ask the engine for a bounded number of alerts', async ({ page, stub }) => {

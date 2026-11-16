@@ -1,6 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { alertClient, alertHeadline, alertObservedDomain } from '$lib/alerts'
+  import {
+    alertAnchor,
+    alertClient,
+    alertHeadline,
+    alertObservedDomain,
+    isSilenced,
+  } from '$lib/alerts'
   import { fetchDevices, fetchAlerts, formatTime } from '$lib/api'
   import { newestFirst } from '$lib/order'
   import type { Alert } from '$lib/types'
@@ -10,6 +16,8 @@
 
   let deviceCount: number | null = $state(null)
   let alertCount: string | null = $state(null)
+  /** Of the alerts counted, those recorded while a suppression applied. */
+  let silencedCount = $state(0)
   let recentAlerts: Alert[] = $state([])
   let errors: string[] = $state([])
   let loading: boolean = $state(true)
@@ -27,6 +35,7 @@
     if (alerts.status === 'fulfilled') {
       const n = alerts.value.length
       alertCount = n >= ALERT_COUNT_LIMIT ? `${ALERT_COUNT_LIMIT}+` : String(n)
+      silencedCount = alerts.value.filter(isSilenced).length
       // Newest first already; sorted anyway so the order never depends on it.
       recentAlerts = newestFirst(alerts.value).slice(0, 5)
     } else {
@@ -58,6 +67,11 @@
     <div class="stat-card">
       <span class="stat-value" data-testid="alert-count">{alertCount ?? '—'}</span>
       <span class="stat-label">Detection alerts</span>
+      {#if silencedCount > 0}
+        <span class="stat-label" data-testid="silenced-count"
+          >{silencedCount} of them silenced by a suppression, not sent to the killswitch</span
+        >
+      {/if}
     </div>
   </div>
 
@@ -76,11 +90,16 @@
         {#each recentAlerts as a}
           {@const client = alertClient(a)}
           {@const observed = alertObservedDomain(a)}
-          <tr>
+          {@const silenced = isSilenced(a)}
+          <tr data-alert-id={a.id} data-silenced={silenced ? 'true' : undefined} class:silenced>
             <td>{formatTime(a.timestamp)}</td>
             <td data-testid="alert-headline">
               {alertHeadline(a)}
-              {#if observed}<span class="secondary mono">{observed}</span>{/if}
+              {#if observed}<span class="secondary mono">{observed}</span>{/if}{#if silenced}<a
+                  class="secondary silenced-link"
+                  href="/alerts#{alertAnchor(a)}"
+                  data-testid="silenced">Silenced by a suppression: not sent to the killswitch</a
+                >{/if}
             </td>
             <td data-testid="alert-client">
               {client.name || client.ip || client.mac || '—'}
@@ -95,3 +114,19 @@
     </table>
   {/if}
 {/if}
+
+<style>
+  tr.silenced td {
+    opacity: 0.55;
+  }
+  tr.silenced:hover td {
+    opacity: 0.8;
+  }
+  .silenced-link {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .silenced-link:hover {
+    text-decoration: underline;
+  }
+</style>

@@ -1,13 +1,11 @@
 import type { Handle, RequestEvent, ServerInit } from '@sveltejs/kit'
+import { building } from '$app/environment'
+import { env } from '$env/dynamic/private'
 import { SESSION_COOKIE, csrfOk, originOk, verifySession, type Session } from '$lib/server/auth'
 import { readConfig, type Config } from '$lib/server/config'
 import { log } from '$lib/server/log'
-import {
-  METRICS_CONTENT_TYPE,
-  countUpstreamError,
-  renderMetrics,
-  type UpstreamErrorKind,
-} from '$lib/server/metrics'
+import { countUpstreamError, type UpstreamErrorKind } from '$lib/server/metrics'
+import { startMetricsListener } from '$lib/server/metrics-listener'
 import {
   PASSED_RESPONSE_HEADERS,
   callUpstream,
@@ -33,7 +31,7 @@ const PUBLIC_PAGES = new Set(['/login'])
 /** Upstream request bodies are small JSON documents; anything larger is refused. */
 const MAX_PROXY_BODY_BYTES = 64 * 1024
 
-export const init: ServerInit = () => {
+export const init: ServerInit = async () => {
   const result = readConfig()
   if (result.ok) {
     log('INFO', 'web-ui configured', {
@@ -45,6 +43,10 @@ export const init: ServerInit = () => {
       problems: result.problems,
     })
   }
+  // /metrics has a listener of its own (METRICS_ADDR), never the UI's port.
+  // adapter-node awaits this before it opens the UI's port, so a metrics
+  // address that cannot be used stops the start-up with its reason.
+  if (!building) await startMetricsListener(env.METRICS_ADDR)
 }
 
 export const handle: Handle = async ({ event, resolve }) => {
@@ -64,10 +66,11 @@ async function route(event: RequestEvent, resolve: Parameters<Handle>[0]['resolv
       ? json({ status: 'ok' }, 200)
       : json({ status: 'unconfigured', problems: result.problems }, 503)
   }
-  if (pathname === '/metrics') {
-    if (!SAFE_METHODS.has(method)) return json({ error: 'method not allowed' }, 405)
-    return new Response(renderMetrics(), { headers: { 'Content-Type': METRICS_CONTENT_TYPE } })
-  }
+  // Not served on this port, which is published on the LAN: the counters
+  // are on the metrics listener. A plain 404, signed in or not, so a scrape
+  // still aimed here fails as "not found" rather than following a redirect
+  // to the sign-in page.
+  if (pathname === '/metrics') return json({ error: 'not found' }, 404)
 
   const api = pathname === '/api' || pathname.startsWith('/api/')
   if (!result.ok) return unconfigured(result.problems, api)
@@ -271,7 +274,7 @@ function withSecurityHeaders(res: Response, url: URL): Response {
   // Browsers only honour COOP on trustworthy origins; over plain HTTP on a
   // LAN Chromium ignores it and logs an error on every page load.
   if (url.protocol === 'https:') h.set('Cross-Origin-Opener-Policy', 'same-origin')
-  if (pathname.startsWith('/api/') || pathname === '/healthz' || pathname === '/metrics') {
+  if (pathname.startsWith('/api/') || pathname === '/healthz') {
     h.set('Cache-Control', 'no-store')
   }
   return out

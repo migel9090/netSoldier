@@ -30,6 +30,9 @@ import { KEYS, startStubs } from './stub/backends'
  *   - "lockout": plain HTTP with ADDRESS_HEADER, used only by lockout.spec.ts;
  *   - "real": plain HTTP in front of the real backends, for real-backends.spec.ts.
  *
+ * Only "lan-http" has a metrics listener (METRICS_ADDR, on a port of its
+ * own); the others run with METRICS_ADDR=off.
+ *
  * The browser resolves netsoldier.lan to 127.0.0.1 (see playwright.config.ts).
  * A real host name matters: Chromium treats http://127.0.0.1 as a secure
  * context and would accept `Secure` cookies there, hiding the very bug a
@@ -106,6 +109,9 @@ function startApp(
       DETECTION_ENGINE_URL: upstreams['detection-engine'].url,
       DETECTION_API_KEY: upstreams['detection-engine'].key,
       SHUTDOWN_TIMEOUT: '2',
+      // Several instances run at once: none takes the default :9464. The
+      // lan-http one gets a port of its own (metrics.spec.ts).
+      METRICS_ADDR: 'off',
       ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -227,11 +233,15 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     }
 
     const httpPort = await freePort()
-    const httpApp = startApp('lan-http', httpPort, `http://${LAN_HOST}:${httpPort}`, upstreams)
+    const metricsPort = await freePort()
+    const httpApp = startApp('lan-http', httpPort, `http://${LAN_HOST}:${httpPort}`, upstreams, {
+      METRICS_ADDR: `127.0.0.1:${metricsPort}`,
+    })
     children.push(httpApp)
     await waitHealthy(`http://127.0.0.1:${httpPort}/healthz`, httpApp, 'lan-http')
     process.env.E2E_HTTP_URL = `http://${LAN_HOST}:${httpPort}`
     process.env.E2E_HTTP_DIRECT = `http://127.0.0.1:${httpPort}`
+    process.env.E2E_HTTP_METRICS = `http://127.0.0.1:${metricsPort}`
 
     // For lockout.spec.ts alone: its sign-in windows get exhausted on
     // purpose, and it trusts X-Forwarded-For so the test can guess from

@@ -1,15 +1,21 @@
 import { describe, expect, it } from 'vitest'
 import {
+  alertAnchor,
   alertClient,
   alertClientText,
   alertHeadline,
   alertObservedDomain,
   falsePositiveQuestion,
   falsePositiveVerdict,
+  isSilenced,
   liftQuestion,
-  liftVerdict,
+  liftRequest,
   signalClasses,
+  suppressionAnchor,
+  suppressionDays,
+  suppressionEnds,
   suppressionFor,
+  suppressionPeriod,
 } from './alerts'
 import type { Alert, Suppression } from './types'
 
@@ -138,15 +144,81 @@ describe('false-positive feedback', () => {
     expect(suppressionFor(v2ids, [suppression({ client_ip: '192.168.1.78' })])).toBeUndefined()
   })
 
-  it('lifts a suppression with a confirmed verdict for the same key', () => {
-    expect(liftVerdict(suppression({}))).toEqual({
+  // A "confirmed" verdict used to stand in for a lift: it records the
+  // indicator as a true positive, which nobody said.
+  it('lifts exactly one suppression, naming its key, and sends no verdict', () => {
+    const req = liftRequest(suppression({}))
+    expect(req).toEqual({
       matched_ioc: '203.0.113.9',
       client_ip: '192.168.1.77',
       signal_class: 'ids-signature',
-      verdict: 'confirmed',
       reason: 'suppression lifted in the web UI',
     })
-    expect(liftVerdict(suppression({ client_ip: '' }))).not.toHaveProperty('client_ip')
-    expect(liftQuestion(suppression({}))).toContain('reach the killswitch again')
+    expect(req).not.toHaveProperty('verdict')
+    // The indicator-wide suppression is named by leaving the client out.
+    expect(liftRequest(suppression({ client_ip: '' }))).not.toHaveProperty('client_ip')
+  })
+
+  it('says what lifting does, and what stays silenced', () => {
+    const device = suppression({ expires_at: '2026-12-16T12:00:00Z' })
+    const q = liftQuestion(device, [device])
+    expect(q).toContain('on 192.168.1.77')
+    expect(q).toContain('reach the killswitch again')
+    expect(q).toContain('does not record the indicator as malicious')
+    expect(q).not.toContain('confirmed')
+
+    // A suppression on every device keeps silencing the device.
+    const wide = suppression({ client_ip: '' })
+    const both = liftQuestion(device, [device, wide])
+    expect(both).toContain('also suppressed on every device')
+    expect(both).not.toContain('reach the killswitch again')
+    // And lifting the wide one leaves the per-device ones.
+    expect(liftQuestion(wide, [device, wide])).toContain('single devices (192.168.1.77) stay')
+  })
+
+  it('takes when a suppression ends from the engine, or estimates it from the default', () => {
+    expect(suppressionEnds(suppression({ expires_at: '2026-12-01T00:00:00Z' }))).toEqual({
+      at: '2026-12-01T00:00:00Z',
+      estimated: false,
+    })
+    // An engine from before expires_at: the default 30 days, flagged.
+    expect(suppressionEnds(suppression({}))).toEqual({
+      at: '2026-12-16T12:00:00.000Z',
+      estimated: true,
+    })
+    expect(suppressionEnds(suppression({ timestamp: 'garbage' }))).toBeNull()
+  })
+
+  it('reads the engine’s suppression period off a suppression it reported', () => {
+    expect(suppressionDays([])).toBeNull()
+    expect(suppressionDays([suppression({})])).toBeNull()
+    expect(
+      suppressionDays([
+        suppression({ timestamp: '2026-11-16T12:00:00Z', expires_at: '2026-11-23T12:00:00Z' }),
+      ]),
+    ).toBe(7)
+    expect(suppressionPeriod(7)).toBe('7 days')
+    expect(suppressionPeriod(1)).toBe('1 day')
+    expect(suppressionPeriod(null)).toBe("30 days (the detection engine's default)")
+    expect(falsePositiveQuestion(v2ids, 7)).toContain('For 7 days,')
+    expect(falsePositiveQuestion(v2ids)).toContain("For 30 days (the detection engine's default)")
+  })
+
+  it('reads `suppressed` as silenced only when it is true', () => {
+    expect(isSilenced({ suppressed: true })).toBe(true)
+    for (const v of [undefined, false, 'true', 1] as unknown[]) {
+      expect(isSilenced({ suppressed: v as boolean }), String(v)).toBe(false)
+    }
+  })
+
+  it('gives rows stable, id-safe anchors', () => {
+    const s = suppression({})
+    expect(suppressionAnchor(s)).toMatch(/^suppression-[0-9a-f]{8}$/)
+    // The engine's key: case and whitespace do not make another suppression.
+    expect(suppressionAnchor(suppression({ matched_ioc: ' 203.0.113.9 ' }))).toBe(
+      suppressionAnchor(s),
+    )
+    expect(suppressionAnchor(suppression({ client_ip: '' }))).not.toBe(suppressionAnchor(s))
+    expect(alertAnchor({ id: 'DET "x" <y>' })).toMatch(/^alert-[0-9a-f]{8}$/)
   })
 })

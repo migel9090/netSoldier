@@ -93,13 +93,21 @@ export interface Alert {
   signal_class?: string
   signals?: (AlertSignal | string)[]
   target?: { type: 'domain' | 'ip'; value: string }
+  /**
+   * True: recorded while a false-positive suppression applied, so it never
+   * reached the killswitch. The engine keeps writing such detections to the
+   * history; it only stops the response. Absent (or anything but `true`)
+   * means not suppressed, which is all an engine from before the field says.
+   */
+  suppressed?: boolean
 }
 
 /**
  * An active false-positive suppression (GET /feedback): the verdict that
  * created it. It silences `matched_ioc` for one signal class, on
- * `client_ip` or (empty) on every device, from `timestamp` for the engine's
- * suppression TTL (30 days unless configured otherwise).
+ * `client_ip` or (empty) on every device, from `timestamp` until
+ * `expires_at` (the engine's suppression TTL, 30 days unless configured
+ * otherwise). Engines from before `expires_at` do not send it.
  */
 export interface Suppression {
   alert_id?: string
@@ -110,6 +118,7 @@ export interface Suppression {
   reason?: string
   analyst?: string
   timestamp: string
+  expires_at?: string
 }
 
 export interface TopologyNode {
@@ -216,6 +225,15 @@ export interface EnforcementAction {
   reason?: string
   /** Why the driver failed: an apply that never took, or a revert that did not lift. */
   failure_reason?: string
+  /**
+   * The driver operation asked for and not answered yet: `apply` or
+   * `revert`; absent when there is none — and from a controller that
+   * predates the field (libs/events/enforcement.go InFlight). An `active` or
+   * `revert_failed` action with `revert` is being lifted (still in force
+   * until the driver confirms). Every `approved` action has `apply`; who the
+   * apply waits for is told by `action_type`, not by this field.
+   */
+  in_flight?: string
 }
 
 /**

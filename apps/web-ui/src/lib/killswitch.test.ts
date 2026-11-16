@@ -3,6 +3,7 @@ import type { ActionResult } from './api'
 import {
   actionTypeChoices,
   approveQuestion,
+  autoBlockStatus,
   awaitingConfirmation,
   defaultChoice,
   describeActor,
@@ -13,7 +14,12 @@ import {
   endedBy,
   failureKind,
   hasSettled,
+  isBeingLifted,
   isStillEnforced,
+  operationInFlight,
+  progressWords,
+  reportsInFlight,
+  stateWords,
 } from './killswitch'
 import { newestFirst, oldestFirst } from './order'
 import type { AuditEntry, EnforcementAction } from './types'
@@ -64,15 +70,74 @@ describe('state semantics', () => {
     expect(failureKind(action({ state: 'expired' }))).toBeNull()
   })
 
+  it('reads the operation in flight from in_flight, and approved alone without it', () => {
+    expect(operationInFlight(action({ state: 'active', in_flight: 'revert' }))).toBe('revert')
+    expect(operationInFlight(action({ state: 'revert_failed', in_flight: 'revert' }))).toBe(
+      'revert',
+    )
+    expect(operationInFlight(action({ state: 'approved', in_flight: 'apply' }))).toBe('apply')
+    // A controller that predates the field: approved still implies the apply…
+    expect(operationInFlight(action({ state: 'approved' }))).toBe('apply')
+    // …but nothing tells a block being lifted from one nobody is lifting.
+    expect(operationInFlight(action({ state: 'active' }))).toBeNull()
+    expect(operationInFlight(action({ state: 'active', in_flight: 'bogus' }))).toBeNull()
+    expect(reportsInFlight(action({ in_flight: 'revert' }))).toBe(true)
+    expect(reportsInFlight(action({}))).toBe(false)
+  })
+
+  it('calls an enforced action with a revert in flight "being lifted"', () => {
+    expect(isBeingLifted(action({ state: 'active', in_flight: 'revert' }))).toBe(true)
+    expect(isBeingLifted(action({ state: 'revert_failed', in_flight: 'revert' }))).toBe(true)
+    expect(isBeingLifted(action({ state: 'active' }))).toBe(false)
+    expect(isBeingLifted(action({ state: 'revert_failed' }))).toBe(false)
+    expect(isBeingLifted(action({ state: 'reverted', in_flight: 'revert' }))).toBe(false)
+    expect(stateWords(action({ state: 'active', in_flight: 'revert' }))).toMatch(
+      /being lifted \(still in force/,
+    )
+    expect(stateWords(action({ state: 'revert_failed', in_flight: 'revert' }))).toMatch(
+      /retry is under way/,
+    )
+  })
+
   it('knows when an operation the controller answered with 202 has settled', () => {
+    expect(hasSettled('approve', action({ state: 'approved', in_flight: 'apply' }))).toBe(false)
     expect(hasSettled('approve', action({ state: 'approved' }))).toBe(false)
     for (const state of ['active', 'apply_failed', 'revert_failed']) {
       expect(hasSettled('approve', action({ state })), state).toBe(true)
     }
+    // With in_flight, the field decides — including a retried revert of a
+    // revert_failed action, which the state cannot tell from a failed one.
+    expect(hasSettled('revert', action({ state: 'active', in_flight: 'revert' }))).toBe(false)
+    expect(hasSettled('revert', action({ state: 'revert_failed', in_flight: 'revert' }))).toBe(
+      false,
+    )
+    for (const state of ['reverted', 'revert_failed', 'active']) {
+      expect(hasSettled('revert', action({ state }), true), state).toBe(true)
+    }
+    // Without it (an older controller), the state as before.
     expect(hasSettled('revert', action({ state: 'active' }))).toBe(false)
     for (const state of ['reverted', 'revert_failed']) {
       expect(hasSettled('revert', action({ state })), state).toBe(true)
     }
+  })
+
+  it('says what an operation in flight waits for, from the action type', () => {
+    const arp = action({ state: 'approved', in_flight: 'apply', action_type: 'arp_isolate' })
+    expect(progressWords(arp)).toBe(
+      'being applied as ARP Isolation — waiting for the network agent to confirm; not enforced until confirmed',
+    )
+    expect(progressWords(action({ state: 'approved' }))).toContain('waiting for AdGuard')
+    expect(progressWords(action({ state: 'active', in_flight: 'revert' }))).toMatch(
+      /^being lifted — waiting for AdGuard to answer; still in force/,
+    )
+    expect(progressWords(action({ state: 'revert_failed', in_flight: 'revert' }))).toMatch(
+      /^retrying a revert that failed/,
+    )
+    // An older controller: the page's own revert.
+    expect(progressWords(action({ state: 'active' }), 'revert')).toMatch(/^being lifted/)
+    expect(progressWords(action({ state: 'approved', action_type: '' }))).toBe(
+      'approved — checking…',
+    )
   })
 })
 
@@ -131,14 +196,28 @@ describe('outcomes come from the status and the reported state', () => {
   })
 
   it('revert → 202 active is in progress, with the block still in force', () => {
+    for (const reported of [
+      action({ state: 'active', in_flight: 'revert' }),
+      action({ state: 'active' }), // a controller without in_flight
+    ]) {
+      const o = describeOutcome('revert', a, dev, result({ status: 202, action: reported }))
+      expect(o).toMatchObject({ tone: 'progress', state: 'active', settling: true })
+      expect(o.text).toMatch(/^Reverting ACT-1: in progress/)
+      expect(o.text).toMatch(/stays in force/)
+    }
+  })
+
+  // The retry has not answered: reporting the previous attempt's failure
+  // would be wrong. in_flight is what tells the two apart.
+  it('revert → 202 revert_failed with a revert in flight is a retry in progress', () => {
     const o = describeOutcome(
       'revert',
       a,
       dev,
-      result({ status: 202, action: action({ state: 'active' }) }),
+      result({ status: 202, action: action({ state: 'revert_failed', in_flight: 'revert' }) }),
     )
-    expect(o).toMatchObject({ tone: 'progress', state: 'active', settling: true })
-    expect(o.text).toMatch(/stays in force/)
+    expect(o).toMatchObject({ tone: 'progress', state: 'revert_failed', settling: true })
+    expect(o.text).toMatch(/^Retrying the revert of ACT-1: in progress/)
   })
 
   it('the settled outcome of a 202 is reported from the state it reached', () => {
@@ -285,8 +364,11 @@ describe('audit log', () => {
       entry({ seq: 4, action_id: 'ACT-2', from_state: 'pending', to_state: 'approved' }),
       entry({ seq: 3, action_id: 'ACT-3', from_state: '', to_state: 'pending' }),
     ]
-    expect(awaitingConfirmation(entries)).toEqual(['ACT-3'])
-    expect(awaitingConfirmation([...entries].reverse())).toEqual(['ACT-3'])
+    const ids = (es: AuditEntry[]) => awaitingConfirmation(es).map((e) => e.action_id)
+    expect(ids(entries)).toEqual(['ACT-3'])
+    expect(ids([...entries].reverse())).toEqual(['ACT-3'])
+    // The entry says when it was approved, for the "since" column.
+    expect(awaitingConfirmation(entries)[0].seq).toBe(6)
   })
 
   it('describes transitions and the controller’s own actors', () => {
@@ -302,6 +384,52 @@ describe('audit log', () => {
     expect(endedBy(action({ state: 'reverted', reverted_by: 'ttl' }))).toMatch(/TTL/)
     expect(endedBy(action({ state: 'rejected', rejected_by: 'Anna' }))).toBe('Anna')
     expect(endedBy(action({ state: 'expired' }))).toMatch(/nobody approved/)
+  })
+})
+
+describe('automatic blocking', () => {
+  it('shows whatever reason the controller gives, explained when it is a known one', () => {
+    expect(
+      autoBlockStatus({ auto_block_allowed: true, auto_block_disabled_reason: '' }),
+    ).toMatchObject({ on: true, reason: '' })
+
+    const empty = autoBlockStatus({
+      auto_block_allowed: false,
+      auto_block_disabled_reason: 'auto-block disabled: allowlist is empty',
+    })
+    expect(empty).toMatchObject({ on: false, reason: 'auto-block disabled: allowlist is empty' })
+    expect(empty.explanation).toContain('allowlist')
+
+    const setting = autoBlockStatus({
+      auto_block_allowed: false,
+      auto_block_disabled_reason: 'auto-block disabled: POLICY_AUTO_BLOCK is off',
+    })
+    expect(setting.explanation).toContain('POLICY_AUTO_BLOCK')
+
+    // A reason this UI has never heard of: shown as given, nothing invented.
+    const unknown = autoBlockStatus({
+      auto_block_allowed: false,
+      auto_block_disabled_reason: '  auto-block disabled: the moon is full ',
+    })
+    expect(unknown).toEqual({
+      on: false,
+      reason: 'auto-block disabled: the moon is full',
+      explanation: '',
+    })
+    expect(autoBlockStatus({ auto_block_allowed: false })).toEqual({
+      on: false,
+      reason: '',
+      explanation: '',
+    })
+  })
+
+  it('does not guess when the controller does not say', () => {
+    expect(autoBlockStatus({}).on).toBeNull()
+    // A reason without the flag still means it is off.
+    expect(autoBlockStatus({ auto_block_disabled_reason: 'off for maintenance' })).toMatchObject({
+      on: false,
+      reason: 'off for maintenance',
+    })
   })
 })
 
