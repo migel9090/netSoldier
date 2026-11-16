@@ -75,3 +75,36 @@ def test_select_beacons_threshold_and_dedupe():
 def test_select_beacons_empty_when_all_below():
     rows = [BeaconRow("192.168.1.10", "8.8.8.8", 0.4, 10)]
     assert select_beacons(rows, threshold=0.7) == []
+
+
+def test_unspecified_destination_is_not_an_address():
+    # RITA's dst for SNI beacons; "::" must never become an IP target
+    assert normalize_ip("::") == ""
+    assert normalize_ip("0.0.0.0") == ""  # noqa: S104 — an address, not a bind
+    assert normalize_ip("::ffff:0.0.0.0") == ""
+    assert normalize_ip("2001:DB8::1") == "2001:db8::1"
+
+
+def test_select_beacons_keys_on_name():
+    """ML-4: SNI beacons share dst '::'; the name is part of the key."""
+    rows = [
+        BeaconRow("::ffff:192.168.1.50", "::", 0.98, 2880, "sni", "a.example", last_seen=10),
+        BeaconRow("::ffff:192.168.1.50", "::", 0.91, 1440, "sni", "b.example", last_seen=10),
+        # same beacon, older observation with a higher score: the newest wins
+        BeaconRow("192.168.1.50", "::", 0.99, 99, "sni", "A.example.", last_seen=5),
+    ]
+    out = select_beacons(rows, threshold=0.7)
+    assert [(d.dst_domain, d.beacon_score, d.last_seen) for d in out] == [
+        ("a.example", 0.98, 10),
+        ("b.example", 0.91, 10),
+    ]
+
+
+def test_connection_count_fits_the_column():
+    det = build_detection(BeaconRow("192.168.1.5", "203.0.113.9", 0.9, 2**64 - 1))
+    assert det.connection_count == 2**32 - 1
+
+
+def test_nan_score_is_not_a_beacon():
+    assert select_beacons([BeaconRow("192.168.1.5", "203.0.113.9", float("nan"), 1)]) == []
+    assert score_to_confidence(float("nan")) == 0

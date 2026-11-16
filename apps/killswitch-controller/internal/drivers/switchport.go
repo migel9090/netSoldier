@@ -48,11 +48,15 @@ type SwitchRequest struct {
 // to a webhook. quarantineVLAN is the VLAN ID used for quarantine
 // (0 = disable port instead of VLAN reassignment).
 //
-// secret signs each request body with HMAC-SHA256 so the webhook handler can
-// verify the instruction came from this controller. Disabling a switch port
-// is the most destructive action in the system; sending it unauthenticated
-// meant anyone able to reach the webhook URL could cut off any device, and
-// the handler had no way to tell a genuine request from a forged one.
+// secret signs each request with HMAC-SHA256 over a timestamp and the body
+// (events.SignatureHeader, "t=…,v1=…") so the webhook handler can verify the
+// instruction came from this controller, and came from it recently.
+// Disabling a switch port is the most destructive action in the system;
+// sending it unauthenticated meant anyone able to reach the webhook URL could
+// cut off any device, and a body-only signature meant anyone who once
+// captured a "disable_port" could replay it forever. The adapter must verify
+// with events.SignatureVerifier (or the same construction) and reject stale
+// timestamps.
 func NewSwitchPortDriver(webhookURL string, quarantineVLAN int, secret string,
 	guard *TargetGuard) *SwitchPortDriver {
 	return &SwitchPortDriver{
@@ -68,9 +72,14 @@ func (d *SwitchPortDriver) Name() string { return "switch_acl" }
 
 // Apply calls the switch webhook to disable the port or move the
 // device to the quarantine VLAN.
+//
+// The request carries the identifiers in the form the guard checked them,
+// not as the action spelled them: an adapter that parsed a raw string
+// differently from the guard could act on a device the guard never saw.
 func (d *SwitchPortDriver) Apply(ctx context.Context, action *events.EnforcementAction) error {
-	if err := d.guard.Check(action.TargetMAC, action.TargetIP); err != nil {
-		return err
+	dev, err := d.guard.Vet(action.TargetMAC, action.TargetIP)
+	if err != nil {
+		return NotApplied(err)
 	}
 
 	op := "disable_port"
@@ -81,8 +90,8 @@ func (d *SwitchPortDriver) Apply(ctx context.Context, action *events.Enforcement
 	req := SwitchRequest{
 		ActionID:       action.ID,
 		Operation:      op,
-		TargetMAC:      action.TargetMAC,
-		TargetIP:       action.TargetIP,
+		TargetMAC:      dev.MAC,
+		TargetIP:       dev.IP,
 		QuarantineVLAN: d.quarantineVLAN,
 	}
 
@@ -99,12 +108,21 @@ func (d *SwitchPortDriver) Apply(ctx context.Context, action *events.Enforcement
 }
 
 // Revert calls the switch webhook to restore the port or original VLAN.
+// Restoring is never refused — it can only give a device its access back —
+// but it names the device the way Apply did, so the adapter finds the port
+// it changed.
 func (d *SwitchPortDriver) Revert(ctx context.Context, action *events.EnforcementAction) error {
 	req := SwitchRequest{
 		ActionID:  action.ID,
 		Operation: "restore",
 		TargetMAC: action.TargetMAC,
 		TargetIP:  action.TargetIP,
+	}
+	if key, err := parseDeviceMAC(action.TargetMAC); err == nil {
+		req.TargetMAC = formatMACKey(key)
+	}
+	if addr, err := parseDeviceIP(action.TargetIP); err == nil {
+		req.TargetIP = addr.String()
 	}
 
 	if err := d.call(ctx, req); err != nil {
@@ -135,7 +153,7 @@ func (d *SwitchPortDriver) call(ctx context.Context, sr SwitchRequest) error {
 
 	resp, err := d.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("request: %w", err)
+		return fmt.Errorf("request: %w", requestError(err, endpointOf(d.webhookURL)))
 	}
 	defer resp.Body.Close()
 
@@ -143,6 +161,9 @@ func (d *SwitchPortDriver) call(ctx context.Context, sr SwitchRequest) error {
 		return nil
 	}
 
+	// The adapter answered and said no: by its contract nothing changed.
+	// A transport error above is different — the request may have been
+	// carried out — and is returned as is.
 	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	return fmt.Errorf("webhook %d: %s", resp.StatusCode, errBody)
+	return NotApplied(fmt.Errorf("webhook %d: %s", resp.StatusCode, scrub(errBody, urlSecrets(d.webhookURL)...)))
 }

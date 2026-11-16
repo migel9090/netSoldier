@@ -1,0 +1,96 @@
+# How a site's values reach the manifests. Used by every site overlay
+# (deploy/kustomize/sites/<site>), which supplies the ConfigMap
+# `netsoldier-site` (from its site.env) in the netsoldier and dns namespaces.
+#
+#   env vars       the workloads read netsoldier-site with configMapKeyRef
+#                  (base/*), so nothing here is needed for them;
+#   published      DNS (53) and the web UI (3000) as host ports bound to the
+#     ports        node's LAN address only (NODE_LAN_IP), never to every
+#                  address of the node;
+#   policies       the edges that depend on the site: the LAN to DNS and to
+#                  the web UI, AdGuard to the site's upstream resolvers, and
+#                  netagent (host network) to device-inventory and the
+#                  killswitch.
+#
+# A value the site does not set fails the build (a replacement with no
+# source), and a placeholder that survived would be refused by the API
+# server: nothing is published or admitted by default.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - network-policies.yaml
+
+patches:
+  - path: publish-adguard.yaml
+    target:
+      kind: StatefulSet
+      name: adguard-home
+      namespace: dns
+  - path: publish-web-ui.yaml
+    target:
+      kind: Deployment
+      name: web-ui
+      namespace: netsoldier
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: netsoldier-site
+      namespace: netsoldier
+      fieldPath: data.NODE_LAN_IP
+    targets:
+      - select:
+          kind: StatefulSet
+          name: adguard-home
+        fieldPaths:
+          - spec.template.spec.containers.[name=adguard-home].ports.[name=dns-tcp].hostIP
+          - spec.template.spec.containers.[name=adguard-home].ports.[name=dns-udp].hostIP
+      - select:
+          kind: Deployment
+          name: web-ui
+        fieldPaths:
+          - spec.template.spec.containers.[name=web-ui].ports.[name=http].hostIP
+  - source:
+      kind: ConfigMap
+      name: netsoldier-site
+      namespace: netsoldier
+      fieldPath: data.LAN_CIDR
+    targets:
+      - select:
+          kind: NetworkPolicy
+          name: allow-web-ui-from-lan
+        fieldPaths:
+          - spec.ingress.0.from.0.ipBlock.cidr
+      - select:
+          kind: NetworkPolicy
+          name: allow-adguard-dns-from-lan
+        fieldPaths:
+          - spec.ingress.0.from.0.ipBlock.cidr
+  - source:
+      kind: ConfigMap
+      name: netsoldier-site
+      namespace: netsoldier
+      fieldPath: data.UPSTREAM_DNS_CIDR
+    targets:
+      - select:
+          kind: NetworkPolicy
+          name: allow-adguard-upstream
+        fieldPaths:
+          - spec.egress.0.to.0.ipBlock.cidr
+  - source:
+      kind: ConfigMap
+      name: netsoldier-site
+      namespace: netsoldier
+      fieldPath: data.HOST_NETWORK_SOURCE_CIDR
+    targets:
+      - select:
+          kind: NetworkPolicy
+          name: allow-netagent-to-device-inventory
+        fieldPaths:
+          - spec.ingress.0.from.0.ipBlock.cidr
+      - select:
+          kind: NetworkPolicy
+          name: allow-netagent-to-killswitch
+        fieldPaths:
+          - spec.ingress.0.from.0.ipBlock.cidr

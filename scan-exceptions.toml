@@ -1,0 +1,445 @@
+# Exceptions for the IaC and Dockerfile gates: Checkov, KICS and hadolint
+# (scripts/ci/iac-gate.py, run by .github/workflows/iac-scan.yml and by
+# `task scan:iac`).
+#
+# The gates fail on every finding that is not listed here (KICS: on HIGH and
+# CRITICAL). Fix a finding when it can be fixed; an entry is acceptable only
+# for something deliberate, documented where it is decided, or a false
+# positive, and says why in words a reviewer can check against the manifest.
+# There is no baseline: nothing is excepted because it already existed.
+#
+# Every entry carries a review date (`until`, at most a year ahead). After it
+# the entry no longer applies, the findings it covered fail again, and the
+# gate says the entry expired, like osv-scanner's ignoreUntil in
+# osv-scanner.toml. An entry that matches nothing any more is reported as a
+# warning so it can be shrunk.
+#
+# Scope is as narrow as the finding allows:
+#   resources  Kubernetes objects as Kind/namespace/name, the identity they
+#              have in every rendered target (scripts/ci/render-manifests.sh)
+#              and in standalone manifests; a new workload is never covered
+#              by an old entry
+#   files      repository paths, for findings outside Kubernetes manifests
+#
+#   [[exception]]
+#   tool = "checkov"            # checkov | kics | hadolint
+#   rule = "CKV_K8S_19"         # Checkov id, KICS query id, hadolint code
+#   resources = ["DaemonSet/netsoldier/netagent"]
+#   until = 2027-05-15
+#   reason = """Why it is deliberate, where that is decided."""
+#
+# KICS query ids belong to the pinned KICS release (scripts/ci/tools.sh);
+# some change between releases, so re-check these entries when bumping it.
+
+# ════════════════════════════════════════════════════════════════════════════
+# Checkov
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── Raw network access: netagent (ADR-0004) ──────────────────────────────────
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_19"
+resources = ["DaemonSet/netsoldier/netagent"]
+until = 2027-05-15
+reason = """Host network namespace. ADR-0004: netagent is the one first-party
+component with raw network access, because it has to see and answer ARP and
+DHCP on the household LAN, which only the node's own network namespace
+carries. It listens on no port, runs non-root on the default runtime with
+every capability dropped but NET_RAW, and nothing else first-party shares the
+host network (deploy/README.md, runtime rules)."""
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_25"
+resources = ["DaemonSet/netsoldier/netagent"]
+until = 2027-05-15
+reason = """Adds NET_RAW and nothing else (ADR-0004, point 6): the raw socket
+netagent captures and sends ARP/DHCP frames with. The image bakes the
+capability into the binary as a file capability (apps/netagent/Dockerfile), so
+the process stays non-root with allowPrivilegeEscalation: false."""
+
+# ── AdGuard Home ─────────────────────────────────────────────────────────────
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_25"
+resources = ["StatefulSet/dns/adguard-home"]
+until = 2027-05-15
+reason = """Adds NET_BIND_SERVICE only. The upstream AdGuard Home binary
+carries cap_net_bind_service as a file capability with the effective bit, and
+such a binary cannot even be executed unless the capability is in the
+container's bounding set (deploy/README.md, runtime rules). The pod is
+non-root with every other capability dropped. The lite profile removes the
+file capability instead (deploy/podman/adguard/Containerfile)."""
+
+# ── Ports published on the node's LAN address, by a site ─────────────────────
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_26"
+resources = ["StatefulSet/dns/adguard-home", "Deployment/netsoldier/web-ui"]
+until = 2027-05-15
+reason = """hostPort is how a site serves the household on a single-node
+cluster with no load balancer: DNS (53/udp+tcp) and the web UI, the only two
+things the LAN reaches. deploy/kustomize/components/site binds each to the
+site's own LAN address (hostIP from site.env), never 0.0.0.0, and the
+profiles themselves publish nothing; only sites render these ports."""
+
+# ── Passive sensors of the proxmox-soc profile ───────────────────────────────
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_19"
+resources = ["Deployment/netsoldier/ntopng", "Deployment/netsoldier/suricata", "Deployment/netsoldier/zeek"]
+until = 2027-05-15
+reason = """Passive sensors: they capture the mirrored LAN traffic on the
+node's interface, which a pod network namespace does not see. They run with
+read-only root filesystems and no Service; ntopng's Redis sidecar is bound to
+127.0.0.1 for this reason. proxmox-soc is not exercised yet (its
+kustomization); re-check when the profile is brought up."""
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_25"
+resources = ["Deployment/netsoldier/ntopng", "Deployment/netsoldier/suricata", "Deployment/netsoldier/zeek"]
+until = 2027-05-15
+reason = """Capture capabilities only, every other one dropped: NET_RAW for the
+packet socket and NET_ADMIN for promiscuous mode on the mirror interface
+(plus SYS_NICE for Suricata's capture threads). Zeek's image bakes them into
+the binary as file capabilities so it runs non-root. proxmox-soc is not
+exercised yet; re-check the Suricata and ntopng grants when it is."""
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_23"
+resources = ["Deployment/netsoldier/ntopng"]
+until = 2027-05-15
+reason = """ntopng starts as root to open its capture socket and drops to
+`nobody` at once (-u=nobody); started non-root it cannot capture even with
+file capabilities, because its own privilege handling resets the effective
+set (comment in deploy/kustomize/base/ntopng/deployment.yaml). Kyverno's
+require-non-root has a matching scoped exception; read-only root filesystem,
+drop-all plus two capabilities, no privilege escalation and seccomp still
+apply."""
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_8"
+resources = ["Deployment/netsoldier/suricata", "Deployment/netsoldier/zeek"]
+until = 2027-05-15
+reason = """No liveness probe yet for the passive sensors: neither exposes a
+health endpoint, and a probe that only checks the process exists adds nothing
+to the kubelet restarting it when it exits. The useful probe is capture
+progress (stats freshness), still to be designed; until then a sensor that
+hangs while alive goes unnoticed. Revisit with the proxmox-soc bring-up."""
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_9"
+resources = ["Deployment/netsoldier/suricata", "Deployment/netsoldier/zeek"]
+until = 2027-05-15
+reason = """Readiness gates traffic from a Service, and no Service selects the
+sensors: they only capture and write logs that their Vector sidecars ship, so
+readiness has nothing to decide."""
+
+# ── Image references ─────────────────────────────────────────────────────────
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_43"
+resources = [
+  "DaemonSet/netsoldier/netagent",
+  "Deployment/netsoldier/detection-engine",
+  "Deployment/netsoldier/device-inventory",
+  "Deployment/netsoldier/killswitch-controller",
+  "Deployment/netsoldier/threat-intel-sync",
+  "Deployment/netsoldier/web-ui",
+  "Deployment/netsoldier/ml-anomaly",
+  "Deployment/netsoldier/zeek",
+]
+until = 2027-05-15
+reason = """These carry first-party images (ghcr.io/migel9090/*), and the
+committed :main is a placeholder that the deploy replaces: the lab renders
+each build's unique tag (infra/lab/deploy.sh) and imports it straight into
+containerd, so there is no registry digest to write down, and the GitOps path
+has Kyverno's verifyImages pin every first-party reference to its signed
+digest at admission (mutateDigest, verifyDigest, required). Third-party
+images, including the zeek pod's sidecars, are pinned by digest in the
+manifests."""
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_15"
+resources = [
+  "DaemonSet/netsoldier/netagent",
+  "Deployment/netsoldier/detection-engine",
+  "Deployment/netsoldier/device-inventory",
+  "Deployment/netsoldier/killswitch-controller",
+  "Deployment/netsoldier/threat-intel-sync",
+  "Deployment/netsoldier/web-ui",
+  "Deployment/netsoldier/ml-anomaly",
+  "Deployment/netsoldier/zeek",
+]
+until = 2027-05-15
+reason = """imagePullPolicy: Always would break the lab, whose images are
+imported into containerd with no registry to pull from, and would make every
+restart of a home appliance depend on the registry being reachable. The rule
+protects private images cached on nodes shared between tenants; this is a
+single-tenant cluster with public or locally built images, and the first-party
+references are pinned per build (see the CKV_K8S_43 entry). Digest-pinned
+third-party images already pass this check."""
+
+# ── Secrets as environment variables ─────────────────────────────────────────
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_35"
+resources = [
+  "DaemonSet/netsoldier/netagent",
+  "Deployment/netsoldier/detection-engine",
+  "Deployment/netsoldier/device-inventory",
+  "Deployment/netsoldier/killswitch-controller",
+  "Deployment/netsoldier/threat-intel-sync",
+  "Deployment/netsoldier/web-ui",
+  "Deployment/netsoldier/ml-anomaly",
+  "Deployment/netsoldier/suricata",
+  "Deployment/netsoldier/zeek",
+  "StatefulSet/dns/adguard-home",
+  "StatefulSet/netsoldier/clickhouse",
+  "Job/netsoldier/clickhouse-migrate",
+  "CronJob/netsoldier/backup-clickhouse",
+  "CronJob/netsoldier/backup-state",
+  "CronJob/netsoldier/clickhouse-cold-export",
+  "CronJob/netsoldier/rita-import",
+  "StatefulSet/netsoldier/misp",
+  "StatefulSet/netsoldier/misp-mariadb",
+  "StatefulSet/storage/garage",
+  "Job/storage/garage-bucket-init",
+]
+until = 2027-05-15
+reason = """Credentials reach these containers as environment variables via
+secretKeyRef, never as literals in a manifest: the first-party services read
+their tokens from the environment (the same contract as the lite profile's
+Podman secrets, type=env), and the third-party images (ClickHouse, MariaDB,
+MISP, Garage, Vector, AdGuard's config renderer) take them that way. Files
+would need *_FILE support in every service, which is application work. The
+exposure that remains is /proc/<pid>/environ to the same UID inside a pod that
+runs non-root with a read-only root filesystem. Review when the services
+learn to read secrets from files."""
+
+# ── Service-account token and API access: the state backup ───────────────────
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_38"
+resources = ["CronJob/netsoldier/backup-state"]
+until = 2027-05-15
+reason = """The one pod that calls the Kubernetes API: the state backup reads
+the namespace's Secrets and ConfigMaps (deploy/kustomize/base/backup/
+configmap.yaml, kube_get) and age-encrypts them before they leave the pod, so
+it mounts its token on purpose. Every other pod disables the token."""
+
+[[exception]]
+tool = "checkov"
+rule = "CKV2_K8S_5"
+resources = ["RoleBinding/netsoldier/backup-reader"]
+until = 2027-05-15
+reason = """Reading every Secret in the namespace is what the state backup is
+for: a disaster-recovery copy of the namespace's credentials, encrypted to an
+age recipient inside the pod. The Role is namespaced (netsoldier only, get and
+list, no write) and bound to the backup ServiceAccount alone, which only the
+backup-state CronJob mounts."""
+
+# ── UIDs fixed by third-party images ─────────────────────────────────────────
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_40"
+resources = [
+  "StatefulSet/netsoldier/clickhouse",
+  "Job/netsoldier/clickhouse-migrate",
+  "CronJob/netsoldier/clickhouse-cold-export",
+  "DaemonSet/netsoldier/fluent-bit",
+  "Deployment/netsoldier/misp-redis",
+  "Deployment/netsoldier/ntopng",
+  "StatefulSet/netsoldier/misp",
+  "StatefulSet/netsoldier/misp-mariadb",
+  "StatefulSet/storage/garage",
+]
+until = 2027-05-15
+reason = """Third-party images run as the unprivileged user each is built for
+(ClickHouse 101, MariaDB and Redis 999, MISP's www-data 33, Garage and Fluent
+Bit 1000; ntopng's own UID is covered by CKV_K8S_23): the paths they write are
+owned by that UID, and ClickHouse refuses to start when its data directory's
+owner differs from its effective UID. All are non-root with every capability
+dropped. The rule's concern, a UID that matches a host account after an
+escape, is addressed for every image at once by user namespaces
+(hostUsers: false), to be evaluated on the lab's k3s before this date."""
+
+# ── False positive ───────────────────────────────────────────────────────────
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_SECRET_6"
+resources = ["ConfigMap/storage/garage-bootstrap"]
+until = 2027-05-15
+reason = """False positive: the "high entropy string" is the bootstrap script's
+line KEY_SECRET = os.environ["S3_SECRET_KEY"], which reads the key from the
+environment (deploy/kustomize/base/garage/bootstrap.py). The ConfigMap holds
+the script and no credential."""
+
+# ── Dockerfile HEALTHCHECK ───────────────────────────────────────────────────
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_DOCKER_2"
+files = [
+  "apps/detection-engine/Dockerfile",
+  "apps/device-inventory/Dockerfile",
+  "apps/killswitch-controller/Dockerfile",
+  "apps/threat-intel-sync/Dockerfile",
+]
+until = 2027-05-15
+reason = """Distroless static images: no shell and no HTTP client, so a
+HEALTHCHECK has nothing to run until the binary has a health command of its
+own, as netagent's `netagent health` does. Kubernetes probes them over HTTP
+(/healthz) and ignores HEALTHCHECK; under the lite profile's Podman they have
+no health check yet. Remove each file from this list when its service gains
+the command."""
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_DOCKER_2"
+files = ["apps/ml-anomaly/Dockerfile", "deploy/docker/zeek/Dockerfile"]
+until = 2027-05-15
+reason = """Run only by Kubernetes (proxmox-soc), which ignores HEALTHCHECK.
+ml-anomaly is one image for three containers on three ports (beacon-sync,
+flow-anomaly, scoring-api), each probed on its own port by its manifest; a
+single HEALTHCHECK cannot be right for all three. Zeek is a passive sensor
+with no endpoint to check."""
+
+# ── infra/lab/smoke.yaml ─────────────────────────────────────────────────────
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_8"
+resources = [
+  "Pod/netsoldier-smoke/kernel-gvisor",
+  "Pod/netsoldier-smoke/kernel-runc",
+  "Pod/netsoldier-smoke/healthz-client",
+]
+until = 2027-05-15
+reason = """Run-to-completion test pods (restartPolicy: Never) that print what
+they see and exit within seconds; infra/lab/smoke.sh judges their phase and
+output. A liveness probe would have nothing to observe. The long-running
+detection-engine pod in the same file has both probes."""
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_9"
+resources = [
+  "Pod/netsoldier-smoke/kernel-gvisor",
+  "Pod/netsoldier-smoke/kernel-runc",
+  "Pod/netsoldier-smoke/healthz-client",
+]
+until = 2027-05-15
+reason = """Same run-to-completion test pods: no Service selects them and they
+exit within seconds, so readiness has nothing to gate."""
+
+[[exception]]
+tool = "checkov"
+rule = "CKV_K8S_43"
+resources = ["Pod/netsoldier-smoke/detection-engine"]
+until = 2027-05-15
+reason = """The smoke test checks that the image published now runs under
+gVisor, so it follows the moving :main tag with imagePullPolicy: Always; a
+digest would freeze it on one build. It runs only in the lab's throw-away
+netsoldier-smoke namespace."""
+
+# ════════════════════════════════════════════════════════════════════════════
+# KICS (gates on HIGH and CRITICAL)
+# ════════════════════════════════════════════════════════════════════════════
+
+# Non Kube System Pod With Host Mount
+[[exception]]
+tool = "kics"
+rule = "aa8f7a35-9923-4cad-bd61-a19b7f6aac91"
+resources = ["DaemonSet/netsoldier/fluent-bit"]
+until = 2027-05-15
+reason = """Fluent Bit is the node log shipper: it mounts the node's systemd
+journal (/run/log/journal) and /etc/machine-id from the host, both read-only,
+which is the job. Nothing from the host is writable."""
+
+# Workload Mounting With Sensitive OS Directory
+[[exception]]
+tool = "kics"
+rule = "5308a7a8-06f8-45ac-bf10-791fe21de46e"
+resources = ["DaemonSet/netsoldier/fluent-bit"]
+until = 2027-05-15
+reason = """The same two read-only hostPath mounts (the journal and
+/etc/machine-id) that a node log shipper reads; see the entry above."""
+
+# Volume Mount With OS Directory Write Permissions
+[[exception]]
+tool = "kics"
+rule = "b7652612-de4e-4466-a0bf-1cd81f0c6063"
+resources = [
+  "DaemonSet/netsoldier/netagent",
+  "Deployment/netsoldier/killswitch-controller",
+  "Deployment/netsoldier/threat-intel-sync",
+  "StatefulSet/netsoldier/misp",
+  "StatefulSet/netsoldier/misp-mariadb",
+]
+until = 2027-05-15
+reason = """The writable mounts are the pod's own PersistentVolumeClaim or
+emptyDir (state, the health file, sockets, logs), not host directories: the
+query keys on the mount path alone. They sit under /var/lib or /run inside a
+read-only root filesystem because that is where each program keeps its state;
+no hostPath is involved."""
+
+# Passwords And Secrets - Generic Password
+[[exception]]
+tool = "kics"
+rule = "487f4be7-3fd9-4506-a07a-eae252180c08"
+resources = ["ConfigMap/netsoldier/suricata-vector-config", "ConfigMap/netsoldier/zeek-vector-config"]
+files = ["deploy/observability/vector/values.yaml"]
+until = 2027-05-15
+reason = """False positive: every flagged `password:` line is Vector's
+environment interpolation, "${CLICKHOUSE_PASSWORD:?...}"; the value comes
+from a Secret at runtime and is never in the file."""
+
+# Passwords And Secrets - Generic Secret
+[[exception]]
+tool = "kics"
+rule = "3e2d3b2f-c22a-4df1-9cc6-a7a0aebb0c99"
+resources = ["ConfigMap/storage/garage-bootstrap"]
+until = 2027-05-15
+reason = """False positive: the flagged line is KEY_SECRET =
+os.environ["S3_SECRET_KEY"] in the bootstrap script, which reads the key from
+the environment (deploy/kustomize/base/garage/bootstrap.py)."""
+
+# ════════════════════════════════════════════════════════════════════════════
+# hadolint (inline `# hadolint ignore=` pragmas are not honoured)
+# ════════════════════════════════════════════════════════════════════════════
+
+[[exception]]
+tool = "hadolint"
+rule = "DL3018"
+files = ["apps/netagent/Dockerfile"]
+until = 2027-05-15
+reason = """The setcap stage installs libcap from Alpine 3.22 only to write the
+file capability onto the netagent binary; nothing from that stage ships but
+the binary. Alpine drops superseded package versions from its mirrors, so an
+exact pin would break the build at the next security update; the stage's
+base image is pinned by digest instead."""
+
+[[exception]]
+tool = "hadolint"
+rule = "DL3008"
+files = ["deploy/docker/zeek/Dockerfile"]
+until = 2027-05-15
+reason = """git and libcap2-bin are build tools for zkg and setcap. Debian
+drops superseded patch versions between point releases, so exact pins break
+the build (the reason already given next to the line); the Zeek base image
+tag is fixed."""

@@ -1,3 +1,5 @@
+# Resources and placement only: device-inventory holds no capability on any
+# profile (ADR-0004); netagent captures.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -9,15 +11,6 @@ spec:
         kubernetes.io/arch: arm64
       containers:
         - name: device-inventory
-          securityContext:
-            runAsNonRoot: true
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              add:
-                - NET_BIND_SERVICE
-              drop:
-                - ALL
           resources:
             limits:
               cpu: 200m

@@ -10,18 +10,28 @@ import (
 // MLBeacons tails netsoldier.ml_beacons (RITA beaconing detections from
 // ml-anomaly, step 112). Until step 116 nothing consumed this table; it
 // is the "beacon" signal for composite-confidence.
+//
+// timestamp is RITA's last sighting of the beacon, which can be well behind
+// the time the row is written; only arrival order reads every row.
 type MLBeacons struct{}
 
 func NewMLBeacons() MLBeacons { return MLBeacons{} }
 
 func (MLBeacons) Name() string { return "ml_beacons" }
 
-func (MLBeacons) Query(since time.Time, limit int) string {
-	return fmt.Sprintf(`SELECT toUnixTimestamp(timestamp) AS ts, src_ip, dst_ip,
-  dst_domain, beacon_score, connection_count, confidence, severity, beacon_type, tags
-FROM ml_beacons WHERE timestamp >= %s
-ORDER BY timestamp LIMIT %d FORMAT JSONEachRow`, chTime(since), limit)
+func (MLBeacons) Columns() string {
+	return `toUnixTimestamp(timestamp) AS ts, src_ip, dst_ip, dst_domain, beacon_score,
+  connection_count, confidence, severity, beacon_type, tags`
 }
+
+// Identity includes dst_domain: SNI beacons have no destination address, so
+// two from one device at the same time differ only by name.
+func (MLBeacons) Identity() string {
+	return `timestamp, src_ip, dst_ip, dst_domain, beacon_score, connection_count, confidence,
+  severity, beacon_type, tags`
+}
+
+func (MLBeacons) Filter() string { return "" }
 
 type mlBeaconRow struct {
 	TS              json.Number `json:"ts"`
@@ -36,14 +46,14 @@ type mlBeaconRow struct {
 	Tags            []string    `json:"tags"`
 }
 
-func (MLBeacons) Parse(row json.RawMessage) (SensorEvent, string, error) {
+func (MLBeacons) Parse(row json.RawMessage) (SensorEvent, error) {
 	var r mlBeaconRow
 	if err := json.Unmarshal(row, &r); err != nil {
-		return SensorEvent{}, "", fmt.Errorf("decode ml beacon: %w", err)
+		return SensorEvent{}, fmt.Errorf("decode ml beacon: %w", err)
 	}
 	ts, err := r.TS.Int64()
 	if err != nil {
-		return SensorEvent{}, "", fmt.Errorf("bad ts: %w", err)
+		return SensorEvent{}, fmt.Errorf("bad ts: %w", err)
 	}
 
 	threat := "beaconing"
@@ -65,35 +75,39 @@ func (MLBeacons) Parse(row json.RawMessage) (SensorEvent, string, error) {
 			r.BeaconScore.String(), target, r.ConnectionCount.String()),
 		Indicator:     target,
 		IndicatorType: "beacon",
+		DstDomain:     r.DstDomain,
 		Severity:      r.Severity,
 		Confidence:    toInt(r.Confidence),
 		Source:        "rita",
 		Threat:        threat,
 	}
-
-	key := fmt.Sprintf("%s/%s/%s", r.SrcIP, r.DstIP, r.TS.String())
-	return ev, key, nil
+	return ev, nil
 }
 
 // MLAnomalies tails netsoldier.ml_anomalies (Isolation Forest flow
-// anomalies, step 113) — the "volumetric" signal.
+// anomalies, step 113) — the "volumetric" signal. timestamp is the end of
+// the scored window, and the row is written after the window closed.
 type MLAnomalies struct{}
 
 func NewMLAnomalies() MLAnomalies { return MLAnomalies{} }
 
 func (MLAnomalies) Name() string { return "ml_anomalies" }
 
-func (MLAnomalies) Query(since time.Time, limit int) string {
-	return fmt.Sprintf(`SELECT toUnixTimestamp(timestamp) AS ts,
-  toString(window_start) AS window_start, src_ip, anomaly_score, confidence,
-  severity, conn_count, bytes_out, dst_fanout, model_version, tags
-FROM ml_anomalies WHERE timestamp >= %s
-ORDER BY timestamp LIMIT %d FORMAT JSONEachRow`, chTime(since), limit)
+func (MLAnomalies) Columns() string {
+	return `toUnixTimestamp(timestamp) AS ts, toString(window_start) AS window_start_s, src_ip,
+  anomaly_score, confidence, severity, conn_count, bytes_out, dst_fanout, model_version, tags`
 }
+
+func (MLAnomalies) Identity() string {
+	return `timestamp, window_start, src_ip, anomaly_score, confidence, severity, conn_count,
+  bytes_out, dst_fanout, model_version, tags`
+}
+
+func (MLAnomalies) Filter() string { return "" }
 
 type mlAnomalyRow struct {
 	TS           json.Number `json:"ts"`
-	WindowStart  string      `json:"window_start"`
+	WindowStart  string      `json:"window_start_s"`
 	SrcIP        string      `json:"src_ip"`
 	AnomalyScore json.Number `json:"anomaly_score"`
 	Confidence   json.Number `json:"confidence"`
@@ -105,14 +119,14 @@ type mlAnomalyRow struct {
 	Tags         []string    `json:"tags"`
 }
 
-func (MLAnomalies) Parse(row json.RawMessage) (SensorEvent, string, error) {
+func (MLAnomalies) Parse(row json.RawMessage) (SensorEvent, error) {
 	var r mlAnomalyRow
 	if err := json.Unmarshal(row, &r); err != nil {
-		return SensorEvent{}, "", fmt.Errorf("decode ml anomaly: %w", err)
+		return SensorEvent{}, fmt.Errorf("decode ml anomaly: %w", err)
 	}
 	ts, err := r.TS.Int64()
 	if err != nil {
-		return SensorEvent{}, "", fmt.Errorf("bad ts: %w", err)
+		return SensorEvent{}, fmt.Errorf("bad ts: %w", err)
 	}
 
 	// the explanatory tags (upload-heavy, dst-fanout, ...) say what shape
@@ -142,7 +156,5 @@ func (MLAnomalies) Parse(row json.RawMessage) (SensorEvent, string, error) {
 		Source:        "iforest",
 		Threat:        shape,
 	}
-
-	key := fmt.Sprintf("%s/%s", r.SrcIP, r.WindowStart)
-	return ev, key, nil
+	return ev, nil
 }

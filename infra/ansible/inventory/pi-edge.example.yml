@@ -1,0 +1,13 @@
+# Example inventory for the Raspberry Pi (Podman) profile. The Pi is not
+# created by Terraform, so this one is written by hand: copy it outside the
+# repository, set the address and user, and pass it with -i.
+#
+# The k3s lab VM has no hand-written inventory: `task lab:inventory` writes
+# it from Terraform's outputs (see infra/README.md).
+all:
+  children:
+    pi_edge:
+      hosts:
+        pi-edge:
+          ansible_host: 192.168.1.200
+          ansible_user: netsoldier

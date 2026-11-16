@@ -2,20 +2,24 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: killswitch-controller
+  namespace: netsoldier
 spec:
   template:
     spec:
       containers:
         - name: killswitch-controller
-          # Step 117: require >=2 corroborating signal classes for auto-block.
-          # A single known-bad IoC feed match (no composite metadata) still
-          # auto-blocks instantly; lone heuristics (beacon/volumetric/TLS)
-          # go to human approval unless a composite corroborates them.
+          # Automatic blocking is not switched on by this profile: like every
+          # profile it leaves POLICY_AUTO_BLOCK to the site, and absent means
+          # off. A site turns it on with `POLICY_AUTO_BLOCK=on` in its
+          # site.env (deploy/kustomize/sites/<site>/site/site.env), next to
+          # the ALLOWLIST_IPS / ALLOWLIST_MACS it must never act against.
+          #
+          # Step 117: once a site has it on, a composite needs >= 2
+          # corroborating signal classes for auto-block. A single known-bad
+          # feed match still qualifies; lone heuristics go to human approval.
           env:
             - name: POLICY_AUTO_MIN_SIGNALS
               value: "2"
-          securityContext:
-            allowPrivilegeEscalation: false
           resources:
             limits:
               cpu: 300m

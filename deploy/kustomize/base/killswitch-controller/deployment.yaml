@@ -1,9 +1,15 @@
+# killswitch-controller: decides on detections and enforces through the DNS
+# sinkhole (AdGuard) and, through netagent, ARP isolation. It sends no frames
+# itself: gVisor, no capability. One replica with Recreate: its database is
+# the only record of what is enforced and has a single writer.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: killswitch-controller
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: killswitch-controller
@@ -13,6 +19,9 @@ spec:
         app.kubernetes.io/name: killswitch-controller
     spec:
       serviceAccountName: killswitch-controller
+      automountServiceAccountToken: false
+      runtimeClassName: gvisor
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -30,50 +39,82 @@ spec:
           env:
             - name: LISTEN_ADDR
               value: ":8084"
+            - name: KILLSWITCH_DB_PATH
+              value: "/var/lib/killswitch/killswitch.db"
             - name: CLICKHOUSE_URL
               value: "http://clickhouse.netsoldier.svc:8123"
             - name: CLICKHOUSE_DATABASE
               value: "netsoldier"
-            # The audit log is the accountability record for every
-            # enforcement decision; the account writing it is authenticated
-            # and holds INSERT on audit_log only.
+            # The audit forwarder's account: INSERT on audit_log only.
             - name: CLICKHOUSE_USER
-              valueFrom:
-                secretKeyRef:
-                  name: clickhouse-credentials
-                  key: writer-username
+              value: "killswitch"
             - name: CLICKHOUSE_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: clickhouse-credentials
-                  key: writer-password
-            # Authenticates every mutating endpoint. Without it the
-            # controller serves approve/revert to anything that can reach it.
+                  key: killswitch-password
+            # Three roles, three credentials (contract 4, 8.2): the operator
+            # token (web UI) on everything but /evaluate and the agent poll;
+            # the ingest token (detection-engine) on POST /evaluate only; the
+            # agent token (netagent) on POST /agent/v1/poll only.
             - name: KILLSWITCH_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: killswitch-credentials
                   key: api-key
-            # Verifies the HMAC on inbound detection events so a tampered
-            # payload cannot raise confidence or re-target an action.
+            - name: KILLSWITCH_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: killswitch-credentials
+                  key: ingest-token
+            - name: NETAGENT_KILLSWITCH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: netagent-credentials
+                  key: killswitch-token
+            # Signature v2 on every detection event (contract 2).
             - name: WEBHOOK_SECRET
               valueFrom:
                 secretKeyRef:
                   name: killswitch-credentials
                   key: webhook-secret
-            # Devices that must never be enforced against. While empty the
-            # controller disables auto-block and queues everything for a
-            # human — see allowlist-configmap.yaml.
-            - name: ALLOWLIST_MACS
+            # Automatic blocking is the site's decision, never a side effect
+            # of another setting: POLICY_AUTO_BLOCK=on in its site.env, or
+            # absent (= off), in which case every action waits for a human.
+            # Even when on, the killswitch holds automation back while the
+            # allowlist below is empty.
+            - name: POLICY_AUTO_BLOCK
               valueFrom:
                 configMapKeyRef:
-                  name: killswitch-allowlist
-                  key: ALLOWLIST_MACS
+                  name: netsoldier-site
+                  key: POLICY_AUTO_BLOCK
+                  optional: true
+            # Protected devices: the site's gateway (by IP and MAC) and its
+            # allowlist. They are never acted against, automation on or off.
+            - name: GATEWAY_IP
+              valueFrom:
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: GATEWAY_IP
+                  optional: true
+            - name: GATEWAY_MAC
+              valueFrom:
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: GATEWAY_MAC
+                  optional: true
             - name: ALLOWLIST_IPS
               valueFrom:
                 configMapKeyRef:
-                  name: killswitch-allowlist
+                  name: netsoldier-site
                   key: ALLOWLIST_IPS
+                  optional: true
+            - name: ALLOWLIST_MACS
+              valueFrom:
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: ALLOWLIST_MACS
+                  optional: true
             - name: ADGUARD_URL
               value: "http://adguard-web.dns.svc:3000"
             - name: ADGUARD_USER
@@ -91,7 +132,7 @@ spec:
               path: /healthz
               port: http
             periodSeconds: 2
-            failureThreshold: 15
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /healthz
@@ -111,14 +152,19 @@ spec:
                 - ALL
           resources:
             limits:
-              cpu: 200m
+              cpu: 300m
               memory: 256Mi
             requests:
               cpu: 50m
-              memory: 128Mi
+              memory: 96Mi
           volumeMounts:
+            - name: data
+              mountPath: /var/lib/killswitch
             - name: tmp
               mountPath: /tmp
       volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: killswitch-data
         - name: tmp
           emptyDir: {}

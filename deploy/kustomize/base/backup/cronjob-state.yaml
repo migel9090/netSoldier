@@ -26,7 +26,7 @@ spec:
               type: RuntimeDefault
           initContainers:
             - name: install-age
-              image: alpine:3.20
+              image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
               command: ["/bin/sh", "-c", "apk add --no-cache age && cp /usr/bin/age /tools/age"]
               securityContext:
                 readOnlyRootFilesystem: true
@@ -48,7 +48,7 @@ spec:
                   mountPath: /etc/apk/cache
           containers:
             - name: backup
-              image: alpine:3.20
+              image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
               command: ["/bin/sh", "/scripts/backup-state.sh"]
               env:
                 - name: PATH

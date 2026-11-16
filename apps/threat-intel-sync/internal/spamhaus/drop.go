@@ -1,7 +1,6 @@
 package spamhaus
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -9,51 +8,46 @@ import (
 	"strings"
 	"time"
 
+	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/feedhttp"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/ioc"
 )
 
-const (
-	dropURL  = "https://www.spamhaus.org/drop/drop.txt"
-	edropURL = "https://www.spamhaus.org/drop/edrop.txt"
-)
+// dropURL is the DROP list in text form. EDROP is no longer fetched:
+// Spamhaus merged it into DROP on 2024-04-10
+// (https://www.spamhaus.org/blocklists/do-not-route-or-peer/), and fetching
+// the retired URL made every cycle report this source as failed.
+const dropURL = "https://www.spamhaus.org/drop/drop.txt"
 
-// Client downloads and parses Spamhaus DROP/EDROP CIDR blocklists.
+// MinFetchInterval is Spamhaus' own rule: "Automated downloads must be at
+// least one hour apart". Retries after a failure respect it as well.
+const MinFetchInterval = time.Hour
+
+// Client downloads and parses the Spamhaus DROP CIDR blocklist.
 type Client struct {
-	http *http.Client
+	http     *http.Client
+	dropURL  string
+	maxBytes int64
 }
 
-// NewClient creates a Spamhaus list client.
-func NewClient() *Client {
+// NewClient creates a Spamhaus list client. maxBytes caps the response
+// body (0 = feedhttp.DefaultMaxBodyBytes).
+func NewClient(maxBytes int64) *Client {
 	return &Client{
-		http: &http.Client{Timeout: 30 * time.Second},
+		http:     &http.Client{Timeout: 30 * time.Second},
+		dropURL:  dropURL,
+		maxBytes: maxBytes,
 	}
 }
 
 // FetchDROP downloads and parses the Spamhaus DROP list.
 func (c *Client) FetchDROP(ctx context.Context) ([]ioc.Indicator, error) {
-	return c.fetchList(ctx, dropURL, "spamhaus-drop", "drop")
+	return c.fetchList(ctx, c.dropURL, "spamhaus-drop", "drop")
 }
 
-// FetchEDROP downloads and parses the Spamhaus Extended DROP list.
-func (c *Client) FetchEDROP(ctx context.Context) ([]ioc.Indicator, error) {
-	return c.fetchList(ctx, edropURL, "spamhaus-edrop", "edrop")
-}
-
-// FetchAll downloads both DROP and EDROP lists and returns combined results.
-// Partial results are returned if one list fails.
+// FetchAll returns everything this client fetches; since the EDROP merge
+// that is the DROP list alone.
 func (c *Client) FetchAll(ctx context.Context) ([]ioc.Indicator, error) {
-	drop, errDrop := c.FetchDROP(ctx)
-	edrop, errEdrop := c.FetchEDROP(ctx)
-
-	all := append(drop, edrop...)
-
-	if errDrop != nil {
-		return all, fmt.Errorf("DROP: %w", errDrop)
-	}
-	if errEdrop != nil {
-		return all, fmt.Errorf("EDROP: %w", errEdrop)
-	}
-	return all, nil
+	return c.FetchDROP(ctx)
 }
 
 func (c *Client) fetchList(ctx context.Context, url, source, tag string) ([]ioc.Indicator, error) {
@@ -69,28 +63,27 @@ func (c *Client) fetchList(ctx context.Context, url, source, tag string) ([]ioc.
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("Spamhaus %d: %s", resp.StatusCode, body)
+		return nil, feedhttp.StatusError("Spamhaus", resp)
 	}
 
-	return parseDROPList(resp.Body, source, tag)
+	return parseDROPList(feedhttp.LimitBody(resp.Body, c.maxBytes), source, tag)
 }
 
-// parseDROPList parses lines of format "1.10.16.0/20 ; SBL256263".
+// parseDROPList parses lines of format "1.10.16.0/20 ; SBL256263". On a
+// read error (including the body cap) the complete lines read so far are
+// returned together with the error; a truncated last line never is.
 func parseDROPList(r io.Reader, source, tag string) ([]ioc.Indicator, error) {
 	var indicators []ioc.Indicator
-	scanner := bufio.NewScanner(r)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+	err := feedhttp.Lines(r, func(line string) error {
+		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, ";") {
-			continue
+			return nil
 		}
 
 		parts := strings.SplitN(line, ";", 2)
 		cidr := strings.TrimSpace(parts[0])
 		if cidr == "" {
-			continue
+			return nil
 		}
 
 		var ref string
@@ -110,9 +103,9 @@ func parseDROPList(r io.Reader, source, tag string) ([]ioc.Indicator, error) {
 			Tags:       []string{tag, "spamhaus"},
 			Reference:  ref,
 		})
-	}
-
-	if err := scanner.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return indicators, fmt.Errorf("read list: %w", err)
 	}
 	return indicators, nil

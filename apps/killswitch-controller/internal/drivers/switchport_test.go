@@ -3,11 +3,14 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/migel9090/netSoldier/libs/events"
 )
@@ -61,7 +64,7 @@ func (f *fakeSwitch) last() capturedSwitchCall {
 // a genuine instruction from a forged one.
 func TestSwitchPortSignsRequests(t *testing.T) {
 	fs := newFakeSwitch(t)
-	d := NewSwitchPortDriver(fs.srv.URL, 0, "switch-secret", nil)
+	d := NewSwitchPortDriver(fs.srv.URL, 0, "switch-secret", &TargetGuard{})
 
 	action := &events.EnforcementAction{
 		ID: "ACT-1", TargetMAC: "aa:bb:cc:dd:ee:ff", TargetIP: "192.168.1.50",
@@ -82,11 +85,33 @@ func TestSwitchPortSignsRequests(t *testing.T) {
 	}
 }
 
+// TestSwitchPortSignatureIsTimestamped: a body-only signature let a captured
+// "disable_port" be replayed at the adapter indefinitely. The v2 signature
+// carries its time, so the same request is refused once it is stale.
+func TestSwitchPortSignatureIsTimestamped(t *testing.T) {
+	fs := newFakeSwitch(t)
+	d := NewSwitchPortDriver(fs.srv.URL, 0, "switch-secret", &TargetGuard{})
+	action := &events.EnforcementAction{ID: "ACT-1", TargetMAC: "aa:bb:cc:dd:ee:ff", TargetIP: "192.168.1.50"}
+	if err := d.Apply(context.Background(), action); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	call := fs.last()
+	if !strings.HasPrefix(call.signature, "t=") || !strings.Contains(call.signature, ",v1=") {
+		t.Fatalf("switch request must carry signature v2, got %q", call.signature)
+	}
+
+	later := &events.SignatureVerifier{Secret: "switch-secret",
+		Now: func() time.Time { return time.Now().Add(10 * time.Minute) }}
+	if err := later.Verify(call.signature, call.rawBody); !errors.Is(err, events.ErrStaleSignature) {
+		t.Fatalf("a replay ten minutes later must be rejected as stale, got %v", err)
+	}
+}
+
 func TestSwitchPortOperationSelection(t *testing.T) {
-	action := &events.EnforcementAction{ID: "ACT-1", TargetMAC: "aa:bb:cc:dd:ee:ff"}
+	action := &events.EnforcementAction{ID: "ACT-1", TargetMAC: "aa:bb:cc:dd:ee:ff", TargetIP: "192.168.1.50"}
 
 	fs := newFakeSwitch(t)
-	disable := NewSwitchPortDriver(fs.srv.URL, 0, "s", nil)
+	disable := NewSwitchPortDriver(fs.srv.URL, 0, "s", &TargetGuard{})
 	if err := disable.Apply(context.Background(), action); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -94,7 +119,7 @@ func TestSwitchPortOperationSelection(t *testing.T) {
 		t.Errorf("VLAN 0 should disable the port, got %q", got)
 	}
 
-	quarantine := NewSwitchPortDriver(fs.srv.URL, 42, "s", nil)
+	quarantine := NewSwitchPortDriver(fs.srv.URL, 42, "s", &TargetGuard{})
 	if err := quarantine.Apply(context.Background(), action); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -109,8 +134,8 @@ func TestSwitchPortOperationSelection(t *testing.T) {
 
 func TestSwitchPortRevertRestores(t *testing.T) {
 	fs := newFakeSwitch(t)
-	d := NewSwitchPortDriver(fs.srv.URL, 42, "s", nil)
-	action := &events.EnforcementAction{ID: "ACT-1", TargetMAC: "aa:bb:cc:dd:ee:ff"}
+	d := NewSwitchPortDriver(fs.srv.URL, 42, "s", &TargetGuard{})
+	action := &events.EnforcementAction{ID: "ACT-1", TargetMAC: "aa:bb:cc:dd:ee:ff", TargetIP: "192.168.1.50"}
 
 	if err := d.Revert(context.Background(), action); err != nil {
 		t.Fatalf("revert: %v", err)
@@ -125,11 +150,11 @@ func TestSwitchPortRevertRestores(t *testing.T) {
 func TestSwitchPortRefusesProtectedTarget(t *testing.T) {
 	fs := newFakeSwitch(t)
 	var g TargetGuard
-	g.ProtectIP("192.168.1.1")
+	mustProtect(t, &g, []string{"192.168.1.1"}, nil)
 	d := NewSwitchPortDriver(fs.srv.URL, 0, "s", &g)
 
 	action := &events.EnforcementAction{
-		ID: "ACT-1", TargetMAC: "11:22:33:44:55:66", TargetIP: "192.168.1.1",
+		ID: "ACT-1", TargetMAC: "02:22:33:44:55:66", TargetIP: "192.168.1.1",
 	}
 	if err := d.Apply(context.Background(), action); err == nil {
 		t.Fatal("protected target should be refused")
@@ -142,18 +167,28 @@ func TestSwitchPortRefusesProtectedTarget(t *testing.T) {
 func TestSwitchPortReportsFailure(t *testing.T) {
 	fs := newFakeSwitch(t)
 	fs.status = http.StatusInternalServerError
-	d := NewSwitchPortDriver(fs.srv.URL, 0, "s", nil)
+	d := NewSwitchPortDriver(fs.srv.URL, 0, "s", &TargetGuard{})
 
-	action := &events.EnforcementAction{ID: "ACT-1", TargetMAC: "aa:bb:cc:dd:ee:ff"}
-	if err := d.Apply(context.Background(), action); err == nil {
+	action := &events.EnforcementAction{ID: "ACT-1", TargetMAC: "aa:bb:cc:dd:ee:ff", TargetIP: "192.168.1.50"}
+	err := d.Apply(context.Background(), action)
+	if err == nil {
 		t.Fatal("a non-2xx webhook response must fail Apply")
+	}
+	// The adapter answered "no": nothing changed, so nothing is undone.
+	if !errors.Is(err, ErrNotApplied) {
+		t.Errorf("a refusal by the adapter is not ambiguous: %v", err)
+	}
+	// No answer at all: the port may have been changed.
+	unreachable := NewSwitchPortDriver("http://127.0.0.1:1", 0, "s", &TargetGuard{})
+	if err := unreachable.Apply(context.Background(), action); err == nil || errors.Is(err, ErrNotApplied) {
+		t.Errorf("a transport error is ambiguous: %v", err)
 	}
 }
 
 func TestSwitchPortUnsignedWhenNoSecret(t *testing.T) {
 	fs := newFakeSwitch(t)
-	d := NewSwitchPortDriver(fs.srv.URL, 0, "", nil)
-	action := &events.EnforcementAction{ID: "ACT-1", TargetMAC: "aa:bb:cc:dd:ee:ff"}
+	d := NewSwitchPortDriver(fs.srv.URL, 0, "", &TargetGuard{})
+	action := &events.EnforcementAction{ID: "ACT-1", TargetMAC: "aa:bb:cc:dd:ee:ff", TargetIP: "192.168.1.50"}
 	if err := d.Apply(context.Background(), action); err != nil {
 		t.Fatalf("apply: %v", err)
 	}

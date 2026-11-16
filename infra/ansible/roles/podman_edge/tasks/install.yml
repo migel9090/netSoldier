@@ -1,26 +1,96 @@
 ---
-- name: Install Podman
+- name: Check the required settings
+  ansible.builtin.assert:
+    that:
+      - podman_edge_settings[item] is defined
+      - podman_edge_settings[item] | string | length > 0
+    fail_msg: "podman_edge_settings.{{ item }} is required (see deploy/podman/netsoldier.conf.example)"
+    quiet: true
+  loop: [LAN_INTERFACE, HOST_IP, GATEWAY_IP, GATEWAY_MAC, LAN_NETWORKS]
+
+# Podman 5 (Quadlet drop-ins, secrets), aardvark-dns (names on the internal
+# network), htpasswd (AdGuard's bcrypt hash), curl (health checks).
+- name: Install Podman and the installer's tools
   ansible.builtin.apt:
     name:
       - podman
-      - slirp4netns
-      - uidmap
+      - aardvark-dns
+      - apache2-utils
+      - curl
     state: present
+    update_cache: true
+    cache_valid_time: 3600
 
-- name: Create Quadlet directory
+- name: Registry login
+  ansible.builtin.include_tasks: registry.yml
+
+- name: Create the installer's directory
   ansible.builtin.file:
-    path: /etc/containers/systemd
+    path: "{{ podman_edge_share_dir }}"
     state: directory
+    owner: root
+    group: root
     mode: "0755"
 
-- name: Check for auto-update timer
-  ansible.builtin.stat:
-    path: /usr/lib/systemd/system/podman-auto-update.timer
-  register: auto_update_timer
+# The same files the plain script installs from: deploy/podman/.
+- name: Copy deploy/podman to the host
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../../../deploy/podman/{{ item.src }}"
+    dest: "{{ podman_edge_share_dir }}/{{ item.src }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+    directory_mode: "0755"
+  loop:
+    - { src: netsoldier-lite, mode: "0755" }
+    - { src: netsoldier.conf.example, mode: "0644" }
+    - { src: units/, mode: "0644" }
+    - { src: adguard/, mode: "0644" }
+  register: podman_edge_files
 
-- name: Enable Podman auto-update timer
-  ansible.builtin.systemd:
-    name: podman-auto-update.timer
-    enabled: true
-    state: started
-  when: auto_update_timer.stat.exists
+- name: Create /etc/netsoldier
+  ansible.builtin.file:
+    path: /etc/netsoldier
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write netsoldier.conf
+  ansible.builtin.template:
+    src: netsoldier.conf.j2
+    dest: /etc/netsoldier/netsoldier.conf
+    owner: root
+    group: root
+    mode: "0600"
+  register: podman_edge_conf
+
+- name: Write the site's local indicator list
+  ansible.builtin.copy:
+    content: "{{ (['# Site-local known-bad domains (podman_edge_local_indicators).'] + podman_edge_local_indicators) | join('\n') }}\n"
+    dest: /etc/netsoldier/local-indicators.txt
+    owner: root
+    group: root
+    mode: "0644"
+  when: podman_edge_local_indicators | length > 0
+  register: podman_edge_iocs
+
+- name: Is the profile running?
+  ansible.builtin.systemd_service:
+    name: netsoldier.target
+  register: podman_edge_active
+
+# The installer is idempotent, but it restarts every container; run it only
+# when something it installs from changed, or the profile is not up.
+- name: Run netsoldier-lite install
+  ansible.builtin.command: "{{ podman_edge_share_dir }}/netsoldier-lite install"
+  register: podman_edge_install
+  changed_when: true
+  when: >-
+    podman_edge_files is changed or podman_edge_conf is changed or podman_edge_iocs is changed
+    or podman_edge_active.status.ActiveState | default('') != "active"
+
+- name: Installer output
+  ansible.builtin.debug:
+    var: podman_edge_install.stdout_lines
+  when: podman_edge_install is not skipped

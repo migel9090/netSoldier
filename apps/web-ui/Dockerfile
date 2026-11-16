@@ -2,7 +2,7 @@
 # its own directory as context — there is no shared module to resolve — so
 # the context is apps/web-ui and .dockerignore's apps/web-ui exclusion (which
 # keeps the frontend out of the GO builds' root context) does not apply here.
-FROM node:22-alpine AS build
+FROM node:22-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a AS build
 
 WORKDIR /app
 
@@ -13,7 +13,7 @@ RUN npm ci --no-audit --no-fund
 COPY . .
 RUN npm run build && npm prune --omit=dev
 
-FROM node:22-alpine
+FROM node:22-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a
 
 WORKDIR /app
 
@@ -28,5 +28,11 @@ EXPOSE 3000
 
 # node:alpine ships an unprivileged `node` user (uid 1000).
 USER node
+
+# The same unauthenticated /healthz the Kubernetes probes use (503 while the
+# UI is unconfigured). BusyBox wget rather than a second node process: the
+# lite profile caps this container at 128 MiB. Kubernetes ignores HEALTHCHECK.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD wget -q -O /dev/null "http://127.0.0.1:${PORT:-3000}/healthz" || exit 1
 
 CMD ["node", "build"]

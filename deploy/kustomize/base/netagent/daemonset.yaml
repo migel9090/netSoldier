@@ -1,0 +1,150 @@
+# netagent: the only first-party workload with raw network access
+# (ADR-0004). It captures ARP, DHCP, LLDP, mDNS and SSDP on the site's LAN
+# interface and posts the raw frames to device-inventory, which parses them
+# in its sandbox. It listens on no port.
+#
+# The labelled exception to the runtime rules every other first-party pod
+# follows:
+#   - host network: the LAN interface lives in the node's namespace;
+#   - NET_RAW, and nothing else: the binary carries cap_net_raw=ep as a file
+#     capability, which a non-root process needs on top of the bounding set;
+#   - the default runtime, not gVisor: capture needs the host kernel.
+# NetworkPolicy does not select host-network pods; its two outbound edges are
+# admitted by ipBlock rules on the receiving side (components/site).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: netagent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netagent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: netagent
+        # ADR-0004 point 7: the admission policy exempts only workloads that
+        # carry this label.
+        netsoldier.io/runtime-exception: host-network-capture
+    spec:
+      serviceAccountName: netagent
+      automountServiceAccountToken: false
+      hostNetwork: true
+      # Resolve the two services by their cluster names from the host network.
+      dnsPolicy: ClusterFirstWithHostNet
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: netagent
+          image: ghcr.io/migel9090/netagent:main
+          env:
+            - name: NETAGENT_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NETAGENT_INTERFACE
+              valueFrom:
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: LAN_INTERFACE
+            # Contract 8.1: the full endpoint. The agent Service publishes
+            # not-ready pods: device-inventory only becomes ready once the
+            # agent's heartbeat arrives.
+            - name: DEVICE_INVENTORY_URL
+              value: "http://device-inventory-agent.netsoldier.svc.cluster.local:8081/agent/v1/frames"
+            - name: NETAGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: netagent-credentials
+                  key: inventory-token
+            - name: NETAGENT_HEALTH_FILE
+              value: /run/netagent/health.json
+            # Isolation (contract 8.2) is off unless the site turns it on;
+            # the guard below is configured at start and cannot be changed by
+            # a caller.
+            - name: NETAGENT_ENABLE_ARP_ISOLATION
+              valueFrom:
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: NETAGENT_ENABLE_ARP_ISOLATION
+                  optional: true
+            - name: KILLSWITCH_URL
+              value: "http://killswitch-controller.netsoldier.svc.cluster.local:8084/agent/v1/poll"
+            - name: NETAGENT_KILLSWITCH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: netagent-credentials
+                  key: killswitch-token
+            - name: NETAGENT_GATEWAY_IP
+              valueFrom:
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: GATEWAY_IP
+                  optional: true
+            - name: NETAGENT_GATEWAY_MAC
+              valueFrom:
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: GATEWAY_MAC
+                  optional: true
+            - name: NETAGENT_PROTECTED_IPS
+              valueFrom:
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: ALLOWLIST_IPS
+                  optional: true
+            - name: NETAGENT_PROTECTED_MACS
+              valueFrom:
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: ALLOWLIST_MACS
+                  optional: true
+          # No HTTP endpoint: the probe runs the agent's own health check,
+          # which reads the file the running agent rewrites every heartbeat.
+          startupProbe:
+            exec:
+              command: ["/netagent", "health"]
+            periodSeconds: 2
+            failureThreshold: 15
+          livenessProbe:
+            exec:
+              command: ["/netagent", "health"]
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["/netagent", "health"]
+            periodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_RAW
+          resources:
+            limits:
+              cpu: 200m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+          volumeMounts:
+            - name: run
+              mountPath: /run/netagent
+      volumes:
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi

@@ -1,0 +1,46 @@
+#!/usr/bin/python3
+"""One HTTP request for the lab scenario (infra/lab/scenario.sh).
+
+Installed by infra/ansible/roles/lab_lan. Reads the request as JSON on stdin,
+so tokens and passwords never appear on a command line:
+
+    {"method": "GET", "url": "http://...", "headers": {...}, "body": "...",
+     "timeout": 15}
+
+and prints {"status": 200, "headers": [[name, value], ...], "body": "..."}
+or {"error": "..."}. Redirects are not followed; no proxy is used. Run it
+inside a victim namespace (ip netns exec) to act as a device on the LAN.
+"""
+import http.client
+import json
+import sys
+import urllib.parse
+
+
+def main() -> int:
+    req = json.load(sys.stdin)
+    url = urllib.parse.urlsplit(req["url"])
+    if url.scheme != "http":
+        print(json.dumps({"error": "only http:// URLs"}))
+        return 2
+    conn = http.client.HTTPConnection(url.hostname, url.port or 80,
+                                      timeout=req.get("timeout", 15))
+    path = url.path or "/"
+    if url.query:
+        path += "?" + url.query
+    body = req.get("body")
+    try:
+        conn.request(req.get("method", "GET"), path,
+                     body=body.encode() if body is not None else None,
+                     headers=req.get("headers", {}))
+        resp = conn.getresponse()
+        data = resp.read().decode("utf-8", "replace")
+    except OSError as err:
+        print(json.dumps({"error": f"{type(err).__name__}: {err}"}))
+        return 1
+    print(json.dumps({"status": resp.status, "headers": resp.getheaders(), "body": data}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

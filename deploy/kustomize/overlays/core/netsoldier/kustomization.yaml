@@ -1,0 +1,18 @@
+# The netsoldier-namespaced half of the core profile. Every resource gets the
+# namespace here, including the components whose own kustomization sets
+# none (audit DP-22).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: netsoldier
+
+resources:
+  - ../../../base/namespace/
+  - ../../../base/clickhouse/
+  - ../../../base/threat-intel-sync/
+  - ../../../base/detection-engine/
+  - ../../../base/device-inventory/
+  - ../../../base/netagent/
+  - ../../../base/killswitch-controller/
+  - ../../../base/web-ui/
+  - ../../../base/network-policies/

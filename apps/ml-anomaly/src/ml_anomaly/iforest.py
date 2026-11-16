@@ -1,5 +1,9 @@
 """Isolation Forest over flow windows (step 113).
 
+EXPERIMENTAL until roadmap step 129: the score -> confidence mapping and the
+thresholds below are not calibrated on real traffic (audit ML-3), so the
+volumetric signal is a hint for a human, never a reason to enforce.
+
 Detects volumetric anomalies — exfiltration-sized uploads, connection
 storms, destination fan-out — as deviations from the household's own
 baseline, without labels or thresholds per device.
@@ -81,6 +85,9 @@ def dominant_tags(w: FlowWindow) -> tuple[str, ...]:
         tags.append("dst-fanout")
     if w.port_fanout >= 50:
         tags.append("port-fanout")
+    if w.late_rows > 0:
+        # part of the window is a backlog that arrived long after it ended
+        tags.append("late-arrivals")
     return tuple(tags)
 
 

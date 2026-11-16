@@ -64,10 +64,11 @@ jobs:
         with:
           # CodeQL's autobuild walks every module in the workspace and runs
           # with GOTOOLCHAIN=local, so it cannot fetch a newer toolchain the
-          # way a normal build would. tests/e2e (and therefore go.work) needs
-          # go 1.26 for x/crypto, so taking the version from the services'
-          # go.mod left extraction failing on every module.
-          go-version-file: tests/e2e/go.mod
+          # way a normal build would: the installed Go must satisfy every
+          # module. go.work is the single source of truth for the version and
+          # every go.mod carries the same release, so taking it from there
+          # keeps extraction working on all modules.
+          go-version-file: go.work
           cache-dependency-path: |
             apps/*/go.sum
             tests/e2e/go.sum

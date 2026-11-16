@@ -6,6 +6,8 @@
 package tlsheur
 
 import (
+	"container/list"
+	"fmt"
 	"log/slog"
 	"net"
 	"strings"
@@ -15,28 +17,40 @@ import (
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/ingest"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/iocmatch"
+	"github.com/migel9090/netSoldier/libs/events"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
 	suppressWindow = time.Hour
 	maxSuppressed  = 16384
+	// sweepEvery is how often expired suppressions are dropped. Insertion
+	// order is expiry order, so a sweep only walks what has expired.
+	sweepEvery = time.Minute
 )
 
-var tlsFindings = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Namespace: "detection_engine",
-	Name:      "tls_heuristic_findings_total",
-	Help:      "Suspicious TLS client findings by reason.",
-}, []string{"reason"})
+var (
+	tlsFindings = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "detection_engine",
+		Name:      "tls_heuristic_findings_total",
+		Help:      "Suspicious TLS client findings by reason.",
+	}, []string{"reason"})
+	suppressEvicted = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "detection_engine",
+		Name:      "tls_suppressions_evicted_total",
+		Help:      "TLS finding suppressions dropped before expiry to keep the table bounded; the finding can fire again.",
+	})
+)
 
 func init() {
-	prometheus.MustRegister(tlsFindings)
+	prometheus.MustRegister(tlsFindings, suppressEvicted)
 }
 
-// Resolver answers "which domain did this IP resolve from" (correlator
-// DNS cache).
+// Resolver answers "which name did this client resolve to this address"
+// (dnscache.Cache). Per client: a CDN address carries many names, and the
+// one another device looked up says nothing about this connection.
 type Resolver interface {
-	Get(ip string) string
+	Get(client, ip string) string
 }
 
 // Analyzer inspects unified TLS client events and emits alerts for
@@ -47,8 +61,24 @@ type Analyzer struct {
 	localNets []*net.IPNet
 	emit      func(detection.Alert)
 
-	mu         sync.Mutex
-	suppressed map[string]time.Time
+	mu  sync.Mutex
+	now func() time.Time
+	// suppressed maps a finding key to its element in order, which holds
+	// the suppressions oldest first.
+	suppressed map[string]*list.Element
+	order      *list.List
+	nextSweep  time.Time
+	// examined counts the suppressions the table's upkeep (sweeps and
+	// evictions) has looked at: what an insert costs beyond its own map
+	// write. Tests hold it to a constant per insert, whatever the table's
+	// size, rather than timing the inserts.
+	examined int
+}
+
+// suppression is one entry of the suppression table.
+type suppression struct {
+	key   string
+	until time.Time
 }
 
 func New(m *iocmatch.Matcher, r Resolver, localCIDRs []string, emit func(detection.Alert)) *Analyzer {
@@ -63,12 +93,15 @@ func New(m *iocmatch.Matcher, r Resolver, localCIDRs []string, emit func(detecti
 		resolver:   r,
 		localNets:  nets,
 		emit:       emit,
-		suppressed: make(map[string]time.Time),
+		now:        time.Now,
+		suppressed: make(map[string]*list.Element),
+		order:      list.New(),
 	}
 }
 
-// DefaultLocalCIDRs covers RFC1918 plus loopback.
-var DefaultLocalCIDRs = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8"}
+// DefaultLocalCIDRs is ingest's LOCAL_NETWORKS default: RFC 1918, IPv6
+// unique-local, loopback.
+var DefaultLocalCIDRs = ingest.DefaultLocalCIDRs
 
 // Handle inspects one TLS client observation.
 func (a *Analyzer) Handle(ev ingest.SensorEvent) {
@@ -80,56 +113,112 @@ func (a *Analyzer) Handle(ev ingest.SensorEvent) {
 	// lags behind the live matcher state.
 	if ev.Indicator != "" {
 		if ioc, ok := a.matcher.MatchHash(ev.Indicator); ok {
-			a.alert(ev, "tlsfp-ioc", ev.Indicator, ioc.Severity, ioc.Confidence, ioc)
+			a.alert(ev, finding{
+				reason: "tlsfp-ioc", key: ev.Indicator,
+				indicator: strings.ToLower(ev.Indicator), indicatorType: firstNonEmpty(ioc.Type, events.IndicatorTLSFP),
+				severity: ioc.Severity, confidence: ioc.Confidence, ioc: ioc,
+				summary: fmt.Sprintf("TLS client fingerprint %s is listed by %s", ev.Indicator, firstNonEmpty(ioc.Source, "a feed")),
+			})
 			return
 		}
 	}
 	if ev.JA3 != "" {
 		if ioc, ok := a.matcher.MatchHash(ev.JA3); ok {
-			a.alert(ev, "ja3-ioc", ev.JA3, ioc.Severity, ioc.Confidence, ioc)
+			a.alert(ev, finding{
+				reason: "ja3-ioc", key: ev.JA3,
+				indicator: strings.ToLower(ev.JA3), indicatorType: firstNonEmpty(ioc.Type, events.IndicatorJA3),
+				severity: ioc.Severity, confidence: ioc.Confidence, ioc: ioc,
+				summary: fmt.Sprintf("TLS client JA3 %s is listed by %s", ev.JA3, firstNonEmpty(ioc.Source, "a feed")),
+			})
 			return
 		}
 	}
 
 	resolved := ""
 	if a.resolver != nil {
-		resolved = a.resolver.Get(ev.DstIP)
+		resolved = a.resolver.Get(ev.SrcIP, ev.DstIP)
 	}
 
 	// 2) SNI does not belong to the domain the client actually resolved
 	// for this IP — domain-fronting shaped. Registrable-domain comparison
 	// keeps CDN multi-hosting from firing constantly.
 	if ev.SNI != "" && resolved != "" && !sameRegistrableDomain(ev.SNI, resolved) {
-		a.alert(ev, "sni-dns-mismatch", ev.SNI+" vs "+resolved, "low", 30, iocmatch.IoC{})
+		f := finding{
+			reason: "sni-dns-mismatch", key: ev.SNI + " vs " + resolved,
+			severity: "low", confidence: 30,
+			summary: fmt.Sprintf("TLS SNI %s does not match %s, the name %s was resolved from",
+				ev.SNI, resolved, ev.DstIP),
+		}
+		if d, ok := events.CanonicalDomain(ev.SNI); ok {
+			f.indicator, f.indicatorType = d, events.IndicatorDomain
+		}
+		a.alert(ev, f)
 		return
 	}
 
 	// 3) TLS straight to an external IP: no SNI and no DNS resolution
 	// observed — hardcoded-IP C2 shaped.
 	if ev.SNI == "" && resolved == "" {
-		a.alert(ev, "dns-less-tls", ev.DstIP, "low", 20, iocmatch.IoC{})
+		ip, _ := events.CanonicalIP(ev.DstIP)
+		a.alert(ev, finding{
+			reason: "dns-less-tls", key: ev.DstIP,
+			indicator: ip, indicatorType: events.IndicatorIP,
+			severity: "low", confidence: 20,
+			summary: fmt.Sprintf("TLS to %s with no SNI and no DNS lookup before it", ev.DstIP),
+		})
 	}
 }
 
-func (a *Analyzer) alert(ev ingest.SensorEvent, reason, value, severity string, confidence int, ioc iocmatch.IoC) {
-	if a.suppress(ev.SrcIP + "|" + ev.DstIP + "|" + reason + "|" + value) {
+// finding is one TLS heuristic result before it becomes an alert.
+type finding struct {
+	reason string
+	// key identifies the finding for suppression.
+	key string
+	// indicator is what the signal attests, canonical; "" when none.
+	indicator, indicatorType string
+	severity                 string
+	confidence               int
+	ioc                      iocmatch.IoC
+	summary                  string
+}
+
+func (a *Analyzer) alert(ev ingest.SensorEvent, f finding) {
+	if a.suppress(ev.SrcIP + "|" + ev.DstIP + "|" + f.reason + "|" + f.key) {
 		return
 	}
-	tlsFindings.WithLabelValues(reason).Inc()
+	tlsFindings.WithLabelValues(f.reason).Inc()
 
+	clientIP := ev.SrcIP
+	if c, ok := events.CanonicalIP(clientIP); ok {
+		clientIP = c
+	}
+	confidence := detection.ClampConfidence(f.confidence)
+	source := firstNonEmpty(f.ioc.Source, "tls-heuristics")
 	alert := detection.Alert{
+		// One finding per handshake row, so the row names it.
+		Record:      ev.Record(),
 		Timestamp:   ev.Timestamp,
-		Domain:      firstNonEmpty(ev.SNI, ev.DstIP),
-		ClientIP:    ev.SrcIP,
-		MatchedIoC:  value,
-		IoCType:     firstNonEmpty(ioc.Type, "tlsfp"),
-		Severity:    severity,
-		Source:      firstNonEmpty(ioc.Source, "tls-heuristics"),
+		Summary:     f.summary + " (" + clientIP + " → " + ev.DstIP + ")",
+		Domain:      observedName(ev),
+		ClientIP:    clientIP,
+		MatchedIoC:  f.indicator,
+		IoCType:     f.indicatorType,
+		Severity:    f.severity,
+		Source:      source,
 		Confidence:  confidence,
-		Threat:      firstNonEmpty(ioc.Threat, reason),
-		MitreID:     ioc.MitreID,
-		MitreName:   ioc.MitreName,
+		Threat:      firstNonEmpty(f.ioc.Threat, f.reason),
+		MitreID:     f.ioc.MitreID,
+		MitreName:   f.ioc.MitreName,
 		SignalClass: detection.SignalTLS,
+		Signals: []events.Signal{{
+			Class: detection.SignalTLS, Confidence: confidence,
+			Indicator: f.indicator, IndicatorType: f.indicatorType, Source: source,
+		}},
+		Target: destination(ev),
+	}
+	if f.indicator == "" {
+		alert.IoCType = ""
+		alert.Signals[0].IndicatorType = ""
 	}
 	if alert.MitreID == "" {
 		alert.MitreID, alert.MitreName = "T1071.001", "Application Layer Protocol: Web Protocols"
@@ -138,29 +227,85 @@ func (a *Analyzer) alert(ev ingest.SensorEvent, reason, value, severity string, 
 		alert.Severity = "medium"
 	}
 
-	slog.Info("suspicious tls client", "reason", reason, "client", ev.SrcIP,
+	slog.Info("suspicious tls client", "reason", f.reason, "client", ev.SrcIP,
 		"dst", ev.DstIP, "sni", ev.SNI, "tls_client_fp", ev.Indicator)
 	a.emit(alert)
 }
 
-// suppress returns true when the same finding fired within the window.
+// observedName is the DNS name the client named in the handshake, when it
+// is a hostname (clients do put literal addresses in SNI).
+func observedName(ev ingest.SensorEvent) string {
+	if d, ok := events.CanonicalDomain(ev.SNI); ok {
+		return d
+	}
+	return ""
+}
+
+// destination is what the client was observed talking to: the SNI name when
+// there is a usable one, the address otherwise. A TLS finding is a heuristic,
+// even when the fingerprint is on a feed — a fingerprint identifies client
+// software, not a place to block — so this is where it points, and the
+// policy decides whether that is enough.
+func destination(ev ingest.SensorEvent) *events.Target {
+	if d, ok := events.CanonicalDomain(ev.SNI); ok {
+		return &events.Target{Type: events.TargetDomain, Value: d}
+	}
+	if ip, ok := events.CanonicalIP(ev.DstIP); ok {
+		return &events.Target{Type: events.TargetIP, Value: ip}
+	}
+	return nil
+}
+
+// suppress returns true when the same finding fired within the window, and
+// otherwise starts suppressing it.
+//
+// The table is bounded by maxSuppressed whatever the input: when it is full
+// the oldest suppression goes. It used to sweep the whole map on every
+// insert past the limit and insert anyway when the sweep freed nothing, so a
+// client presenting a fresh random SNI on every handshake — each one a new
+// key — grew it without bound and made every insert walk all of it.
+// Evicting early only means a finding can fire again sooner; it never
+// silences one.
 func (a *Analyzer) suppress(key string) bool {
-	now := time.Now()
+	now := a.now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if until, ok := a.suppressed[key]; ok && now.Before(until) {
-		return true
+	if !now.Before(a.nextSweep) {
+		a.sweep(now)
+		a.nextSweep = now.Add(sweepEvery)
 	}
-	if len(a.suppressed) >= maxSuppressed {
-		for k, until := range a.suppressed {
-			if now.After(until) {
-				delete(a.suppressed, k)
-			}
+	if el, ok := a.suppressed[key]; ok {
+		s := el.Value.(*suppression)
+		if now.Before(s.until) {
+			return true
 		}
+		s.until = now.Add(suppressWindow)
+		a.order.MoveToBack(el)
+		return false
 	}
-	a.suppressed[key] = now.Add(suppressWindow)
+	for a.order.Len() >= maxSuppressed {
+		a.examined++
+		oldest := a.order.Front()
+		delete(a.suppressed, oldest.Value.(*suppression).key)
+		a.order.Remove(oldest)
+		suppressEvicted.Inc()
+	}
+	a.suppressed[key] = a.order.PushBack(&suppression{key: key, until: now.Add(suppressWindow)})
 	return false
+}
+
+// sweep drops expired suppressions from the front of the order.
+func (a *Analyzer) sweep(now time.Time) {
+	for el := a.order.Front(); el != nil; el = a.order.Front() {
+		a.examined++
+		s := el.Value.(*suppression)
+		if now.Before(s.until) {
+			return
+		}
+		delete(a.suppressed, s.key)
+		a.order.Remove(el)
+	}
 }
 
 func (a *Analyzer) isLocal(ip string) bool {

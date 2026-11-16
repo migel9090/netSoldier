@@ -1,0 +1,37 @@
+# netSoldier lite: threat-intel-sync, the threat-feed aggregator.
+#
+# Downloads the feeds over the edge network and serves the merged indicator
+# set to detection-engine on the internal network (GET /export/json). Its
+# port is not published. Single SQLite writer: one instance only.
+[Unit]
+Description=netSoldier lite: threat-intel-sync
+PartOf=netsoldier.target
+
+[Container]
+ContainerName=netsoldier-threat-intel-sync
+Image=ghcr.io/migel9090/threat-intel-sync:main
+Network=netsoldier-edge.network
+Network=netsoldier-internal.network:ip=10.231.47.11
+ReadOnly=true
+DropCapability=ALL
+NoNewPrivileges=true
+Volume=netsoldier-threat-intel-sync-data.volume:/var/lib/threat-intel-sync
+Environment=LISTEN_ADDR=:8083
+Environment=INDICATOR_DB_PATH=/var/lib/threat-intel-sync/indicators.db
+Environment=GOMEMLIMIT=100MiB
+# COMMERCIAL_MODE, from netsoldier.conf.
+EnvironmentFile=/etc/netsoldier/env/threat-intel-sync.env
+# ABUSECH_AUTH_KEY, when one is configured, comes as a Podman secret through
+# netsoldier-threat-intel-sync.container.d/50-site.conf.
+PidsLimit=256
+PodmanArgs=--memory=128m --memory-swap=128m
+Label=app=netsoldier
+
+[Service]
+Environment=XDG_RUNTIME_DIR=/run/netsoldier/podman
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=netsoldier.target

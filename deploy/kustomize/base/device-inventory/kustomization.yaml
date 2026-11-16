@@ -5,9 +5,11 @@ commonLabels:
   app.kubernetes.io/name: device-inventory
   app.kubernetes.io/part-of: netsoldier
 
+# The ServiceMonitor lives in base/observability: it needs the Prometheus
+# Operator's CRDs, which a cluster without the observability stack lacks.
 resources:
   - serviceaccount.yaml
+  - pvc.yaml
   - deployment.yaml
   - service.yaml
-  - servicemonitor.yaml
   - pdb.yaml

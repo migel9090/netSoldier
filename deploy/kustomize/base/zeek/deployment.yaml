@@ -13,6 +13,7 @@ spec:
         app.kubernetes.io/name: zeek
     spec:
       serviceAccountName: zeek
+      automountServiceAccountToken: false
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       securityContext:
@@ -25,7 +26,7 @@ spec:
         # framework never sees a missing file; on failure fall back to
         # a header-only file (the sidecar retries every 15 min).
         - name: intel-init
-          image: curlimages/curl:8.11.1
+          image: curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -103,7 +104,7 @@ spec:
         # refresh the Intel indicator file; atomic rename triggers the
         # input framework's re-read on the zeek side
         - name: intel-sync
-          image: curlimages/curl:8.11.1
+          image: curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -133,10 +134,19 @@ spec:
               cpu: 10m
               memory: 16Mi
         - name: vector
-          image: timberio/vector:0.43.1-distroless-libc
+          image: timberio/vector:0.43.1-distroless-libc@sha256:131485defae3fc07fa20cf9dda85bb3056e8d0d475a8aa387c6d6417eca0223b
           args:
             - "--config-yaml"
             - /etc/vector/vector.yaml
+          # Substituted into the sinks' auth blocks (vector-cm.yaml).
+          env:
+            - name: CLICKHOUSE_USER
+              value: "zeek"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: zeek-password
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534

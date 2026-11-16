@@ -1,11 +1,13 @@
 ---
+# Proxmox VM: Terraform enables the agent device (agent.enabled), so
+# Proxmox can shut the guest down cleanly and issue fstrim.
 - name: Install QEMU guest agent
   ansible.builtin.apt:
     name: qemu-guest-agent
     state: present
 
 - name: Enable QEMU guest agent
-  ansible.builtin.systemd:
+  ansible.builtin.systemd_service:
     name: qemu-guest-agent
     enabled: true
     state: started

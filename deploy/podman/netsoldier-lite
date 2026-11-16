@@ -1,0 +1,686 @@
+#!/usr/bin/env bash
+# netsoldier-lite — install, inspect and remove the netSoldier lite profile
+# (Podman + systemd Quadlets, one host, no Kubernetes, no ClickHouse).
+#
+#   netsoldier-lite init       write a draft /etc/netsoldier/netsoldier.conf from
+#                              what this host looks like (review it!)
+#   netsoldier-lite install    install or update from /etc/netsoldier/netsoldier.conf
+#   netsoldier-lite status     units, health of every service (netagent: its
+#                              container health check)
+#   netsoldier-lite password   print the web UI password
+#   netsoldier-lite secret N   print one generated secret (see SECRETS below)
+#   netsoldier-lite uninstall [--keep-images]
+#                              remove everything install created
+#
+# Options: --config FILE (default /etc/netsoldier/netsoldier.conf).
+#
+# The Ansible role infra/ansible/roles/podman_edge runs this same script
+# with the same files, so both paths install the same thing.
+#
+# Runs as root: the profile is rootful Podman (netagent needs NET_RAW on
+# the host's network namespace). Every container still runs as a non-root
+# user with all capabilities dropped, except netagent, which keeps NET_RAW.
+set -euo pipefail
+shopt -u patsub_replacement 2>/dev/null || true
+
+PROG=netsoldier-lite
+SRC_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+
+ETC_DIR=/etc/netsoldier
+CONFIG=$ETC_DIR/netsoldier.conf
+SECRETS_DIR=$ETC_DIR/secrets
+ENV_DIR=$ETC_DIR/env
+LOCAL_IOC=$ETC_DIR/local-indicators.txt
+QUADLET_DIR=/etc/containers/systemd
+TARGET_FILE=/etc/systemd/system/netsoldier.target
+TMPFILES=/etc/tmpfiles.d/netsoldier.conf
+RUN_DIR=/run/netsoldier
+SHARE_DIR=/usr/local/share/netsoldier-lite
+BIN=/usr/local/sbin/netsoldier-lite
+
+ADGUARD_USER=netsoldier
+ADGUARD_IMAGE=localhost/netsoldier/adguardhome:v0.107.55
+ADGUARD_BASE=docker.io/adguard/adguardhome:v0.107.55@sha256:2979cc78a28aceb77f90980a5440578dbb7bc406dffe261e9ae402750193bde0
+
+# The six images built from this repository (the AdGuard one is derived
+# locally from upstream).
+SERVICES=(threat-intel-sync detection-engine device-inventory killswitch-controller netagent web-ui)
+# unit name -> image name
+declare -A UNIT_IMAGE=(
+  [netsoldier-threat-intel-sync]=threat-intel-sync
+  [netsoldier-detection-engine]=detection-engine
+  [netsoldier-device-inventory]=device-inventory
+  [netsoldier-killswitch]=killswitch-controller
+  [netsoldier-netagent]=netagent
+  [netsoldier-web-ui]=web-ui
+)
+CONTAINER_UNITS=(netsoldier-adguard netsoldier-threat-intel-sync netsoldier-device-inventory
+  netsoldier-killswitch netsoldier-detection-engine netsoldier-netagent netsoldier-web-ui)
+
+# Internal addresses (deploy/podman/units/*.container, IP=).
+declare -A HEALTH_URL=(
+  [netsoldier-adguard]=http://10.231.47.10:3000/
+  [netsoldier-threat-intel-sync]=http://10.231.47.11:8083/healthz
+  [netsoldier-detection-engine]=http://10.231.47.12:8080/healthz
+  [netsoldier-device-inventory]=http://10.231.47.13:8081/readyz
+  [netsoldier-killswitch]=http://10.231.47.14:8084/healthz
+  [netsoldier-web-ui]=http://10.231.47.15:3000/healthz
+)
+
+# SECRETS: one random value per role (contract v2). File name = Podman
+# secret name without the "netsoldier-" prefix.
+SECRETS=(
+  adguard-password              # AdGuard's one user: detection-engine, killswitch
+  killswitch-operator-token     # KILLSWITCH_API_KEY: web UI, operators
+  killswitch-ingest-token       # KILLSWITCH_INGEST_TOKEN = detection-engine WEBHOOK_TOKEN
+  webhook-secret                # WEBHOOK_SECRET: signs detection-engine -> killswitch
+  device-api-key                # DEVICE_API_KEY: device-inventory, detection-engine, web UI
+  detection-api-key             # DETECTION_API_KEY: detection-engine, web UI
+  netagent-token                # NETAGENT_TOKEN: netagent -> device-inventory
+  netagent-killswitch-token     # NETAGENT_KILLSWITCH_TOKEN: unused while ARP isolation is off
+  web-session-secret            # SESSION_SECRET
+  web-ui-password               # WEB_UI_PASSWORD: the household password
+)
+
+CONFIG_KEYS=(LAN_INTERFACE HOST_IP GATEWAY_IP GATEWAY_MAC LAN_NETWORKS UI_URL UI_PORT
+  PROTECTED_MACS PROTECTED_IPS AUTO_BLOCK BLOCK_TTL UPSTREAM_DNS BOOTSTRAP_DNS ABUSECH_AUTH_KEY
+  COMMERCIAL_MODE ARP_PROBE POLICY_AUTO_CONFIDENCE POLICY_AUTO_SEVERITY
+  POLICY_PENDING_CONFIDENCE POLICY_PENDING_SEVERITY IMAGE_PREFIX IMAGE_TAG)
+declare -A CFG=()
+# The MAC of LAN_INTERFACE, read by validate_config: this host is always in
+# the killswitch's protected set, by that MAC and by HOST_IP.
+LAN_MAC=""
+
+log() { printf '%s: %s\n' "$PROG" "$*"; }
+warn() { printf '%s: warning: %s\n' "$PROG" "$*" >&2; }
+die() { printf '%s: error: %s\n' "$PROG" "$*" >&2; exit 1; }
+
+need_root() { [[ $(id -u) -eq 0 ]] || die "run as root"; }
+
+# ── Configuration ───────────────────────────────────────────────────────────
+
+# load_config parses KEY=value lines; it never sources the file.
+load_config() {
+  local file=$1 line key val n=0 k
+  [[ -r $file ]] || die "no configuration at $file (start from $SRC_DIR/netsoldier.conf.example or run: $PROG init)"
+  for k in "${CONFIG_KEYS[@]}"; do CFG[$k]=""; done
+  CFG[UI_PORT]=3000
+  CFG[AUTO_BLOCK]=off
+  CFG[BLOCK_TTL]=3600
+  CFG[UPSTREAM_DNS]=https://dns.quad9.net/dns-query,https://dns.cloudflare.com/dns-query
+  CFG[BOOTSTRAP_DNS]=9.9.9.9,1.1.1.1
+  CFG[COMMERCIAL_MODE]=false
+  CFG[ARP_PROBE]=false
+  CFG[IMAGE_PREFIX]=ghcr.io/migel9090
+  CFG[IMAGE_TAG]=main
+  while IFS= read -r line || [[ -n $line ]]; do
+    n=$((n + 1))
+    [[ $line =~ ^[[:space:]]*(#.*)?$ ]] && continue
+    [[ $line =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)[[:space:]]*=(.*)$ ]] ||
+      die "$file:$n: expected KEY=value"
+    key=${BASH_REMATCH[1]}
+    val=${BASH_REMATCH[2]}
+    val=${val#"${val%%[![:space:]]*}"}
+    val=${val%"${val##*[![:space:]]}"}
+    if [[ $val =~ ^\"(.*)\"$ || $val =~ ^\'(.*)\'$ ]]; then val=${BASH_REMATCH[1]}; fi
+    [[ -v CFG[$key] ]] || die "$file:$n: unknown setting $key"
+    [[ $val != *$'\r'* ]] || die "$file:$n: carriage return in $key"
+    CFG[$key]=$val
+  done <"$file"
+}
+
+is_ipv4() {
+  local ip=$1 o
+  [[ $ip =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  for o in "${BASH_REMATCH[@]:1}"; do
+    [[ $o =~ ^(0|[1-9][0-9]*)$ ]] && ((o <= 255)) || return 1
+  done
+}
+is_cidr4() {
+  [[ $1 =~ ^([0-9.]+)/([0-9]{1,2})$ ]] || return 1
+  local addr=${BASH_REMATCH[1]} bits=${BASH_REMATCH[2]}
+  is_ipv4 "$addr" && ((10#$bits <= 32))
+}
+is_unicast_mac() {
+  local m=${1,,}
+  [[ $m =~ ^[0-9a-f]{2}(:[0-9a-f]{2}){5}$ ]] || return 1
+  [[ $m != 00:00:00:00:00:00 ]] || return 1
+  (((16#${m:0:2} & 1) == 0))
+}
+split_list() { tr ', ' '\n\n' <<<"$1" | sed '/^$/d'; }
+
+validate_config() {
+  local errs=() k v
+  for k in LAN_INTERFACE HOST_IP GATEWAY_IP GATEWAY_MAC LAN_NETWORKS; do
+    [[ -n ${CFG[$k]} ]] || errs+=("$k is required")
+  done
+  if [[ -n ${CFG[LAN_INTERFACE]} ]]; then
+    [[ ${CFG[LAN_INTERFACE]} =~ ^[A-Za-z0-9_.@-]{1,15}$ ]] || errs+=("LAN_INTERFACE: not an interface name")
+    if ip link show dev "${CFG[LAN_INTERFACE]}" >/dev/null 2>&1; then
+      LAN_MAC=$(cat "/sys/class/net/${CFG[LAN_INTERFACE]}/address" 2>/dev/null || true)
+      LAN_MAC=${LAN_MAC,,}
+      is_unicast_mac "$LAN_MAC" ||
+        errs+=("LAN_INTERFACE: ${CFG[LAN_INTERFACE]} has no unicast MAC address (${LAN_MAC:-none}); netagent needs an Ethernet or Wi-Fi interface")
+    else
+      errs+=("LAN_INTERFACE: no interface ${CFG[LAN_INTERFACE]} on this host")
+    fi
+  fi
+  for k in HOST_IP GATEWAY_IP; do
+    [[ -z ${CFG[$k]} ]] || is_ipv4 "${CFG[$k]}" || errs+=("$k: not an IPv4 address: ${CFG[$k]}")
+  done
+  [[ -z ${CFG[GATEWAY_MAC]} ]] || is_unicast_mac "${CFG[GATEWAY_MAC]}" ||
+    errs+=("GATEWAY_MAC: not a unicast MAC address: ${CFG[GATEWAY_MAC]}")
+  CFG[GATEWAY_MAC]=${CFG[GATEWAY_MAC],,}
+  for v in $(split_list "${CFG[LAN_NETWORKS]}"); do
+    is_cidr4 "$v" || errs+=("LAN_NETWORKS: not an IPv4 CIDR: $v")
+  done
+  for v in $(split_list "${CFG[PROTECTED_MACS]}"); do
+    is_unicast_mac "$v" || errs+=("PROTECTED_MACS: not a unicast MAC address: $v")
+  done
+  for v in $(split_list "${CFG[PROTECTED_IPS]}"); do
+    is_ipv4 "$v" || errs+=("PROTECTED_IPS: not an IPv4 address: $v")
+  done
+  [[ ${CFG[UI_PORT]} =~ ^[1-9][0-9]{0,4}$ ]] && ((CFG[UI_PORT] <= 65535)) &&
+    [[ ${CFG[UI_PORT]} != 53 ]] || errs+=("UI_PORT: not a usable port: ${CFG[UI_PORT]}")
+  # The killswitch refuses to start on anything else; say so here instead.
+  [[ ${CFG[AUTO_BLOCK]} =~ ^(on|off)$ ]] || errs+=("AUTO_BLOCK: want on or off: ${CFG[AUTO_BLOCK]}")
+  [[ ${CFG[BLOCK_TTL]} =~ ^[1-9][0-9]*$ ]] || errs+=("BLOCK_TTL: want a positive number of seconds")
+  for k in COMMERCIAL_MODE ARP_PROBE; do
+    [[ ${CFG[$k]} =~ ^(true|false)$ ]] || errs+=("$k: want true or false")
+  done
+  for k in POLICY_AUTO_CONFIDENCE POLICY_PENDING_CONFIDENCE; do
+    [[ -z ${CFG[$k]} || (${CFG[$k]} =~ ^[0-9]{1,3}$ && ${CFG[$k]} -le 100) ]] ||
+      errs+=("$k: want 0-100")
+  done
+  for k in POLICY_AUTO_SEVERITY POLICY_PENDING_SEVERITY; do
+    [[ -z ${CFG[$k]} || ${CFG[$k]} =~ ^(low|medium|high|critical)$ ]] ||
+      errs+=("$k: want low, medium, high or critical")
+  done
+  [[ -z ${CFG[UI_URL]} ]] && CFG[UI_URL]="http://${CFG[HOST_IP]}:${CFG[UI_PORT]}"
+  [[ ${CFG[UI_URL]} =~ ^https?://[^/?#@[:space:]]+$ ]] ||
+    errs+=("UI_URL: want a bare origin like http://192.0.2.10:3000 (no path): ${CFG[UI_URL]}")
+  [[ ${CFG[IMAGE_PREFIX]} =~ ^[a-z0-9.:/_-]+$ ]] || errs+=("IMAGE_PREFIX: not an image prefix")
+  [[ ${CFG[IMAGE_TAG]} =~ ^[A-Za-z0-9_.-]+$ ]] || errs+=("IMAGE_TAG: not an image tag")
+  local resolver_re='^[][A-Za-z0-9.:/_@-]+$'
+  for v in $(split_list "${CFG[UPSTREAM_DNS]}") $(split_list "${CFG[BOOTSTRAP_DNS]}"); do
+    [[ $v =~ $resolver_re ]] || errs+=("UPSTREAM_DNS/BOOTSTRAP_DNS: unexpected entry: $v")
+  done
+  [[ -n $(split_list "${CFG[UPSTREAM_DNS]}") ]] || errs+=("UPSTREAM_DNS: at least one resolver")
+  [[ ${CFG[ABUSECH_AUTH_KEY]} =~ ^[A-Za-z0-9_-]*$ ]] || errs+=("ABUSECH_AUTH_KEY: unexpected characters")
+  if ((${#errs[@]})); then
+    for v in "${errs[@]}"; do printf '%s: error: %s\n' "$PROG" "$v" >&2; done
+    exit 1
+  fi
+  if [[ -n ${CFG[HOST_IP]} ]] && ! ip -4 -o addr show dev "${CFG[LAN_INTERFACE]}" | grep -qw "inet ${CFG[HOST_IP]}"; then
+    warn "HOST_IP ${CFG[HOST_IP]} is not (yet) an address of ${CFG[LAN_INTERFACE]}"
+  fi
+  # Protection and automation are separate: this host and the router are
+  # always protected, PROTECTED_* adds devices, and only AUTO_BLOCK=on lets
+  # the killswitch act without a human.
+  if [[ ${CFG[AUTO_BLOCK]} == off ]]; then
+    log "AUTO_BLOCK=off: automatic blocking is OFF, every action waits for approval in the web UI"
+  elif [[ -z ${CFG[PROTECTED_MACS]}${CFG[PROTECTED_IPS]} ]]; then
+    log "AUTO_BLOCK=on with no PROTECTED_MACS/PROTECTED_IPS: only this host (${CFG[HOST_IP]}, $LAN_MAC) and the router (${CFG[GATEWAY_IP]}, ${CFG[GATEWAY_MAC]}) are protected; any other device's lookups of an attested known-bad domain can be sinkholed without approval"
+  else
+    log "AUTO_BLOCK=on: protected are this host, the router and PROTECTED_MACS/PROTECTED_IPS ($(join_list "${CFG[PROTECTED_MACS]} ${CFG[PROTECTED_IPS]}"))"
+  fi
+}
+
+# ── Prerequisites ───────────────────────────────────────────────────────────
+
+ensure_packages() {
+  local missing=()
+  command -v podman >/dev/null || missing+=(podman)
+  aardvark_path >/dev/null || missing+=(aardvark-dns)
+  command -v htpasswd >/dev/null || missing+=(apache2-utils)
+  command -v curl >/dev/null || missing+=(curl)
+  ((${#missing[@]})) || return 0
+  command -v apt-get >/dev/null ||
+    die "missing: ${missing[*]} (install podman, aardvark-dns, htpasswd and curl, then re-run)"
+  log "installing ${missing[*]}"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${missing[@]}" >/dev/null
+}
+
+aardvark_path() {
+  local p
+  for p in /usr/libexec/podman/aardvark-dns /usr/lib/podman/aardvark-dns /usr/local/libexec/podman/aardvark-dns; do
+    [[ -x $p ]] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+check_podman() {
+  local v
+  v=$(podman version --format '{{.Client.Version}}' 2>/dev/null) || die "podman does not run"
+  [[ ${v%%.*} -ge 5 ]] || die "Podman $v is too old: Quadlet drop-ins and secrets need Podman 5"
+  [[ $(podman info --format '{{.Host.NetworkBackend}}') == netavark ]] ||
+    die "Podman must use the netavark network backend"
+}
+
+# ── Secrets ─────────────────────────────────────────────────────────────────
+
+rand_token() {
+  local s
+  s=$(head -c 48 /dev/urandom | base64 -w0 | tr -d '+/=')
+  printf '%s' "${s:0:40}"
+}
+rand_password() {
+  local s
+  s=$(head -c 20 /dev/urandom | base32 -w0 | tr -d '=' | tr 'A-Z' 'a-z')
+  printf '%s-%s-%s-%s' "${s:0:5}" "${s:5:5}" "${s:10:5}" "${s:15:5}"
+}
+
+ensure_secrets() {
+  local name file created=0
+  install -d -m 0700 -o root -g root "$SECRETS_DIR"
+  for name in "${SECRETS[@]}"; do
+    file=$SECRETS_DIR/$name
+    if [[ ! -s $file ]]; then
+      (umask 077; if [[ $name == web-ui-password ]]; then rand_password; else rand_token; fi >"$file")
+      created=$((created + 1))
+    fi
+    chmod 0600 "$file"
+    chown root:root "$file"
+  done
+  if [[ -n ${CFG[ABUSECH_AUTH_KEY]} ]]; then
+    (umask 077; printf '%s' "${CFG[ABUSECH_AUTH_KEY]}" >"$SECRETS_DIR/abusech-auth-key")
+  else
+    rm -f "$SECRETS_DIR/abusech-auth-key"
+  fi
+  # One credential per role: two equal values would merge two roles.
+  local dup
+  dup=$(for name in "${SECRETS[@]}"; do cat "$SECRETS_DIR/$name"; echo; done | sort | uniq -d)
+  [[ -z $dup ]] || die "two generated secrets in $SECRETS_DIR are equal; remove one and re-run"
+  ((created == 0)) || log "generated $created secret(s) in $SECRETS_DIR"
+
+  for name in "${SECRETS[@]}"; do
+    podman secret create --replace "netsoldier-$name" "$SECRETS_DIR/$name" >/dev/null
+  done
+  if [[ -s $SECRETS_DIR/abusech-auth-key ]]; then
+    podman secret create --replace netsoldier-abusech-auth-key "$SECRETS_DIR/abusech-auth-key" >/dev/null
+  else
+    podman secret rm netsoldier-abusech-auth-key >/dev/null 2>&1 || true
+  fi
+}
+
+# ── Rendering ───────────────────────────────────────────────────────────────
+
+write_file() { # write_file MODE PATH (content on stdin), replacing atomically
+  local mode=$1 path=$2 tmp
+  tmp=$(mktemp "$path.XXXXXX")
+  cat >"$tmp"
+  chmod "$mode" "$tmp"
+  mv -f "$tmp" "$path"
+}
+
+join_list() { split_list "$1" | paste -sd, -; }
+# uniq_list LIST...: the entries of every LIST, first occurrence kept, comma-separated.
+uniq_list() { local l; for l in "$@"; do split_list "$l"; done | awk '!seen[$0]++' | paste -sd, -; }
+
+render_env() {
+  install -d -m 0755 "$ENV_DIR"
+  local first_lan
+  first_lan=$(split_list "${CFG[LAN_NETWORKS]}" | head -n1)
+
+  {
+    echo "# Generated by $PROG from $CONFIG; edit that file and re-run install."
+    echo "NETAGENT_INTERFACE=${CFG[LAN_INTERFACE]}"
+    [[ ${CFG[ARP_PROBE]} == true ]] && echo "NETAGENT_ENABLE_ARP_PROBE=true"
+    true
+  } | write_file 0644 "$ENV_DIR/netagent.env"
+
+  {
+    echo "# Generated by $PROG from $CONFIG; edit that file and re-run install."
+    [[ ${CFG[ARP_PROBE]} == true ]] && echo "ARP_SCAN_SUBNET=$first_lan"
+    true
+  } | write_file 0644 "$ENV_DIR/device-inventory.env"
+
+  {
+    echo "# Generated by $PROG from $CONFIG; edit that file and re-run install."
+    echo "LOCAL_NETWORKS=$(join_list "${CFG[LAN_NETWORKS]}")"
+  } | write_file 0644 "$ENV_DIR/detection-engine.env"
+
+  {
+    echo "# Generated by $PROG from $CONFIG; edit that file and re-run install."
+    echo "GATEWAY_IP=${CFG[GATEWAY_IP]}"
+    echo "GATEWAY_MAC=${CFG[GATEWAY_MAC]}"
+    # This host first, by its LAN address and its LAN MAC: inside its
+    # container the killswitch only sees its own container addresses, and
+    # the host is the DNS server every client uses. Then the site's own.
+    echo "ALLOWLIST_MACS=$(uniq_list "$LAN_MAC" "${CFG[PROTECTED_MACS],,}")"
+    echo "ALLOWLIST_IPS=$(uniq_list "${CFG[HOST_IP]}" "${CFG[PROTECTED_IPS]}")"
+    # Always written: on or off is the operator's choice, not a default.
+    echo "POLICY_AUTO_BLOCK=${CFG[AUTO_BLOCK]}"
+    echo "POLICY_DEFAULT_TTL=${CFG[BLOCK_TTL]}"
+    local k
+    for k in POLICY_AUTO_CONFIDENCE POLICY_AUTO_SEVERITY POLICY_PENDING_CONFIDENCE POLICY_PENDING_SEVERITY; do
+      [[ -n ${CFG[$k]} ]] && echo "$k=${CFG[$k]}"
+    done
+    true
+  } | write_file 0644 "$ENV_DIR/killswitch.env"
+
+  {
+    echo "# Generated by $PROG from $CONFIG; edit that file and re-run install."
+    echo "COMMERCIAL_MODE=${CFG[COMMERCIAL_MODE]}"
+  } | write_file 0644 "$ENV_DIR/threat-intel-sync.env"
+
+  {
+    echo "# Generated by $PROG from $CONFIG; edit that file and re-run install."
+    echo "ORIGIN=${CFG[UI_URL]}"
+  } | write_file 0644 "$ENV_DIR/web-ui.env"
+
+  if [[ ! -e $LOCAL_IOC ]]; then
+    write_file 0644 "$LOCAL_IOC" <<'EOF'
+# Site-local known-bad domains for detection-engine, one per line (a name
+# covers its subdomains). Lines starting with # are ignored. Matches carry
+# confidence 80 (severity high): with the default policy they wait for
+# approval. Restart netsoldier-detection-engine after editing.
+EOF
+  fi
+}
+
+image_ref() { printf '%s/%s:%s' "${CFG[IMAGE_PREFIX]}" "$1" "${CFG[IMAGE_TAG]}"; }
+
+render_units() {
+  install -d -m 0755 "$QUADLET_DIR"
+  local f unit
+  # Everything netsoldier-* there is ours and rewritten below; a unit that
+  # left the source must not linger.
+  rm -rf "$QUADLET_DIR"/netsoldier-*
+  for f in "$SRC_DIR"/units/netsoldier-*.{container,network,volume}; do
+    install -m 0644 "$f" "$QUADLET_DIR/"
+  done
+  install -m 0644 "$SRC_DIR/units/netsoldier.target" "$TARGET_FILE"
+
+  for unit in "${CONTAINER_UNITS[@]}"; do
+    install -d -m 0755 "$QUADLET_DIR/$unit.container.d"
+    {
+      echo "# Generated by $PROG from $CONFIG; edit that file and re-run install."
+      echo "[Container]"
+      [[ -n ${UNIT_IMAGE[$unit]:-} ]] && echo "Image=$(image_ref "${UNIT_IMAGE[$unit]}")"
+      case $unit in
+        netsoldier-adguard)
+          echo "PublishPort=${CFG[HOST_IP]}:53:53/udp"
+          echo "PublishPort=${CFG[HOST_IP]}:53:53/tcp"
+          ;;
+        netsoldier-web-ui)
+          echo "PublishPort=${CFG[HOST_IP]}:${CFG[UI_PORT]}:3000/tcp"
+          ;;
+        netsoldier-threat-intel-sync)
+          [[ -s $SECRETS_DIR/abusech-auth-key ]] &&
+            echo "Secret=netsoldier-abusech-auth-key,type=env,target=ABUSECH_AUTH_KEY"
+          ;;
+      esac
+      true
+    } | write_file 0644 "$QUADLET_DIR/$unit.container.d/50-site.conf"
+  done
+
+  write_file 0644 "$TMPFILES" <<'EOF'
+# netSoldier lite runtime directories (netsoldier-lite).
+d /run/netsoldier 0755 root root -
+d /run/netsoldier/podman 0700 root root -
+EOF
+  systemd-tmpfiles --create "$TMPFILES"
+}
+
+# ── Images ──────────────────────────────────────────────────────────────────
+
+ensure_images() {
+  local svc ref
+  for svc in "${SERVICES[@]}"; do
+    ref=$(image_ref "$svc")
+    if ! podman image exists "$ref"; then
+      log "pulling $ref"
+      podman pull -q "$ref" >/dev/null || die "image $ref is not available (set IMAGE_PREFIX/IMAGE_TAG, or build it)"
+    fi
+  done
+  # AdGuard: upstream, pinned by digest, without its file capability. Built
+  # here (a copy, no compilation); rebuilt when the Containerfile changes.
+  local sum
+  sum=$(sha256sum "$SRC_DIR/adguard/Containerfile" | cut -c1-16)
+  if [[ $(podman image inspect --format '{{index .Labels "netsoldier.containerfile"}}' "$ADGUARD_IMAGE" 2>/dev/null) != "$sum" ]]; then
+    log "building $ADGUARD_IMAGE from $ADGUARD_BASE"
+    podman build -q --network=none --pull=missing --build-arg "ADGUARD_IMAGE=$ADGUARD_BASE" \
+      --label "netsoldier.containerfile=$sum" -t "$ADGUARD_IMAGE" \
+      -f "$SRC_DIR/adguard/Containerfile" "$SRC_DIR/adguard" >/dev/null
+  fi
+}
+
+# ── AdGuard configuration ───────────────────────────────────────────────────
+
+yaml_list() { # yaml_list INDENT LIST
+  local item
+  for item in $(split_list "$2"); do printf '%s- %s\n' "$1" "$item"; done
+}
+
+seed_adguard() {
+  systemctl start netsoldier-adguard-conf-volume.service
+  local mnt conf pass hash
+  mnt=$(podman volume inspect netsoldier-adguard-conf --format '{{.Mountpoint}}')
+  conf=$mnt/AdGuardHome.yaml
+  pass=$(cat "$SECRETS_DIR/adguard-password")
+  if [[ -s $conf ]]; then
+    # AdGuard owns the file now (it holds the sinkhole rules). Only make sure
+    # the user still matches the secret, e.g. after a secret rotation.
+    hash=$(awk -v u="$ADGUARD_USER" '$0 ~ "- name: "u"$" {f=1; next} f && /password:/ {print $2; exit}' "$conf")
+    # htpasswd -v insists on a regular, writable file.
+    local pwfile ok=false
+    pwfile=$(mktemp)
+    printf '%s:%s\n' "$ADGUARD_USER" "$hash" >"$pwfile"
+    printf '%s' "$pass" | htpasswd -vi "$pwfile" "$ADGUARD_USER" >/dev/null 2>&1 && ok=true
+    rm -f "$pwfile"
+    if ! $ok; then
+      log "AdGuard user password changed: updating its hash"
+      # AdGuard rewrites the file from memory on its next change; stop it
+      # so the edit is what it reads when the profile restarts.
+      systemctl stop netsoldier-adguard.service 2>/dev/null || true
+      hash=$(printf '%s' "$pass" | htpasswd -niBC 10 "$ADGUARD_USER" | cut -d: -f2-)
+      awk -v u="$ADGUARD_USER" -v h="$hash" '
+        $0 ~ "- name: "u"$" {print; f=1; next}
+        f && /password:/ {sub(/password:.*/, "password: " h); f=0}
+        {print}' "$conf" | write_file 0600 "$conf"
+      chown 65532:65532 "$conf"
+    fi
+    return 0
+  fi
+  hash=$(printf '%s' "$pass" | htpasswd -niBC 10 "$ADGUARD_USER" | cut -d: -f2-)
+  local t
+  t=$(<"$SRC_DIR/adguard/AdGuardHome.yaml.tmpl")
+  t=${t//@@ADGUARD_USER@@/$ADGUARD_USER}
+  t=${t//@@ADGUARD_PASSWORD_HASH@@/$hash}
+  t=${t//@@UPSTREAM_DNS@@/$(yaml_list '    ' "${CFG[UPSTREAM_DNS]}")}
+  t=${t//@@BOOTSTRAP_DNS@@/$(yaml_list '    ' "${CFG[BOOTSTRAP_DNS]}")}
+  [[ $t != *@@* ]] || die "AdGuard template has an unfilled placeholder"
+  printf '%s\n' "$t" | write_file 0600 "$conf"
+  chown 65532:65532 "$conf"
+  log "AdGuard configuration written to the netsoldier-adguard-conf volume"
+}
+
+# ── Start and wait ──────────────────────────────────────────────────────────
+
+check_generated() {
+  local unit state
+  for unit in "${CONTAINER_UNITS[@]}"; do
+    state=$(systemctl show -p LoadState --value "$unit.service")
+    [[ $state == loaded ]] ||
+      die "Quadlet did not generate $unit.service (see: /usr/libexec/podman/quadlet -dryrun)"
+  done
+}
+
+http_code() { curl -s -o /dev/null -m 3 -w '%{http_code}' "$1" 2>/dev/null || true; }
+
+wait_healthy() {
+  local deadline=$((SECONDS + ${1:-180})) unit pending code
+  while :; do
+    pending=()
+    for unit in "${!HEALTH_URL[@]}"; do
+      code=$(http_code "${HEALTH_URL[$unit]}")
+      [[ $code == 200 || ($unit == netsoldier-adguard && $code == 302) ]] || pending+=("$unit")
+    done
+    [[ $(http_code "http://${CFG[HOST_IP]}:${CFG[UI_PORT]}/healthz") == 200 ]] || pending+=("web-ui@${CFG[HOST_IP]}:${CFG[UI_PORT]}")
+    [[ $(netagent_health) == healthy ]] || pending+=(netsoldier-netagent)
+    ((${#pending[@]} == 0)) && return 0
+    ((SECONDS < deadline)) || { warn "not healthy yet: ${pending[*]} (see: $PROG status)"; return 1; }
+    sleep 3
+  done
+}
+
+# netagent listens on nothing; its unit's health check (HealthCmd=, which
+# runs `/netagent health` inside the container) is what says it is alive.
+# Prints starting, healthy or unhealthy (nothing when there is no container).
+netagent_health() {
+  podman inspect --format '{{.State.Health.Status}}' netsoldier-netagent 2>/dev/null || true
+}
+# The output of the newest health check: one line saying why.
+netagent_health_output() {
+  { podman inspect --format '{{range .State.Health.Log}}{{.Output}}{{end}}' netsoldier-netagent 2>/dev/null || true; } |
+    sed '/^$/d' | tail -n1
+}
+
+# ── Commands ────────────────────────────────────────────────────────────────
+
+cmd_install() {
+  need_root
+  ensure_packages
+  check_podman
+  load_config "$CONFIG"
+  validate_config
+  install -d -m 0755 "$ETC_DIR"
+  ensure_secrets
+  render_env
+  render_units
+  ensure_images
+  systemctl daemon-reload
+  check_generated
+  seed_adguard
+  # Install the CLI and its files, so status and uninstall work without the
+  # checkout.
+  if [[ $SRC_DIR != "$SHARE_DIR" ]]; then
+    rm -rf "$SHARE_DIR"
+    install -d -m 0755 "$SHARE_DIR"
+    cp -r "$SRC_DIR/units" "$SRC_DIR/adguard" "$SRC_DIR/netsoldier.conf.example" "$SHARE_DIR/"
+    install -m 0755 "$SRC_DIR/netsoldier-lite" "$SHARE_DIR/netsoldier-lite"
+  fi
+  ln -sf "$SHARE_DIR/netsoldier-lite" "$BIN"
+  systemctl enable netsoldier.target >/dev/null 2>&1
+  log "starting netsoldier.target"
+  systemctl restart netsoldier.target
+  # Left by earlier versions, which kept netagent's health file on the host.
+  rm -rf "$RUN_DIR/netagent"
+  if wait_healthy 240; then
+    log "all services healthy"
+  fi
+  log "web UI: ${CFG[UI_URL]}  (password: $PROG password)"
+  log "DNS: point the router's DHCP DNS setting at ${CFG[HOST_IP]}"
+}
+
+cmd_status() {
+  if [[ -r $CONFIG ]]; then
+    load_config "$CONFIG"
+    [[ -n ${CFG[UI_URL]} ]] || CFG[UI_URL]="http://${CFG[HOST_IP]}:${CFG[UI_PORT]}"
+  fi
+  local unit code out
+  printf '%-30s %-10s %s\n' UNIT STATE HEALTH
+  for unit in "${CONTAINER_UNITS[@]}"; do
+    code=-
+    if [[ -n ${HEALTH_URL[$unit]:-} ]]; then code=$(http_code "${HEALTH_URL[$unit]}"); fi
+    if [[ $unit == netsoldier-netagent ]]; then
+      code=$(netagent_health) out=$(netagent_health_output)
+      code="${code:-no container}${out:+ ($out)}"
+    fi
+    printf '%-30s %-10s %s\n' "$unit" "$(systemctl is-active "$unit.service" 2>/dev/null || true)" "$code"
+  done
+  if [[ -n ${CFG[HOST_IP]:-} ]]; then
+    printf '%-30s %-10s %s\n' "web UI ${CFG[UI_URL]}" "" \
+      "$(http_code "http://${CFG[HOST_IP]}:${CFG[UI_PORT]}/healthz")"
+  fi
+  podman stats --no-stream --format '{{.Name}} {{.MemUsage}}' 2>/dev/null | grep '^netsoldier-' || true
+}
+
+cmd_secret() {
+  need_root
+  local name=${1:-}
+  [[ -n $name && -s $SECRETS_DIR/$name ]] || die "usage: $PROG secret {$(IFS='|'; echo "${SECRETS[*]}")}"
+  cat "$SECRETS_DIR/$name"
+  echo
+}
+
+cmd_uninstall() {
+  need_root
+  local keep_images=false unit
+  [[ ${1:-} == --keep-images ]] && keep_images=true
+  local prefix=ghcr.io/migel9090 tag=main
+  # A configuration that no longer parses must not stop the removal.
+  if [[ -r $CONFIG ]] && (load_config "$CONFIG") 2>/dev/null; then
+    load_config "$CONFIG"
+    prefix=${CFG[IMAGE_PREFIX]}
+    tag=${CFG[IMAGE_TAG]}
+  fi
+  log "stopping and removing the units"
+  systemctl disable --now netsoldier.target >/dev/null 2>&1 || true
+  for unit in "${CONTAINER_UNITS[@]}"; do systemctl stop "$unit.service" 2>/dev/null || true; done
+  systemctl stop 'netsoldier-*-network.service' 'netsoldier-*-volume.service' 2>/dev/null || true
+  rm -rf "$QUADLET_DIR"/netsoldier-* "$TARGET_FILE"
+  systemctl daemon-reload
+  systemctl reset-failed 'netsoldier*' 2>/dev/null || true
+
+  log "removing containers, networks, volumes and secrets"
+  podman ps -aq --filter label=app=netsoldier | xargs -r podman rm -f >/dev/null
+  podman network ls -q --filter name='^netsoldier-' | xargs -r podman network rm -f >/dev/null
+  podman volume ls -q --filter name='^netsoldier-' | xargs -r podman volume rm -f >/dev/null
+  podman secret ls --format '{{.Name}}' | { grep '^netsoldier-' || true; } | xargs -r podman secret rm >/dev/null
+  if ! $keep_images; then
+    log "removing images"
+    local svc
+    for svc in "${SERVICES[@]}"; do podman rmi -f "$prefix/$svc:$tag" >/dev/null 2>&1 || true; done
+    podman rmi -f "$ADGUARD_IMAGE" "$ADGUARD_BASE" >/dev/null 2>&1 || true
+    podman image prune -f >/dev/null 2>&1 || true
+  fi
+  # Podman bind-mounts its network-namespace directory onto itself.
+  findmnt -rn -o TARGET | { grep "^$RUN_DIR/" || true; } | sort -ru | xargs -r -n1 umount -l 2>/dev/null || true
+  rm -rf "$ETC_DIR" "$RUN_DIR" "$TMPFILES" "$BIN" "$SHARE_DIR"
+  log "removed. Packages (podman, aardvark-dns, apache2-utils) were left installed."
+}
+
+cmd_password() { cmd_secret web-ui-password; }
+
+cmd_init() {
+  need_root
+  [[ ! -e $CONFIG || ${1:-} == --force ]] || die "$CONFIG exists (use init --force to overwrite)"
+  local dev host gw mac net
+  read -r gw dev < <(ip -4 route show default | awk '{for (i=1;i<NF;i++) {if ($i=="via") g=$(i+1); if ($i=="dev") d=$(i+1)}} END {print g, d}')
+  host=$(ip -4 -o addr show dev "$dev" scope global | awk '{split($4,a,"/"); print a[1]; exit}')
+  net=$(ip -4 route show dev "$dev" scope link proto kernel | awk '{print $1; exit}')
+  ping -c1 -W1 "$gw" >/dev/null 2>&1 || true
+  mac=$(ip neigh show "$gw" dev "$dev" | awk '{for (i=1;i<NF;i++) if ($i=="lladdr") print $(i+1)}')
+  install -d -m 0755 "$(dirname "$CONFIG")"
+  sed -e "s|^LAN_INTERFACE=.*|LAN_INTERFACE=$dev|" -e "s|^HOST_IP=.*|HOST_IP=$host|" \
+    -e "s|^GATEWAY_IP=.*|GATEWAY_IP=$gw|" -e "s|^GATEWAY_MAC=.*|GATEWAY_MAC=$mac|" \
+    -e "s|^LAN_NETWORKS=.*|LAN_NETWORKS=$net|" "$SRC_DIR/netsoldier.conf.example" |
+    write_file 0600 "$CONFIG"
+  log "wrote $CONFIG: LAN_INTERFACE=$dev HOST_IP=$host GATEWAY_IP=$gw GATEWAY_MAC=$mac LAN_NETWORKS=$net"
+  log "check GATEWAY_MAC against the router's label or admin page, then run: $PROG install"
+}
+
+main() {
+  local cmd=${1:-}
+  shift || true
+  local args=()
+  while (($#)); do
+    case $1 in
+      --config) CONFIG=$2; shift 2 ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  case $cmd in
+    init) cmd_init "${args[@]}" ;;
+    install) cmd_install ;;
+    status) cmd_status ;;
+    password) cmd_password ;;
+    secret) cmd_secret "${args[@]}" ;;
+    uninstall) cmd_uninstall "${args[@]}" ;;
+    *) sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; [[ -z $cmd || $cmd == help || $cmd == -h || $cmd == --help ]] || exit 2 ;;
+  esac
+}
+
+main "$@"

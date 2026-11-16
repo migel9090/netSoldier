@@ -176,7 +176,7 @@ func (a *Allowlist) Contains(mac, ip string) bool {
 
 // Len reports how many entries protect devices. A zero-length allowlist means
 // nothing is protected — including the router — which the controller refuses
-// to auto-enforce against (see main.go).
+// to auto-enforce against (see Policy.AutoBlockHold).
 func (a *Allowlist) Len() int {
 	a.mu.RLock()
 	defer a.mu.RUnlock()

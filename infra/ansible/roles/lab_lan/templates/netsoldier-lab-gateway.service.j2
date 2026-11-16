@@ -1,0 +1,15 @@
+# Managed by Ansible (infra/ansible/roles/lab_lan). Local edits are lost.
+# The simulated router's DHCP server and resolver, inside its namespace.
+[Unit]
+Description=netSoldier lab: gateway DHCP and DNS (dnsmasq in {{ lab_lan_gateway_ns }})
+BindsTo=netsoldier-lab-lan.service
+After=netsoldier-lab-lan.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/ip netns exec {{ lab_lan_gateway_ns }} /usr/sbin/dnsmasq --keep-in-foreground --conf-file={{ lab_lan_config_dir }}/dnsmasq.conf
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

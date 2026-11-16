@@ -1,7 +1,14 @@
+# Sync order under ArgoCD: the server (wave -2) is up and Ready before the
+# clickhouse-migrate Job (wave -1, migrate-job.yaml) builds the schema, and
+# both complete before the services (default wave 0) are rolled out. The
+# ServiceAccount, the ConfigMap and the Service carry the same wave because
+# the pod and the Job cannot start without them.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: clickhouse
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
 spec:
   serviceName: clickhouse
   replicas: 1
@@ -14,6 +21,7 @@ spec:
         app.kubernetes.io/component: server
     spec:
       serviceAccountName: clickhouse
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 101
@@ -25,59 +33,128 @@ spec:
         # SOPS-encrypted Secret, so no credential or hash is ever committed.
         # Substitution happens here rather than in the image so the
         # placeholders stay visible and reviewable in git.
+        #
+        # Fails closed: a missing or blank value, anything that is not a
+        # SHA-256 hex digest, the digest of the empty password (the result
+        # of `echo -n "" | sha256sum`, i.e. a blank password in disguise),
+        # a CIDR that admits every address, or any placeholder left over
+        # stops the pod before ClickHouse can start with it.
         - name: render-users
-          image: busybox:1.37
+          image: busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
           command:
             - sh
             - -ec
             - |
-              for var in DEFAULT_PASSWORD_SHA256 WRITER_PASSWORD_SHA256 \
-                         READER_PASSWORD_SHA256 RITA_PASSWORD_SHA256 POD_CIDR; do
-                eval "value=\$$var"
+              empty_sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+              cp /template/users-override.xml /rendered/users-override.xml.tmp
+              for account in DEFAULT MIGRATE KILLSWITCH DETECTION INVENTORY \
+                             ML_BEACON ML_FLOW ZEEK SURICATA VECTOR GRAFANA RITA; do
+                var="${account}_PASSWORD_SHA256"
+                eval "value=\${$var:-}"
                 if [ -z "$value" ]; then
                   echo "FATAL: $var is empty — refusing to start ClickHouse with a" \
                        "blank credential. Populate the clickhouse-credentials Secret." >&2
                   exit 1
                 fi
+                # Lower-case only, as sha256sum prints it, so the
+                # empty-password comparison below cannot be dodged by case.
+                if ! echo "$value" | grep -Eqx '[0-9a-f]{64}'; then
+                  echo "FATAL: $var is not a lower-case SHA-256 hex digest" \
+                       "(echo -n \"\$password\" | sha256sum)." >&2
+                  exit 1
+                fi
+                if [ "$value" = "$empty_sha256" ]; then
+                  echo "FATAL: $var is the SHA-256 of an empty password." >&2
+                  exit 1
+                fi
+                sed -i "s|__${var}__|${value}|g" /rendered/users-override.xml.tmp
               done
-              sed \
-                -e "s|__DEFAULT_PASSWORD_SHA256__|$DEFAULT_PASSWORD_SHA256|g" \
-                -e "s|__WRITER_PASSWORD_SHA256__|$WRITER_PASSWORD_SHA256|g" \
-                -e "s|__READER_PASSWORD_SHA256__|$READER_PASSWORD_SHA256|g" \
-                -e "s|__RITA_PASSWORD_SHA256__|$RITA_PASSWORD_SHA256|g" \
-                -e "s|__POD_CIDR__|$POD_CIDR|g" \
-                /template/users-override.xml > /rendered/users-override.xml
+              case "${POD_CIDR:-}" in
+                "" | 0.0.0.0/0 | ::/0)
+                  echo "FATAL: POD_CIDR '${POD_CIDR:-}' is empty or admits every" \
+                       "address; set it to the cluster's pod network." >&2
+                  exit 1 ;;
+              esac
+              sed -i "s|__POD_CIDR__|${POD_CIDR}|g" /rendered/users-override.xml.tmp
               # Fail closed if any placeholder survived.
-              if grep -q '__[A-Z_]*__' /rendered/users-override.xml; then
+              if grep -q '__[A-Z_]*__' /rendered/users-override.xml.tmp; then
                 echo "FATAL: unsubstituted placeholder in users-override.xml" >&2
                 exit 1
               fi
+              mv /rendered/users-override.xml.tmp /rendered/users-override.xml
           env:
             - name: DEFAULT_PASSWORD_SHA256
               valueFrom:
                 secretKeyRef:
                   name: clickhouse-credentials
                   key: default-password-sha256
-            - name: WRITER_PASSWORD_SHA256
+            - name: MIGRATE_PASSWORD_SHA256
               valueFrom:
                 secretKeyRef:
                   name: clickhouse-credentials
-                  key: writer-password-sha256
-            - name: READER_PASSWORD_SHA256
+                  key: migrate-password-sha256
+            - name: KILLSWITCH_PASSWORD_SHA256
               valueFrom:
                 secretKeyRef:
                   name: clickhouse-credentials
-                  key: reader-password-sha256
+                  key: killswitch-password-sha256
+            - name: DETECTION_PASSWORD_SHA256
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: detection-password-sha256
+            - name: INVENTORY_PASSWORD_SHA256
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: inventory-password-sha256
+            - name: ML_BEACON_PASSWORD_SHA256
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: ml-beacon-password-sha256
+            - name: ML_FLOW_PASSWORD_SHA256
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: ml-flow-password-sha256
+            - name: ZEEK_PASSWORD_SHA256
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: zeek-password-sha256
+            - name: SURICATA_PASSWORD_SHA256
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: suricata-password-sha256
+            # The aggregator and Grafana live in the observability namespace
+            # and read their plaintext passwords from a Secret there
+            # (deploy/kustomize/base/clickhouse/observability-secret.example.yaml);
+            # only the hashes are needed here.
+            - name: VECTOR_PASSWORD_SHA256
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: vector-password-sha256
+            - name: GRAFANA_PASSWORD_SHA256
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: grafana-password-sha256
             - name: RITA_PASSWORD_SHA256
               valueFrom:
                 secretKeyRef:
                   name: clickhouse-credentials
                   key: rita-password-sha256
+            # The cluster's pod network, a site value: every account but the
+            # localhost-only `default` may log in from it, and from nowhere
+            # else.
             - name: POD_CIDR
               valueFrom:
-                secretKeyRef:
-                  name: clickhouse-credentials
-                  key: pod-cidr
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: POD_CIDR
           securityContext:
             runAsNonRoot: true
             runAsUser: 101
@@ -100,7 +177,7 @@ spec:
               mountPath: /rendered
       containers:
         - name: clickhouse
-          image: clickhouse/clickhouse-server:24.3-alpine
+          image: clickhouse/clickhouse-server:24.3-alpine@sha256:c3f166f4a80098480463d897a63f6867d24e3a7661fc1fe72e889788115a25f1
           ports:
             - name: http
               containerPort: 8123
@@ -108,6 +185,14 @@ spec:
             - name: native
               containerPort: 9000
               protocol: TCP
+          # Never set CLICKHOUSE_USER, CLICKHOUSE_PASSWORD or CLICKHOUSE_DB
+          # here: the image entrypoint reacts to them by deleting `default`
+          # and creating an account open to ::/0 (users.d/default-user.xml).
+          # The schema is not created at startup either: the
+          # /docker-entrypoint-initdb.d hook only ran on an empty data
+          # directory, as the passwordless `default`, so it failed once
+          # `default` had a password and silently skipped on every later
+          # start. The clickhouse-migrate Job owns the schema now.
           env:
             # S3 credentials for the cold-tier disk (storage.xml sets
             # use_environment_credentials). Optional: without the secret
@@ -166,8 +251,6 @@ spec:
             - name: users-rendered
               mountPath: /etc/clickhouse-server/users.d/users-override.xml
               subPath: users-override.xml
-            - name: init-sql
-              mountPath: /docker-entrypoint-initdb.d
             - name: tmp
               mountPath: /tmp
             - name: log
@@ -195,9 +278,6 @@ spec:
         # the placeholder substitution has to land somewhere writable.
         - name: users-rendered
           emptyDir: {}
-        - name: init-sql
-          configMap:
-            name: clickhouse-init
         - name: tmp
           emptyDir: {}
         - name: log

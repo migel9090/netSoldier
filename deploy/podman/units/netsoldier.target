@@ -1,0 +1,10 @@
+# netSoldier lite: every container of the profile. Each container unit is
+# WantedBy= and PartOf= this target, so `systemctl restart netsoldier.target`
+# restarts all of them and `systemctl stop netsoldier.target` stops them.
+[Unit]
+Description=netSoldier lite
+Wants=network-online.target
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,48 @@
+# netSoldier lite: the web UI.
+#
+# Published on the host's LAN address only (HOST_IP:UI_PORT, written by
+# netsoldier-lite into netsoldier-web-ui.container.d/50-site.conf). It reaches
+# the three APIs over the internal network with the operator token, the
+# device API key and the detection API key; the browser never sees them.
+# One instance only (sign-out revocation is in memory).
+[Unit]
+Description=netSoldier lite: web UI
+PartOf=netsoldier.target
+After=netsoldier-killswitch.service netsoldier-device-inventory.service netsoldier-detection-engine.service
+
+[Container]
+ContainerName=netsoldier-web-ui
+Image=ghcr.io/migel9090/web-ui:main
+# Edge first: it carries the published port.
+Network=netsoldier-edge.network
+Network=netsoldier-internal.network:ip=10.231.47.15
+ReadOnly=true
+DropCapability=ALL
+NoNewPrivileges=true
+Environment=PORT=3000
+Environment=KILLSWITCH_URL=http://netsoldier-killswitch:8084
+Environment=DEVICE_INVENTORY_URL=http://netsoldier-device-inventory:8081
+Environment=DETECTION_ENGINE_URL=http://netsoldier-detection-engine:8080
+Environment=NODE_OPTIONS=--max-old-space-size=64
+# Nothing scrapes metrics in this profile, so the metrics listener (default
+# :9464) is not started at all. The UI port answers /metrics with 404.
+Environment=METRICS_ADDR=off
+Secret=netsoldier-web-session-secret,type=env,target=SESSION_SECRET
+Secret=netsoldier-web-ui-password,type=env,target=WEB_UI_PASSWORD
+Secret=netsoldier-killswitch-operator-token,type=env,target=KILLSWITCH_API_KEY
+Secret=netsoldier-device-api-key,type=env,target=DEVICE_API_KEY
+Secret=netsoldier-detection-api-key,type=env,target=DETECTION_API_KEY
+# ORIGIN (the address people open), from netsoldier.conf.
+EnvironmentFile=/etc/netsoldier/env/web-ui.env
+PidsLimit=256
+PodmanArgs=--memory=128m --memory-swap=128m
+Label=app=netsoldier
+
+[Service]
+Environment=XDG_RUNTIME_DIR=/run/netsoldier/podman
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=netsoldier.target

@@ -20,6 +20,7 @@ spec:
             app.kubernetes.io/component: importer
         spec:
           serviceAccountName: rita
+          automountServiceAccountToken: false
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
@@ -28,7 +29,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: rita
-              image: ghcr.io/activecm/rita:v5.1.2
+              image: ghcr.io/activecm/rita:v5.1.2@sha256:a2bb0ef6185e33780dbc3ce7d86e38ac7a65c98e729e17510fe29717eb34b76a
               workingDir: /work
               args:
                 - import
@@ -38,10 +39,18 @@ spec:
               env:
                 - name: DB_ADDRESS
                   value: "clickhouse.netsoldier.svc:9000"
+                # RITA is upstream code and reads CLICKHOUSE_USERNAME (not
+                # the contract's CLICKHOUSE_USER): v5.1.2 exits with
+                # "environment variable CLICKHOUSE_USERNAME not set"
+                # without it. The password used to be an empty literal; no
+                # account accepts an empty password any more.
                 - name: CLICKHOUSE_USERNAME
                   value: "rita"
                 - name: CLICKHOUSE_PASSWORD
-                  value: ""
+                  valueFrom:
+                    secretKeyRef:
+                      name: clickhouse-credentials
+                      key: rita-password
                 - name: CONFIG_DIR
                   value: "/work"
                 - name: CONFIG_FILE

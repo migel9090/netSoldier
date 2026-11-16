@@ -13,6 +13,7 @@ spec:
         app.kubernetes.io/name: ml-anomaly
     spec:
       serviceAccountName: ml-anomaly
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -25,11 +26,34 @@ spec:
           # step 112: RITA beacon consumer. The FastAPI scoring server
           # (step 115) will be a second container/command on this image.
           command: ["python", "-m", "ml_anomaly.sync"]
+          # The worker's metrics listener (METRICS_PORT default): up once the
+          # worker has started, gone when it dies.
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9101
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9101
+            periodSeconds: 10
           env:
             - name: CLICKHOUSE_URL
               value: "http://clickhouse.netsoldier.svc:8123"
             - name: CLICKHOUSE_DATABASE
               value: "netsoldier"
+            # The only account that may read RITA's output (threat_mixtape)
+            # and write ml_beacons. Contract name CLICKHOUSE_USER; the code
+            # still reading CLICKHOUSE_USERNAME is being changed to match.
+            - name: CLICKHOUSE_USER
+              value: "ml_beacon"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: ml-beacon-password
             - name: RITA_DATABASE
               value: "netsoldier_rita"
             - name: BEACON_SYNC_INTERVAL_SECONDS
@@ -54,11 +78,33 @@ spec:
           # step 113: Isolation Forest over connection windows; writes
           # ml_anomalies, tailed by detection-engine (step 116).
           command: ["python", "-m", "ml_anomaly.flowsync"]
+          # The worker's metrics listener (METRICS_PORT default): up once the
+          # worker has started, gone when it dies.
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9102
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9102
+            periodSeconds: 10
           env:
             - name: CLICKHOUSE_URL
               value: "http://clickhouse.netsoldier.svc:8123"
             - name: CLICKHOUSE_DATABASE
               value: "netsoldier"
+            # SELECT on connections, INSERT on ml_anomalies; no access to
+            # RITA's databases.
+            - name: CLICKHOUSE_USER
+              value: "ml_flow"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: ml-flow-password
             - name: FLOW_WINDOW_MINUTES
               value: "10"
             - name: FLOW_BASELINE_DAYS

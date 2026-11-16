@@ -23,4 +23,6 @@ anything overriding a previous ADR or a core architecture decision (ADR-0001).
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-architektura.md) | Core architecture of netSoldier (interview decisions) | Accepted |
-| [0002](0002-tls-fingerprinting.md) | Passive TLS/HTTP fingerprinting with JA3 + JA4+ | Accepted |
+| [0002](0002-tls-fingerprinting.md) | Passive TLS/HTTP fingerprinting with JA3 + JA4+ | Accepted (amended by ADR-0003) |
+| [0003](0003-first-party-ja4.md) | First-party JA4 implementation, FoxIO-licensed JA4+ removed | Accepted |
+| [0004](0004-runtime-isolation-and-network-privilege-separation.md) | Runtime isolation and network privilege separation | Accepted |

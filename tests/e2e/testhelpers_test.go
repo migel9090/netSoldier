@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,9 +24,21 @@ import (
 // untagged helper file, because the helpers below reference them and both the
 // e2e and integration builds compile this file.
 const (
-	e2eAPIKey        = "e2e-api-key"
+	e2eAPIKey        = "e2e-api-key" // the killswitch operator token, and the other services' keys
+	e2eIngestToken   = "e2e-ingest-token"
 	e2eWebhookSecret = "e2e-webhook-secret"
+	e2eAgentToken    = "e2e-agent-token"
+	// e2eActor is who the web UI's proxy says is acting, on every operator
+	// mutation (X-Netsoldier-Actor).
+	e2eActor = "e2e-operator"
 )
+
+// ksDBPath is a fresh database for one killswitch process. The service
+// refuses to start without one.
+func ksDBPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "killswitch.db")
+}
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
@@ -121,7 +134,36 @@ func waitHealthy(t *testing.T, url string) {
 
 func httpGetJSON(t *testing.T, url string, dst any) {
 	t.Helper()
-	resp, err := http.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+e2eAPIKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET %s: %d %s", url, resp.StatusCode, body)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+		t.Fatalf("GET %s: decode: %v", url, err)
+	}
+}
+
+// httpGetJSONBearer is httpGetJSON with a bearer token. device-inventory
+// requires its API key on reads as well as writes, so even the "is the API
+// up" checks have to authenticate.
+func httpGetJSONBearer(t *testing.T, url, token string, dst any) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
@@ -147,7 +189,11 @@ func assertEq(t *testing.T, field, want, got string) {
 // the production posture, which no earlier run exercised.
 func httpPostJSON(t *testing.T, url string, body any, dst any) {
 	t.Helper()
-	postAuthedJSON(t, url, e2eAPIKey, body, dst)
+	token := e2eAPIKey
+	if strings.HasSuffix(url, "/evaluate") {
+		token = e2eIngestToken
+	}
+	postAuthedJSON(t, url, token, body, dst)
 }
 
 // postAuthedJSON posts a JSON body with a bearer token and, when the target
@@ -168,9 +214,13 @@ func postAuthedJSON(t *testing.T, url, token string, body any, dst any) {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	// Only /evaluate carries a signed detection payload; operator actions
-	// are authenticated by the bearer token alone.
+	// are authenticated by the bearer token alone, and name the operator
+	// the way the web UI's proxy does. Signature v2 is timestamped, so it
+	// is computed here, at send time.
 	if strings.HasSuffix(url, "/evaluate") {
 		req.Header.Set(events.SignatureHeader, events.SignPayload(e2eWebhookSecret, data))
+	} else {
+		req.Header.Set("X-Netsoldier-Actor", e2eActor)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -189,12 +239,97 @@ func postAuthedJSON(t *testing.T, url, token string, body any, dst any) {
 	}
 }
 
+// postEvaluateRaw posts exact bytes to /evaluate with the given signature
+// header and returns the status and body, for tests that expect a refusal.
+func postEvaluateRaw(t *testing.T, ksAddr string, body []byte, sig string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, "http://"+ksAddr+"/evaluate", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+e2eIngestToken)
+	if sig != "" {
+		req.Header.Set(events.SignatureHeader, sig)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /evaluate: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, respBody
+}
+
+var e2eEventSeq struct {
+	sync.Mutex
+	n uint64
+}
+
+// v2Event returns a contract-valid single-signal domain IoC detection for a
+// test-chosen domain indicator, with a fresh id.
+func v2Event(indicator string, confidence int, severity string) events.DetectionEvent {
+	e2eEventSeq.Lock()
+	e2eEventSeq.n++
+	n := e2eEventSeq.n
+	e2eEventSeq.Unlock()
+	return events.DetectionEvent{
+		SchemaVersion: events.DetectionSchemaVersion,
+		ID:            events.FormatDetectionID("e2e", n),
+		Timestamp:     time.Now().UTC(),
+		Summary:       "DNS query for " + indicator + " matches e2e-test domain indicator " + indicator,
+		Domain:        indicator,
+		MatchedIoC:    indicator,
+		IoCType:       events.IndicatorDomain,
+		ClientIP:      "192.168.1.42",
+		Severity:      severity,
+		Confidence:    confidence,
+		Source:        "e2e-test",
+		SignalClass:   events.SignalIoC,
+		Signals: []events.Signal{{Class: events.SignalIoC, Confidence: confidence,
+			Indicator: indicator, IndicatorType: events.IndicatorDomain, Source: "e2e-test"}},
+		Target: &events.Target{Type: events.TargetDomain, Value: indicator},
+	}
+}
+
 // listActions fetches the killswitch actions in a given state.
 func listActions(t *testing.T, ksAddr, state string) []events.EnforcementAction {
 	t.Helper()
 	var out []events.EnforcementAction
 	httpGetJSON(t, "http://"+ksAddr+"/actions/"+state, &out)
 	return out
+}
+
+// scrapeMetric reads one unlabelled sample from a service's /metrics. ok is
+// false while the service cannot be reached or does not export the series.
+// It takes no *testing.T: stubs call it from their handlers.
+func scrapeMetric(addr, series string) (float64, bool) {
+	resp, err := http.Get("http://" + addr + "/metrics")
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, false
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if v, ok := strings.CutPrefix(line, series+" "); ok {
+			f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+			return f, err == nil
+		}
+	}
+	return 0, false
+}
+
+// indicatorsLoaded reports whether the detection-engine at addr has loaded
+// a feed set from threat-intel-sync. A stub querylog that holds its entries
+// back until then must ask the engine, not guess how long the load takes:
+// served too early, the entries are read before there is anything to
+// match them against, and never read again.
+func indicatorsLoaded(addr string) bool {
+	n, ok := scrapeMetric(addr, "detection_engine_ioc_sync_indicators")
+	return ok && n > 0
 }
 
 // bytesReader is a tiny alias so request bodies read clearly in tests.
@@ -216,19 +351,29 @@ func (m *mockAdGuard) Rules() []string {
 
 func startMockAdGuard(t *testing.T, entryTime time.Time) *mockAdGuard {
 	t.Helper()
+	return startMockAdGuardWith(t, nil, map[string]any{
+		"question": map[string]string{"name": "evil.example.com", "type": "A"},
+		"client":   "192.168.1.42",
+		"time":     entryTime,
+		"reason":   "FilteredBlackList",
+	})
+}
+
+// startMockAdGuardWith serves the given querylog entries (newest first, as
+// AdGuard does). While ready is non-nil and returns false the querylog is
+// empty, so a test can hold the entries back until the engine has loaded the
+// indicators they are meant to match.
+func startMockAdGuardWith(t *testing.T, ready func() bool, entries ...map[string]any) *mockAdGuard {
+	t.Helper()
 	m := &mockAdGuard{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /control/querylog", func(w http.ResponseWriter, _ *http.Request) {
+		data := entries
+		if ready != nil && !ready() {
+			data = []map[string]any{}
+		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"data": []map[string]any{{
-				"question": map[string]string{"host": "evil.example.com", "type": "A"},
-				"client":   "192.168.1.42",
-				"time":     entryTime,
-				"reason":   "FilteredBlackList",
-			}},
-			"oldest": "",
-		})
+		json.NewEncoder(w).Encode(map[string]any{"data": data, "oldest": ""})
 	})
 	mux.HandleFunc("GET /control/filtering/status", func(w http.ResponseWriter, _ *http.Request) {
 		m.mu.Lock()

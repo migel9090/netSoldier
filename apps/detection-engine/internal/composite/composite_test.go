@@ -72,8 +72,8 @@ func TestTwoClassesEscalate(t *testing.T) {
 	if got.Confidence != 93 {
 		t.Errorf("composite confidence = %d, want 93", got.Confidence)
 	}
-	if got.SignalCount != 2 {
-		t.Errorf("signal count = %d, want 2", got.SignalCount)
+	if len(got.Signals) != 2 {
+		t.Errorf("signals = %v, want one per class", got.Signals)
 	}
 	if got.Severity != detection.SeverityCritical {
 		t.Errorf("severity = %q, want critical", got.Severity)
@@ -216,13 +216,11 @@ func TestCompositeCarriesTriggerIdentity(t *testing.T) {
 	if comp.ClientIP != "192.168.1.50" {
 		t.Errorf("ClientIP = %q", comp.ClientIP)
 	}
-	if comp.SignalCount != 2 {
-		t.Errorf("SignalCount = %d, want 2", comp.SignalCount)
-	}
 	// The composite must advertise its contributing classes so the policy can
 	// tell known-bad from heuristic.
-	if len(comp.Signals) != 2 {
-		t.Errorf("Signals = %v, want two classes", comp.Signals)
+	if len(comp.Signals) != 2 || comp.Signals[0].Class != detection.SignalBeacon ||
+		comp.Signals[1].Class != detection.SignalIoC {
+		t.Errorf("Signals = %+v, want beacon and ioc", comp.Signals)
 	}
 }
 

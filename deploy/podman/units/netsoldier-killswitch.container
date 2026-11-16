@@ -1,0 +1,50 @@
+# netSoldier lite: killswitch-controller.
+#
+# Evaluates detections (POST /evaluate: ingest token + signature), keeps the
+# pending/active actions and the audit log in SQLite, and enforces through
+# AdGuard's user rules (DNS sinkhole). Every other endpoint takes the
+# operator token. Internal network only, no capability, nothing published.
+# The fixed address is what netagent would poll when ARP isolation is on.
+[Unit]
+Description=netSoldier lite: killswitch-controller
+PartOf=netsoldier.target
+After=netsoldier-adguard.service
+
+[Container]
+ContainerName=netsoldier-killswitch
+Image=ghcr.io/migel9090/killswitch-controller:main
+Network=netsoldier-internal.network:ip=10.231.47.14
+ReadOnly=true
+DropCapability=ALL
+NoNewPrivileges=true
+Volume=netsoldier-killswitch-data.volume:/var/lib/killswitch
+Environment=LISTEN_ADDR=:8084
+Environment=KILLSWITCH_DATA_DIR=/var/lib/killswitch
+# By address, not by name: the killswitch protects the DNS server it
+# enforces through, and needs no lookup to know which address that is.
+Environment=ADGUARD_URL=http://10.231.47.10:3000
+Environment=ADGUARD_USER=netsoldier
+Environment=GOMEMLIMIT=48MiB
+Secret=netsoldier-adguard-password,type=env,target=ADGUARD_PASSWORD
+Secret=netsoldier-killswitch-operator-token,type=env,target=KILLSWITCH_API_KEY
+Secret=netsoldier-killswitch-ingest-token,type=env,target=KILLSWITCH_INGEST_TOKEN
+Secret=netsoldier-webhook-secret,type=env,target=WEBHOOK_SECRET
+# From netsoldier.conf: GATEWAY_IP, GATEWAY_MAC; ALLOWLIST_IPS (HOST_IP and
+# PROTECTED_IPS) and ALLOWLIST_MACS (LAN_INTERFACE's MAC and PROTECTED_MACS),
+# never acted against; POLICY_AUTO_BLOCK (AUTO_BLOCK, off unless set to on:
+# only then may the killswitch sinkhole a domain without a human); the
+# other POLICY_* thresholds.
+EnvironmentFile=/etc/netsoldier/env/killswitch.env
+PidsLimit=256
+PodmanArgs=--memory=64m --memory-swap=64m
+StopTimeout=20
+Label=app=netsoldier
+
+[Service]
+Environment=XDG_RUNTIME_DIR=/run/netsoldier/podman
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=netsoldier.target

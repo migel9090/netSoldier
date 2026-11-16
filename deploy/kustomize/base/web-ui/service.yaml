@@ -9,5 +9,10 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+    # Scraped in-cluster only (ServiceMonitor web-ui); never published.
+    - port: 9464
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
   selector:
     app.kubernetes.io/name: web-ui

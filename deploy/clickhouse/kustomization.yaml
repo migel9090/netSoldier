@@ -1,0 +1,54 @@
+# The bridge from the plain migration files to Kubernetes. The SQL in
+# migrations/ and the runner in migrate.sh are the only copies; this
+# kustomization turns them into ConfigMaps for the clickhouse-migrate Job
+# (pulled in by deploy/kustomize/base/clickhouse). It lives next to the files
+# because kustomize only reads files at or below a kustomization.
+#
+# kustomize has no globs: every migration has to be listed below, and a file
+# that is in migrations/ but not here would never reach the cluster. CI
+# compares this list with the directory; when adding a migration, add it in
+# both places.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Created before the Job that mounts them (wave -1). The names keep their
+# content hash: the Job is an ArgoCD Sync hook recreated on every sync, so a
+# changed migration set always reaches a fresh Job, and the superseded
+# ConfigMaps are pruned.
+generatorOptions:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+
+configMapGenerator:
+  - name: clickhouse-migrate-script
+    files:
+      - migrate.sh
+  - name: clickhouse-migrations
+    files:
+      - migrations/001_database.sql
+      - migrations/002_devices.sql
+      - migrations/003_network_flows.sql
+      - migrations/004_dns_queries.sql
+      - migrations/005_alerts.sql
+      - migrations/006_events.sql
+      - migrations/007_connections.sql
+      - migrations/008_audit_log.sql
+      - migrations/009_retention.sql
+      - migrations/010_suricata.sql
+      - migrations/011_zeek.sql
+      - migrations/012_drop_foxio_fingerprints.sql
+      - migrations/013_zeek_intel.sql
+      - migrations/014_ml_beacons.sql
+      - migrations/015_rename_ja4_column.sql
+      - migrations/016_ml_anomalies.sql
+      - migrations/017_detection_feedback.sql
+      - migrations/018_cold_tier.sql
+      - migrations/019_flow_enrichment.sql
+      - migrations/020_partitioning.sql
+      - migrations/021_ml_beacons_history.sql
+      - migrations/022_feedback_retention.sql
+      - migrations/023_datetime64_timestamps.sql
+      - migrations/024_feedback_signal_class.sql
+      - migrations/025_zeek_conn_ingested_at.sql
+      - migrations/026_sensor_ingested_at.sql
+      - migrations/027_audit_log_context.sql

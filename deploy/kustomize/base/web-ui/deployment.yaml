@@ -1,9 +1,20 @@
+# web-ui: the household's UI and the authenticated proxy to the three
+# backends (contract 7). gVisor, no capability. One replica: sign-out
+# revocation is held in memory. Recreate, because a site may publish it on a
+# host port (components/site), which two pods on one node cannot share.
+#
+# Metrics are served on a listener of their own (METRICS_ADDR, port
+# `metrics`), unauthenticated, and never published: only a NetworkPolicy
+# decides who scrapes them (overlays that run Prometheus admit it). The UI's
+# port, which a site publishes on its LAN, answers /metrics with 404.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: web-ui
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: web-ui
@@ -13,6 +24,9 @@ spec:
         app.kubernetes.io/name: web-ui
     spec:
       serviceAccountName: web-ui
+      automountServiceAccountToken: false
+      runtimeClassName: gvisor
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -23,31 +37,77 @@ spec:
       containers:
         - name: web-ui
           image: ghcr.io/migel9090/web-ui:main
+          # `http` stays the first port: components/site publishes ports/0
+          # (and tests its name before it does). `metrics` gets no hostPort.
           ports:
             - name: http
               containerPort: 3000
               protocol: TCP
+            - name: metrics
+              containerPort: 9464
+              protocol: TCP
           env:
             - name: PORT
               value: "3000"
+            # GET /metrics only, on every interface of the pod. A port that
+            # cannot be bound stops the web UI, so `metrics` above and this
+            # value move together.
+            - name: METRICS_ADDR
+              value: ":9464"
+            # The exact origin people open (scheme, host, port; no path).
+            # It decides the Origin check and whether cookies are Secure.
+            - name: ORIGIN
+              valueFrom:
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: WEB_UI_ORIGIN
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: web-ui-credentials
+                  key: session-secret
+            - name: WEB_UI_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: web-ui-credentials
+                  key: password
+            # The OPERATOR token, never the ingest token.
+            - name: KILLSWITCH_URL
+              value: "http://killswitch-controller.netsoldier.svc:8084"
+            - name: KILLSWITCH_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: killswitch-credentials
+                  key: api-key
             - name: DEVICE_INVENTORY_URL
-              value: "http://device-inventory:8081"
+              value: "http://device-inventory.netsoldier.svc:8081"
+            - name: DEVICE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: device-inventory-credentials
+                  key: api-key
             - name: DETECTION_ENGINE_URL
-              value: "http://detection-engine:8080"
+              value: "http://detection-engine.netsoldier.svc:8080"
+            - name: DETECTION_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: detection-engine-credentials
+                  key: api-key
+          # /healthz answers 503 while the configuration is invalid.
           startupProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: http
             periodSeconds: 2
-            failureThreshold: 15
+            failureThreshold: 30
           livenessProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: http
             periodSeconds: 15
           readinessProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: http
             periodSeconds: 10
           securityContext:
@@ -59,11 +119,11 @@ spec:
                 - ALL
           resources:
             limits:
-              cpu: 200m
+              cpu: 300m
               memory: 256Mi
             requests:
               cpu: 50m
-              memory: 128Mi
+              memory: 96Mi
           volumeMounts:
             - name: tmp
               mountPath: /tmp

@@ -13,6 +13,7 @@ spec:
         app.kubernetes.io/name: suricata
     spec:
       serviceAccountName: suricata
+      automountServiceAccountToken: false
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       securityContext:
@@ -21,7 +22,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: init-rules
-          image: jasonish/suricata:8.0.5
+          image: jasonish/suricata:8.0.5@sha256:93fadbb0771d0003d32c627069bc8bf26ebced13f2748e9cd7cf958dd1802f7e
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -59,7 +60,7 @@ spec:
               memory: 128Mi
       containers:
         - name: suricata
-          image: jasonish/suricata:8.0.5
+          image: jasonish/suricata:8.0.5@sha256:93fadbb0771d0003d32c627069bc8bf26ebced13f2748e9cd7cf958dd1802f7e
           command:
             - suricata
             - "-c"
@@ -103,7 +104,7 @@ spec:
             - name: tmp
               mountPath: /tmp
         - name: rules-updater
-          image: jasonish/suricata:8.0.5
+          image: jasonish/suricata:8.0.5@sha256:93fadbb0771d0003d32c627069bc8bf26ebced13f2748e9cd7cf958dd1802f7e
           command: ["python3", "/etc/suricata/updater/update-rules.py"]
           env:
             - name: THREAT_INTEL_URL
@@ -136,10 +137,19 @@ spec:
             - name: tmp
               mountPath: /tmp
         - name: vector
-          image: timberio/vector:0.43.1-distroless-libc
+          image: timberio/vector:0.43.1-distroless-libc@sha256:131485defae3fc07fa20cf9dda85bb3056e8d0d475a8aa387c6d6417eca0223b
           args:
             - "--config-yaml"
             - /etc/vector/vector.yaml
+          # Substituted into the sinks' auth blocks (configmap.yaml).
+          env:
+            - name: CLICKHOUSE_USER
+              value: "suricata"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: suricata-password
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534

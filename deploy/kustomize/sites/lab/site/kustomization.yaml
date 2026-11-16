@@ -1,0 +1,15 @@
+# The lab's site values as the ConfigMap `netsoldier-site`, once per
+# namespace that reads it. The name carries a content hash, so a changed
+# value rolls the pods that use it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+configMapGenerator:
+  - name: netsoldier-site
+    namespace: netsoldier
+    envs:
+      - site.env
+  - name: netsoldier-site
+    namespace: dns
+    envs:
+      - site.env

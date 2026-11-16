@@ -32,51 +32,34 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Validate deploy configs
-        run: pip install --quiet pyyaml jsonschema && python scripts/validate-configs.py
+      # Hash-pinned: pip installs exactly the files listed or fails.
+      - name: Install the gates' Python tools
+        run: pip install --quiet --require-hashes -r scripts/ci/requirements.txt
 
-      - name: Install kustomize and kubeconform
-        run: |
-          # The hosted runner image now ships its own kustomize and the
-          # installer refuses to overwrite it ("exists. Remove it first."),
-          # which failed this job. Drop it so the pinned 5.4.3 is what runs.
-          rm -f /usr/local/bin/kustomize
-          curl -sSfL https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh \
-            | bash -s 5.4.3 /usr/local/bin
-          curl -sSfL -o /tmp/kubeconform.tar.gz \
-            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
-          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+      - name: Validate deploy configs
+        run: python scripts/validate-configs.py
 
       # The YAML/schema check only ever parsed individual files, so
       # structural problems were invisible: the proxmox-soc overlay was
       # missing fluent-bit, pi-edge shipped no NetworkPolicies at all, and
-      # manifests referenced images that had no Dockerfile. Rendering both
-      # overlays and validating the result catches that class of mistake.
-      # base/misp generates its Secret with ksops, which decrypts a
-      # SOPS-encrypted file during `kustomize build`. CI has no ksops binary,
-      # no key, and the encrypted payload is deliberately uncommitted, so the
-      # build died on the proxmox-soc overlay and this step never once
-      # passed. The stub stands in for the plugin with a placeholder Secret
-      # so everything around it still renders and gets schema-checked;
-      # ArgoCD's repo-server does the real decryption at deploy time.
-      - name: Install ksops stub for build-time validation
-        run: |
-          install -m 0755 scripts/ci/ksops-stub.py /usr/local/bin/ksops
+      # manifests referenced images that had no Dockerfile. This renders
+      # what is deployed (every site) and every profile they are built from,
+      # and validates each with kubeconform in strict mode against pinned
+      # schemas; a target that does not render or validate fails the step by
+      # name. kustomize and kubeconform are pinned release artefacts checked
+      # against pinned SHA-256s (scripts/ci/tools.sh): the step used to pipe
+      # kustomize's installer from its master branch into bash, which ran
+      # unpinned code and failed whenever GitHub rate-limited the installer's
+      # unauthenticated API call. Same command locally: task validate:manifests.
+      - name: Render and validate every deployable target
+        env:
+          NETSOLDIER_TOOLS: ${{ runner.temp }}/tools
+        run: scripts/ci/render-manifests.sh "$RUNNER_TEMP/rendered"
 
-      - name: Build and validate kustomize overlays
-        run: |
-          for overlay in deploy/kustomize/overlays/*/; do
-            name=$(basename "$overlay")
-            echo "::group::kustomize build $name"
-            kustomize build --enable-alpha-plugins --enable-exec \
-              "$overlay" > "/tmp/$name.yaml"
-            kubeconform -strict -summary -ignore-missing-schemas "/tmp/$name.yaml"
-            echo "::endgroup::"
-          done
-
-      # Every first-party image a manifest references must have a Dockerfile
-      # and a build job, or the workload cannot start — and Kyverno's
-      # verifyImages policy rejects it outright for being unsigned.
+      # Every first-party image a manifest references must have a Dockerfile,
+      # a build job, a signature and provenance, or the workload cannot start
+      # — Kyverno's verifyImages policy rejects it outright for being
+      # unsigned. Same command locally: task check:images.
       - name: Check every referenced first-party image is built
         run: python scripts/check-images.py
 
@@ -92,10 +75,12 @@ jobs:
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
-          # tests/e2e needs a newer Go than the services (x/crypto, held
-          # past the GO-2026-6354/6355 advisories, requires go 1.26), so
-          # take the version from the module this job actually compiles.
-          go-version-file: tests/e2e/go.mod
+          # go.work is the single source of truth for the Go version. Every
+          # go.mod and the golang: base image of every Go Dockerfile carry
+          # the same exact release, so all jobs build on one toolchain; bump
+          # them together. (GOWORK=off above does not affect this: setup-go
+          # only reads the go directive from the file.)
+          go-version-file: go.work
           cache-dependency-path: apps/*/go.sum
 
       # gofmt was never gated, so nine files had drifted out of format on
@@ -130,8 +115,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      # ruff comes hash-pinned from scripts/ci/requirements.txt, so a new
+      # release cannot change the verdict of an unchanged tree.
       - name: Ruff lint
-        run: pip install --quiet ruff && ruff check apps/ml-anomaly/
+        run: |
+          pip install --quiet --require-hashes -r scripts/ci/requirements.txt
+          ruff check apps/ml-anomaly/
 
   web-ui:
     runs-on: ubuntu-latest
@@ -145,7 +134,10 @@ jobs:
 
       - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
-          node-version: '22'
+          # An exact release, not the newest 22.x: the same one as the
+          # digest-pinned node:22-alpine in apps/web-ui/Dockerfile, so the
+          # gate tests what the image runs. Bump the two together.
+          node-version: '22.23.5'
           cache: npm
           cache-dependency-path: apps/web-ui/package-lock.json
 
@@ -185,7 +177,8 @@ jobs:
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
-          go-version-file: apps/detection-engine/go.mod
+          # Single source of truth for the Go version; see the lint job.
+          go-version-file: go.work
           cache-dependency-path: apps/*/go.sum
 
       - name: Go test with coverage
@@ -269,10 +262,8 @@ jobs:
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
-          # tests/e2e needs a newer Go than the services (x/crypto, held
-          # past the GO-2026-6354/6355 advisories, requires go 1.26), so
-          # take the version from the module this job actually compiles.
-          go-version-file: tests/e2e/go.mod
+          # Single source of truth for the Go version; see the lint job.
+          go-version-file: go.work
           cache-dependency-path: |
             tests/e2e/go.sum
             apps/*/go.sum
@@ -296,10 +287,8 @@ jobs:
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
-          # tests/e2e needs a newer Go than the services (x/crypto, held
-          # past the GO-2026-6354/6355 advisories, requires go 1.26), so
-          # take the version from the module this job actually compiles.
-          go-version-file: tests/e2e/go.mod
+          # Single source of truth for the Go version; see the lint job.
+          go-version-file: go.work
           cache-dependency-path: |
             tests/e2e/go.sum
             apps/*/go.sum
@@ -641,6 +630,97 @@ jobs:
     with:
       image: ghcr.io/${{ github.repository_owner }}/device-inventory
       digest: ${{ needs.build-device-inventory.outputs.digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+  # netagent is referenced by the core profile and the lite profile but was
+  # built by no job, so neither could start it (and Kyverno would reject it
+  # unsigned). Same shape as the other Go services. Its Dockerfile has a
+  # setcap stage that bakes CAP_NET_RAW into the binary as a file
+  # capability; that stage runs on the build platform (setcap writes an
+  # xattr, independent of the binary's architecture), so the arm64 image
+  # needs no QEMU, and BuildKit carries the xattr into the final layer.
+  build-netagent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [lint, test]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/netagent
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=ref,event=pr
+
+      - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        id: build
+        with:
+          context: .
+          file: apps/netagent/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=netagent
+          cache-to: type=gha,scope=netagent,mode=max
+
+      - name: Sign image
+        if: github.event_name == 'push'
+        run: cosign sign --yes ghcr.io/${{ github.repository_owner }}/netagent@${{ steps.build.outputs.digest }}
+
+      # SBOM by DIGEST, not by the :main tag: on a branch or PR build the tag
+      # points at a different image, so a tag-based SBOM described something
+      # other than what was just built and signed.
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        if: github.event_name == 'push'
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/netagent@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          artifact-name: sbom-netagent
+          output-file: netagent.cdx.json
+
+  provenance-netagent:
+    if: github.event_name == 'push'
+    needs: build-netagent
+    permissions:
+      actions: read
+      id-token: write
+      packages: write
+    # Must be a vX.Y.Z tag, not a commit SHA: the builder resolves and
+    # verifies its own ref and rejects anything else ("Invalid ref ...
+    # Expected ref of the form refs/tags/vX.Y.Z"), which is what was
+    # failing every provenance job. SHA-pinning is unsupported here.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    with:
+      image: ghcr.io/${{ github.repository_owner }}/netagent
+      digest: ${{ needs.build-netagent.outputs.digest }}
       registry-username: ${{ github.actor }}
     secrets:
       registry-password: ${{ secrets.GITHUB_TOKEN }}

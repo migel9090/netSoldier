@@ -1,0 +1,11 @@
+# netSoldier lite: AdGuard Home's working data (query log, statistics,
+# downloaded filter lists). Owned by the unprivileged user the container
+# runs as.
+[Unit]
+Description=netSoldier lite: volume adguard-work
+
+[Volume]
+VolumeName=netsoldier-adguard-work
+User=65532
+Group=65532
+Label=app=netsoldier

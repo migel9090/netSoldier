@@ -1,0 +1,10 @@
+# netSoldier lite: device-inventory's store (SQLite: devices, labels,
+# address bindings).
+[Unit]
+Description=netSoldier lite: volume device-inventory-data
+
+[Volume]
+VolumeName=netsoldier-device-inventory-data
+User=65532
+Group=65532
+Label=app=netsoldier

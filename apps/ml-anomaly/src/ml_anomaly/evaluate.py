@@ -1,5 +1,8 @@
 """Model evaluation with synthetic attack injection (step 114).
 
+EXPERIMENTAL: this gate only checks caricature attacks and is known to pass
+models that miss realistic ones (audit ML-3); an honest gate is step 129.
+
 There are no labeled attacks in home traffic, so evaluation works from
 two directions:
 

@@ -1,11 +1,7 @@
 package ingest
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -16,42 +12,21 @@ import (
 func TestSuricataAlertParse(t *testing.T) {
 	row := json.RawMessage(`{"ts":1789000000,"flow_id":"1234567890123456789","src_ip":"192.168.1.50",
 		"src_port":51544,"dest_ip":"203.0.113.7","dest_port":443,"proto":"TCP",
-		"alert_signature":"ET MALWARE Cobalt Strike Beacon","alert_category":"Malware C2",
-		"alert_severity":1,"alert_signature_id":2031999,
-		"threat_intel":"{\"source\":\"threatfox\",\"severity\":\"critical\",\"confidence\":95,\"threat\":\"CobaltStrike\"}"}`)
+		"alert_signature":"ET MALWARE Cobalt Strike Beacon","alert_category":"Malware Command and Control Activity Detected",
+		"alert_severity":1,"alert_signature_id":2031999,"threat_intel":""}`)
 
-	ev, key, err := SuricataAlerts{}.Parse(row)
+	ev, err := NewSuricataAlerts(defaultLocal(t)).Parse(row)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ev.Sensor != "suricata" || ev.Kind != "ids-alert" {
 		t.Errorf("bad sensor/kind: %s/%s", ev.Sensor, ev.Kind)
 	}
-	// datajson enrichment overrides rule severity (high) with feed context
-	if ev.Severity != "critical" || ev.Confidence != 95 || ev.Source != "threatfox" || ev.Threat != "CobaltStrike" {
-		t.Errorf("threat_intel not applied: %+v", ev)
-	}
 	if ev.FlowID != "1234567890123456789" {
 		t.Errorf("uint64 flow_id mangled: %s", ev.FlowID)
 	}
-	if want := "1234567890123456789/2031999/1789000000"; key != want {
-		t.Errorf("key = %s, want %s", key, want)
-	}
-}
-
-func TestSuricataSeverityWithoutIntel(t *testing.T) {
-	for sev, want := range map[int]string{1: "high", 2: "medium", 3: "low"} {
-		row := json.RawMessage(fmt.Sprintf(
-			`{"ts":1789000000,"flow_id":"1","src_ip":"a","src_port":1,"dest_ip":"b","dest_port":2,
-			  "proto":"TCP","alert_signature":"sig","alert_category":"cat","alert_severity":%d,
-			  "alert_signature_id":7,"threat_intel":""}`, sev))
-		ev, _, err := SuricataAlerts{}.Parse(row)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if ev.Severity != want {
-			t.Errorf("severity %d -> %s, want %s", sev, ev.Severity, want)
-		}
+	if ev.SrcIP != "192.168.1.50" || ev.DstIP != "203.0.113.7" || ev.Source != "et-open" {
+		t.Errorf("outbound alert: src=%s dst=%s source=%s", ev.SrcIP, ev.DstIP, ev.Source)
 	}
 }
 
@@ -60,7 +35,7 @@ func TestZeekIntelParseAndNormalize(t *testing.T) {
 		"dst_ip":"198.51.100.9","dst_port":443,"indicator":"t13d3012h2_1d37bd780c83_882d495ac381",
 		"indicator_type":"Intel::TLSFP","seen_where":"SSL::IN_TLSFP","sources":["misp"]}`)
 
-	ev, key, err := ZeekIntel{}.Parse(row)
+	ev, err := ZeekIntel{}.Parse(row)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,9 +44,6 @@ func TestZeekIntelParseAndNormalize(t *testing.T) {
 	}
 	if ev.Kind != "intel-hit" || ev.Source != "misp" {
 		t.Errorf("bad kind/source: %s/%s", ev.Kind, ev.Source)
-	}
-	if !strings.HasPrefix(key, "CxUAB2kZ1/t13d") {
-		t.Errorf("bad key: %s", key)
 	}
 
 	for in, want := range map[string]string{
@@ -114,58 +86,60 @@ func TestToAlertIDSFallbacks(t *testing.T) {
 		SrcIP: "192.168.1.50", Signature: "ET SCAN Nmap", Severity: "low", Source: "et-open",
 	}
 	a := ToAlert(ev, nil)
-	if a.MatchedIoC != "ET SCAN Nmap" || a.Threat != "ET SCAN Nmap" {
-		t.Errorf("signature fallback missing: %+v", a)
+	if a.Threat != "ET SCAN Nmap" || !strings.Contains(a.Summary, "ET SCAN Nmap") {
+		t.Errorf("rule text belongs in threat and summary: %+v", a)
+	}
+	if a.MatchedIoC != "" || a.Domain != "" {
+		t.Errorf("rule text must not become an indicator or a domain: %+v", a)
 	}
 	if a.MitreID == "" {
 		t.Errorf("expected derived mitre, got none")
 	}
+	if a.ID != "" || a.Record != "" {
+		t.Errorf("an event from no stored row: id %q record %q, want both empty", a.ID, a.Record)
+	}
 }
 
-func TestPollerCursorAndDedupe(t *testing.T) {
-	// Two polls: the second repeats the last row of the first (same second)
-	// plus one new row — the repeat must be deduplicated.
-	responses := []string{
-		`{"ts":1789000000,"uid":"A","src_ip":"1.1.1.1","src_port":1,"dst_ip":"2.2.2.2","dst_port":2,"indicator":"x.example","indicator_type":"Intel::DOMAIN","seen_where":"DNS","sources":[]}
-{"ts":1789000005,"uid":"B","src_ip":"1.1.1.1","src_port":1,"dst_ip":"2.2.2.2","dst_port":2,"indicator":"y.example","indicator_type":"Intel::DOMAIN","seen_where":"DNS","sources":[]}`,
-		`{"ts":1789000005,"uid":"B","src_ip":"1.1.1.1","src_port":1,"dst_ip":"2.2.2.2","dst_port":2,"indicator":"y.example","indicator_type":"Intel::DOMAIN","seen_where":"DNS","sources":[]}
-{"ts":1789000010,"uid":"C","src_ip":"1.1.1.1","src_port":1,"dst_ip":"2.2.2.2","dst_port":2,"indicator":"z.example","indicator_type":"Intel::DOMAIN","seen_where":"DNS","sources":[]}`,
+// TestAlertNamesItsRow: the same row read twice — in the overlap, or after a
+// restart — names the same record, which the pipeline's ledger recognises.
+// The id is left to the engine: ids are per process.
+func TestAlertNamesItsRow(t *testing.T) {
+	ev := SensorEvent{Kind: "intel-hit", SrcIP: "192.168.1.60", Origin: "zeek_intel", RowKey: "123456789"}
+	a, b := ToAlert(ev, nil), ToAlert(ev, nil)
+	if a.Record == "" || a.Record != b.Record || a.ID != "" {
+		t.Fatalf("records %q / %q, id %q", a.Record, b.Record, a.ID)
 	}
-	call := 0
-	var queries []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body := make([]byte, 4096)
-		n, _ := r.Body.Read(body)
-		queries = append(queries, string(body[:n]))
-		if call < len(responses) {
-			fmt.Fprintln(w, responses[call])
+	ev.RowKey = "123456790"
+	if ToAlert(ev, nil).Record == a.Record {
+		t.Error("two rows share a record")
+	}
+	ev.Origin, ev.RowKey = "suricata_alerts", "123456789"
+	if ToAlert(ev, nil).Record == a.Record {
+		t.Error("the same hash in two tables shares a record")
+	}
+}
+
+func defaultLocal(t *testing.T) LocalNetworks {
+	t.Helper()
+	l, bad := ParseLocalNetworks(DefaultLocalCIDRs)
+	if len(bad) > 0 {
+		t.Fatalf("default local networks do not parse: %v", bad)
+	}
+	return l
+}
+
+func TestLocalNetworks(t *testing.T) {
+	l, bad := ParseLocalNetworks([]string{"192.168.0.0/16", " 2001:db8:1::/48 ", "", "not-a-cidr"})
+	if len(bad) != 1 || bad[0] != "not-a-cidr" {
+		t.Errorf("bad entries = %v", bad)
+	}
+	for ip, want := range map[string]bool{
+		"192.168.1.50": true, "::ffff:192.168.1.50": true, "2001:db8:1::7": true,
+		"127.0.0.1": true, "fe80::1": true, "169.254.1.1": true,
+		"203.0.113.7": false, "2001:db8:2::7": false, "": false, "garbage": false,
+	} {
+		if got := l.Contains(ip); got != want {
+			t.Errorf("Contains(%q) = %v, want %v", ip, got, want)
 		}
-		call++
-	}))
-	defer srv.Close()
-
-	var got []SensorEvent
-	p := NewPoller(NewCHClient(srv.URL, "netsoldier"), ZeekIntel{}, time.Hour, func(ev SensorEvent) {
-		got = append(got, ev)
-	})
-	p.cursor = time.Unix(1789000000, 0).UTC()
-
-	for i := 0; i < 2; i++ {
-		if err := p.poll(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	if len(got) != 3 {
-		t.Fatalf("expected 3 unique events, got %d: %+v", len(got), got)
-	}
-	if got[0].Indicator != "x.example" || got[1].Indicator != "y.example" || got[2].Indicator != "z.example" {
-		t.Errorf("wrong events: %+v", got)
-	}
-	if p.cursor != time.Unix(1789000010, 0).UTC() {
-		t.Errorf("cursor = %v, want 1789000010", p.cursor)
-	}
-	if !strings.Contains(queries[1], "toDateTime(1789000005)") {
-		t.Errorf("second query should start at advanced cursor: %s", queries[1])
 	}
 }

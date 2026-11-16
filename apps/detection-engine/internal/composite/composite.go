@@ -28,6 +28,7 @@
 package composite
 
 import (
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -35,6 +36,7 @@ import (
 	"time"
 
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
+	"github.com/migel9090/netSoldier/libs/events"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -140,12 +142,13 @@ func (c *Correlator) Observe(a detection.Alert) *detection.Alert {
 	c.clients[client] = sigs
 	c.evict(now)
 
-	classes := distinctClasses(sigs)
+	effective := onePerIndicator(sigs)
+	classes := distinctClasses(effective)
 	if len(classes) < 2 {
 		return nil
 	}
 
-	comp := c.build(a, sigs, classes, now)
+	comp := c.build(a, effective, classes, now)
 	if comp.Confidence < minEmitConfidence {
 		return nil
 	}
@@ -153,8 +156,8 @@ func (c *Correlator) Observe(a detection.Alert) *detection.Alert {
 	compositesEmitted.WithLabelValues(countLabel(len(classes))).Inc()
 	compositeConfidence.Observe(float64(comp.Confidence))
 	slog.Warn("composite detection",
-		"client", client, "confidence", comp.Confidence,
-		"signals", comp.Signals, "severity", comp.Severity,
+		"id", comp.ID, "client", client, "confidence", comp.Confidence,
+		"signals", classes, "severity", comp.Severity, "target", comp.Target,
 	)
 	if c.Emit != nil {
 		c.Emit(comp)
@@ -197,8 +200,20 @@ func (c *Correlator) build(trigger detection.Alert, sigs []signal, classes []str
 		clientMAC = anchor.ClientMAC
 	}
 
+	// One signal per class, each with its OWN confidence and indicator, so
+	// the receiver can see that a 93 was built from, say, a feed hit at 20
+	// and two heuristics — the combined number alone hides that.
+	signals := make([]events.Signal, 0, len(classes))
+	for _, cl := range classes {
+		signals = append(signals, signalOf(best[cl]))
+	}
+
 	return detection.Alert{
+		// A composite is a detection in its own right: the action it drives
+		// must be traceable to it, not to whichever signal triggered it.
+		ID:          detection.NewID(),
 		Timestamp:   now,
+		Summary:     summarize(classes, best, anchor, clientIP),
 		Domain:      anchor.Domain,
 		ClientIP:    clientIP,
 		ClientMAC:   clientMAC,
@@ -213,9 +228,65 @@ func (c *Correlator) build(trigger detection.Alert, sigs []signal, classes []str
 		Threat:      anchor.Threat,
 		Tags:        tags,
 		SignalClass: detection.SignalComposite,
-		Signals:     classes,
-		SignalCount: len(classes),
+		Signals:     signals,
+		Target:      compositeTarget(classes, best),
 	}
+}
+
+// signalOf is the contract signal one contributing alert stands for.
+func signalOf(s signal) events.Signal {
+	if len(s.alert.Signals) > 0 {
+		out := s.alert.Signals[0]
+		out.Class = s.class
+		return out
+	}
+	return events.Signal{
+		Class:      s.class,
+		Confidence: detection.ClampConfidence(s.confidence),
+		Source:     s.alert.Source,
+	}
+}
+
+// compositeTarget picks what a composite may enforce on: the target of the
+// strongest known-bad signal that has one, otherwise that of the strongest
+// heuristic. The confidence-ranked anchor is deliberately NOT used — it is
+// usually a heuristic, and taking its destination is how a weak feed hit on
+// one name came to block whatever a beacon pointed at. Whether the chosen
+// target is actually vouched for strongly enough is the policy's question
+// (events.DetectionEvent.AttestedSignal); this only says what it would be.
+//
+// A known-bad signal whose indicator is not enforceable (an IDS rule id)
+// has no target and so does not take part; the heuristics' destination is
+// then the only candidate.
+func compositeTarget(classes []string, best map[string]signal) *events.Target {
+	var target *events.Target
+	for _, knownBad := range []bool{true, false} {
+		conf := -1
+		for _, cl := range classes {
+			s := best[cl]
+			if events.IsKnownBadSignal(cl) != knownBad || s.alert.Target == nil || s.confidence <= conf {
+				continue
+			}
+			t := *s.alert.Target
+			target, conf = &t, s.confidence
+		}
+		if target != nil {
+			return target
+		}
+	}
+	return nil
+}
+
+func summarize(classes []string, best map[string]signal, anchor detection.Alert, client string) string {
+	parts := make([]string, 0, len(classes))
+	for _, cl := range classes {
+		parts = append(parts, fmt.Sprintf("%s %d", cl, best[cl].confidence))
+	}
+	s := fmt.Sprintf("%d corroborating signals for %s (%s)", len(classes), client, strings.Join(parts, ", "))
+	if anchor.Summary != "" {
+		s += "; strongest: " + anchor.Summary
+	}
+	return s
 }
 
 // combine folds independent per-class confidences with a noisy-OR:
@@ -301,6 +372,71 @@ func upsert(sigs []signal, s signal) []signal {
 		}
 	}
 	return append(sigs, s)
+}
+
+// onePerIndicator collapses known-bad signals (feed matches, signatures)
+// that attest the same indicator into the strongest of them, whichever
+// sensor reported each. noisy-OR assumes its inputs are independent; two
+// sensors reporting one feed indicator are one piece of evidence seen twice,
+// and counting it twice took a confidence-75 feed match that should wait for
+// a human to 94/critical.
+//
+// Heuristic signals are never collapsed, not into a known-bad signal and not
+// into each other, even when they name the same indicator. "A feed lists
+// this domain" and "this device contacts it on a schedule" are independent
+// kinds of evidence — reputation and behaviour — and their agreeing is
+// exactly the corroboration a two-signal auto-block gate asks for. Signals
+// without an indicator stand on their own.
+func onePerIndicator(sigs []signal) []signal {
+	out := make([]signal, 0, len(sigs))
+	at := make(map[string]int, len(sigs))
+	for _, s := range sigs {
+		key := ""
+		if events.IsKnownBadSignal(s.class) {
+			key = indicatorKey(s.alert)
+		}
+		if key == "" {
+			out = append(out, s)
+			continue
+		}
+		i, dup := at[key]
+		if !dup {
+			at[key] = len(out)
+			out = append(out, s)
+			continue
+		}
+		if s.confidence > out[i].confidence {
+			out[i] = s
+		}
+	}
+	return out
+}
+
+// indicatorKey is the canonical "type:value" of the indicator an alert's
+// signal attests, or "" when it attests none. An untyped value is not
+// compared: "x" could be a name, an address or a rule.
+func indicatorKey(a detection.Alert) string {
+	value, typ := a.MatchedIoC, a.IoCType
+	if len(a.Signals) > 0 {
+		value, typ = a.Signals[0].Indicator, a.Signals[0].IndicatorType
+	}
+	value = strings.TrimSpace(value)
+	if value == "" || typ == "" {
+		return ""
+	}
+	switch typ {
+	case events.IndicatorDomain:
+		if d, ok := events.CanonicalDomain(value); ok {
+			value = d
+		}
+	case events.IndicatorIP:
+		if ip, ok := events.CanonicalIP(value); ok {
+			value = ip
+		}
+	default:
+		value = strings.ToLower(value)
+	}
+	return strings.ToLower(typ) + ":" + value
 }
 
 func bestPerClass(sigs []signal) map[string]signal {

@@ -1,21 +1,24 @@
-proxmox_endpoint  = "https://pve.local:8006"
-proxmox_api_token = "terraform@pam!provisioner=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-proxmox_insecure  = true
-proxmox_node      = "pve"
+# The lab reads ~/.config/netsoldier-lab/lab.auto.tfvars (never this file).
+# infra/lab/proxmox-token.sh writes the first two lines; everything else has a
+# default in variables.tf and is shown here only to document what can be set.
 
-# k3s VM
-k3s_cpu_cores = 4
-k3s_memory_mb = 6144
-k3s_disk_gb   = 48
-storage_pool  = "local-lvm"
+proxmox_endpoint  = "https://192.168.1.40:8006/"
+proxmox_api_token = "terraform@pve!netsoldier-lab=<written by infra/lab/proxmox-token.sh>"
 
-# Network
-network_bridge = "vmbr0"
-k3s_ip         = "192.168.1.100/24"
-gateway        = "192.168.1.1"
-dns_servers    = ["192.168.1.1"]
+# proxmox_node       = "pve"
+# pool_id            = "netsoldier-lab"
+# image_datastore_id = "local"
+# disk_datastore_id  = "scratch2"
+# network_bridge     = "vmbr0"
 
-# Cloud-init
-cloud_image_url = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
-vm_user         = "netsoldier"
-ssh_public_key  = "ssh-ed25519 AAAA... user@host"
+# vm_id         = 110
+# vm_name       = "netsoldier-soc"
+# cpu_cores     = 4
+# memory_mib    = 8192
+# disk_size_gib = 60
+
+# ipv4_address      = "192.168.1.61/24"
+# ipv4_gateway      = "192.168.1.1"
+# dns_servers       = ["192.168.1.1"]
+# ssh_allowed_cidrs = []   # empty: the VM's subnet
+# api_allowed_cidrs = []   # empty: only the machine running Ansible

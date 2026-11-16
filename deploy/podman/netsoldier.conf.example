@@ -1,0 +1,82 @@
+# netSoldier lite: the one file an installer fills in.
+#
+# Copy it to /etc/netsoldier/netsoldier.conf (or let `netsoldier-lite init`
+# write a draft from what it can detect), fill in the five required values,
+# then run `netsoldier-lite install`. Re-run install after every change.
+#
+# Format: KEY=value, one per line, no shell syntax (the file is parsed, not
+# sourced). Lists are comma-separated. Everything else - the secrets, the
+# AdGuard configuration, the systemd units - is generated from this file.
+
+# ── Required ────────────────────────────────────────────────────────────────
+
+# The interface that faces the home LAN. netagent captures ARP, DHCP, mDNS,
+# SSDP and LLDP here.
+LAN_INTERFACE=
+
+# This machine's IPv4 address on that interface. DNS (53) and the web UI
+# listen on this address only. Give the machine a fixed address (a DHCP
+# reservation on the router is enough): clients are told to use it for DNS.
+HOST_IP=
+
+# The router. Both identifiers are pinned so the router is never enforced
+# against, whatever a detection or the LAN claims (read the MAC from the
+# router's label or admin page, not only from `ip neigh`).
+GATEWAY_IP=
+GATEWAY_MAC=
+
+# The LAN's address ranges, e.g. 192.168.1.0/24.
+LAN_NETWORKS=
+
+# ── Optional ────────────────────────────────────────────────────────────────
+
+# The address people open the web UI at, exactly as typed in the browser
+# (scheme, host, port; no path). Default: http://HOST_IP:UI_PORT.
+UI_URL=
+UI_PORT=3000
+
+# Devices that must never be enforced against (comma-separated MACs / IPs),
+# e.g. a NAS or a work laptop, on top of the ones that always are: the
+# router (above) and this machine (HOST_IP and the MAC of LAN_INTERFACE).
+PROTECTED_MACS=
+PROTECTED_IPS=
+
+# Automatic blocking: off (the default) or on. Off, every action waits for a
+# human to approve it in the web UI. On, the killswitch sinkholes a domain
+# by itself when a known-bad indicator attests it at or above the
+# automatic-blocking thresholds below, for every device not protected above;
+# with both PROTECTED_* lists empty, that is every device but this machine
+# and the router.
+AUTO_BLOCK=off
+
+# How long a DNS block lasts before it is lifted, in seconds.
+BLOCK_TTL=3600
+
+# AdGuard Home's upstream resolvers and the plain-DNS servers used to look
+# them up (space- or comma-separated).
+UPSTREAM_DNS=https://dns.quad9.net/dns-query,https://dns.cloudflare.com/dns-query
+BOOTSTRAP_DNS=9.9.9.9,1.1.1.1
+
+# Free key from https://auth.abuse.ch/ for ThreatFox and URLhaus (domain
+# indicators). Without it only Feodo and Spamhaus DROP (addresses) are used.
+# abuse.ch feeds are for non-commercial use: set COMMERCIAL_MODE=true for a
+# commercial deployment and they are all switched off.
+ABUSECH_AUTH_KEY=
+COMMERCIAL_MODE=false
+
+# Active discovery: netagent sends a few rate-limited ARP probes into the
+# first of LAN_NETWORKS every five minutes to find quiet devices.
+ARP_PROBE=false
+
+# Automatic-blocking thresholds (used only with AUTO_BLOCK=on), empty = the
+# killswitch's defaults (confidence 90, severity critical); and the bar for
+# queueing an action at all (pending from 50 / medium). The site's own list
+# (/etc/netsoldier/local-indicators.txt) carries confidence 80, severity high.
+POLICY_AUTO_CONFIDENCE=
+POLICY_AUTO_SEVERITY=
+POLICY_PENDING_CONFIDENCE=
+POLICY_PENDING_SEVERITY=
+
+# Where the netSoldier images come from: <IMAGE_PREFIX>/<service>:<IMAGE_TAG>.
+IMAGE_PREFIX=ghcr.io/migel9090
+IMAGE_TAG=main

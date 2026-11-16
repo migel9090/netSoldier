@@ -1,0 +1,12 @@
+# netSoldier lite configuration — written by the podman_edge role from
+# podman_edge_settings; edit the inventory, not this file. Keys and their
+# meaning: deploy/podman/netsoldier.conf.example.
+{# A YAML boolean (a bare on/off/true/false in the inventory) is written the
+   way netsoldier-lite reads it: on/off for AUTO_BLOCK, true/false otherwise. #}
+{% for key, value in podman_edge_settings | dictsort %}
+{% if value is boolean %}
+{{ key }}={{ (value | ternary('on', 'off')) if key == 'AUTO_BLOCK' else (value | ternary('true', 'false')) }}
+{% else %}
+{{ key }}={{ value if value is string else (value | join(',') if value is iterable else value) }}
+{% endif %}
+{% endfor %}

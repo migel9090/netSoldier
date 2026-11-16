@@ -1,5 +1,14 @@
 version: '3'
 
+includes:
+  # Proxmox lab VM with k3s and gVisor (infra/README.md): lab:plan, lab:up,
+  # lab:down, lab:kubeconfig, lab:smoke, ...
+  lab: ./infra/lab/Taskfile.yml
+  # The lite profile (Podman, no Kubernetes) on a lab host with a simulated
+  # home LAN (deploy/README.md): lite:e2e, lite:scenario, lite:uninstall, ...
+  # Needs LITE_HOST, the lab host's address.
+  lite: ./infra/lab/lite/Taskfile.yml
+
 vars:
   REGISTRY: ghcr.io/migel9090
   IMAGE: detection-engine
@@ -121,11 +130,44 @@ tasks:
     cmds:
       - bash scripts/backup-restore-test.sh
 
+  # ── CI gates ───────────────────────────────────────────────────
+  # Each runs the same script the workflow runs, so a green run here is a
+  # green job there. The scanners need Docker; tools land in
+  # ~/.cache/netsoldier (NETSOLDIER_TOOLS overrides).
+
+  ci:deps:
+    desc: Install the gates' hash-pinned Python tools (use a virtualenv)
+    cmds:
+      - python3 -m pip install --quiet --require-hashes -r scripts/ci/requirements.txt
+
+  tools:
+    desc: Install the pinned, checksum-verified gate binaries (kustomize, kubeconform, hadolint)
+    cmds:
+      - scripts/ci/tools.sh install
+
+  validate:
+    desc: Run the validate job (configs, every rendered target, first-party images)
+    cmds:
+      - task: validate:configs
+      - task: validate:manifests
+      - task: check:images
+
   validate:configs:
     desc: Validate deploy configs (YAML syntax + Helm values schemas)
+    deps: [ci:deps]
     cmds:
-      - python3 -m pip install --quiet pyyaml jsonschema
       - python3 scripts/validate-configs.py
+
+  validate:manifests:
+    desc: Render every site and profile with kustomize and validate it with kubeconform (strict)
+    cmds:
+      - scripts/ci/render-manifests.sh {{.CLI_ARGS}}
+
+  check:images:
+    desc: Fail when a manifest references a first-party image that CI does not build, sign and attest
+    deps: [ci:deps]
+    cmds:
+      - python3 scripts/check-images.py
 
   scan:
     desc: Run security scanners locally
@@ -149,9 +191,27 @@ tasks:
           --metrics=off .
 
   scan:iac:
-    desc: Run Checkov IaC scan
+    desc: Run the IaC gates (Checkov, KICS, hadolint) against scan-exceptions.toml
+    deps: [ci:deps]
     cmds:
-      - checkov --directory . --quiet --compact --soft-fail
+      - task: scan:checkov
+      - task: scan:kics
+      - task: scan:hadolint
+
+  scan:checkov:
+    desc: Checkov on every rendered target and the repository's files
+    cmds:
+      - python3 scripts/ci/iac-gate.py checkov {{.CLI_ARGS}}
+
+  scan:kics:
+    desc: KICS (HIGH and CRITICAL) on every rendered target and the repository's files
+    cmds:
+      - python3 scripts/ci/iac-gate.py kics {{.CLI_ARGS}}
+
+  scan:hadolint:
+    desc: hadolint on every tracked Dockerfile and Containerfile
+    cmds:
+      - python3 scripts/ci/iac-gate.py hadolint {{.CLI_ARGS}}
 
   sbom:
     desc: Generate CycloneDX SBOM from GHCR image

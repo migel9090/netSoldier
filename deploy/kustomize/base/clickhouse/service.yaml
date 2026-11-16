@@ -2,6 +2,9 @@ apiVersion: v1
 kind: Service
 metadata:
   name: clickhouse
+  annotations:
+    # The migrate Job (wave -1) reaches the server through this Service.
+    argocd.argoproj.io/sync-wave: "-2"
 spec:
   type: ClusterIP
   ports:

@@ -5,7 +5,7 @@
 # killswitch-controller it does not copy that module in — doing so would
 # invalidate this image's dependency layer whenever the shared contract
 # changed, for no reason.
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -21,14 +21,15 @@ COPY apps/device-inventory/ .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /device-inventory ./cmd/device-inventory
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
 COPY --from=build /device-inventory /device-inventory
 
 EXPOSE 8081
 
-# Discovery listens on mDNS/SSDP/LLDP; the deployment grants
-# NET_BIND_SERVICE for the privileged ports rather than running as root.
+# device-inventory no longer captures: netagent does, and posts frames to the
+# /agent/v1/frames endpoint (ADR-0004). It opens no raw socket, binds only the
+# unprivileged API port, and needs NO Linux capability and no host network.
 USER nonroot:nonroot
 
 ENTRYPOINT ["/device-inventory"]

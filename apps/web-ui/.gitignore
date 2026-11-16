@@ -1,0 +1,10 @@
+# Also read by `prettier --check .` run from this directory, so it repeats the
+# build outputs the repository root ignores.
+/node_modules/
+/.svelte-kit/
+/build/
+
+# Playwright output (npm run test:e2e)
+/test-results/
+/playwright-report/
+/blob-report/

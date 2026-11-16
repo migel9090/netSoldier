@@ -61,23 +61,31 @@ func TestPhase1E2E(t *testing.T) {
 	stopInv := startProc(t, invBin, map[string]string{
 		"LISTEN_ADDR": invAddr,
 		"DB_PATH":     filepath.Join(t.TempDir(), "devices.db"),
+		// The API refuses to start without a key, and the capture listeners
+		// need CAP_NET_RAW, which a test process does not have.
+		"DEVICE_API_KEY":      e2eAPIKey,
+		"DISCOVERY_LISTENERS": "none",
 	})
 	t.Cleanup(stopInv)
 
 	ksAddr := freeAddr(t)
 	stopKs := startProc(t, ksBin, map[string]string{
-		"LISTEN_ADDR":      ksAddr,
-		"ADGUARD_URL":      ag.url,
-		"ADGUARD_USER":     "admin",
-		"ADGUARD_PASSWORD": "test",
+		"LISTEN_ADDR":        ksAddr,
+		"KILLSWITCH_DB_PATH": ksDBPath(t),
+		"ADGUARD_URL":        ag.url,
+		"ADGUARD_USER":       "admin",
+		"ADGUARD_PASSWORD":   "test",
 		// Run with authentication and an allowlist configured — the
 		// production posture. Every earlier e2e run left both unset, so the
 		// authenticated path was never exercised and auto-block was never
 		// tested against the empty-allowlist guard.
-		"KILLSWITCH_API_KEY": e2eAPIKey,
-		"WEBHOOK_SECRET":     e2eWebhookSecret,
-		"ALLOWLIST_IPS":      "192.168.1.1",
-		"ALLOWLIST_MACS":     "aa:bb:cc:00:00:01",
+		"KILLSWITCH_API_KEY":      e2eAPIKey,
+		"KILLSWITCH_INGEST_TOKEN": e2eIngestToken,
+		"WEBHOOK_SECRET":          e2eWebhookSecret,
+		"ALLOWLIST_IPS":           "192.168.1.1",
+		"ALLOWLIST_MACS":          "aa:bb:cc:00:00:01",
+		// The allowlist alone no longer enables automation.
+		"POLICY_AUTO_BLOCK": "on",
 	})
 	t.Cleanup(stopKs)
 
@@ -106,6 +114,9 @@ func TestPhase1E2E(t *testing.T) {
 	assertEq(t, "webhook.schema_version", events.DetectionSchemaVersion, wp.SchemaVersion)
 	assertEq(t, "webhook.domain", "evil.example.com", wp.Domain)
 	assertEq(t, "webhook.client_ip", "192.168.1.42", wp.ClientIP)
+	if err := wp.Validate(); err != nil {
+		t.Errorf("webhook payload breaks the v2 contract: %v", err)
+	}
 	t.Log("detection pipeline OK")
 
 	// ── Alerts API ──────────────────────────────────────────────────
@@ -121,7 +132,7 @@ func TestPhase1E2E(t *testing.T) {
 	// ── Device inventory ────────────────────────────────────────────
 
 	var devices []json.RawMessage
-	httpGetJSON(t, "http://"+invAddr+"/devices", &devices)
+	httpGetJSONBearer(t, "http://"+invAddr+"/devices", e2eAPIKey, &devices)
 	t.Logf("device-inventory API OK (%d device(s))", len(devices))
 
 	// ── Killswitch: policy query ────────────────────────────────────
@@ -143,17 +154,9 @@ func TestPhase1E2E(t *testing.T) {
 	}
 
 	var ignoreResult evalResp
-	httpPostJSON(t, "http://"+ksAddr+"/evaluate", map[string]any{
-		"schema_version": "1.0",
-		"id":             "DET-E2E-IGNORE",
-		"domain":         "benign.example.com",
-		"matched_ioc":    "benign.example.com",
-		"ioc_type":       "domain",
-		"client_ip":      "192.168.1.10",
-		"severity":       "low",
-		"confidence":     10,
-		"source":         "e2e-test",
-	}, &ignoreResult)
+	ignoreEv := v2Event("benign.example.com", 10, events.SeverityLow)
+	ignoreEv.ClientIP = "192.168.1.10"
+	httpPostJSON(t, "http://"+ksAddr+"/evaluate", ignoreEv, &ignoreResult)
 	assertEq(t, "ignore.decision", "ignore", ignoreResult.Decision.Action)
 	if ignoreResult.Action != nil {
 		t.Error("ignore: expected nil action")
@@ -164,19 +167,9 @@ func TestPhase1E2E(t *testing.T) {
 
 	t.Log("evaluating medium-severity detection → pending")
 	var pendResult evalResp
-	httpPostJSON(t, "http://"+ksAddr+"/evaluate", map[string]any{
-		"schema_version": "1.0",
-		"id":             "DET-E2E-PENDING",
-		"domain":         "suspicious.example.com",
-		"matched_ioc":    "suspicious.example.com",
-		"ioc_type":       "domain",
-		"client_ip":      "192.168.1.42",
-		"client_mac":     "aa:bb:cc:dd:ee:ff",
-		"severity":       "medium",
-		"confidence":     75,
-		"source":         "e2e-test",
-		"threat":         "test-malware",
-	}, &pendResult)
+	pendEv := v2Event("suspicious.example.com", 75, events.SeverityMedium)
+	pendEv.ClientMAC, pendEv.Threat = "aa:bb:cc:dd:ee:ff", "test-malware"
+	httpPostJSON(t, "http://"+ksAddr+"/evaluate", pendEv, &pendResult)
 	assertEq(t, "pending.decision", "pending", pendResult.Decision.Action)
 	if pendResult.Action == nil {
 		t.Fatal("pending: action is nil")
@@ -195,7 +188,8 @@ func TestPhase1E2E(t *testing.T) {
 	t.Log("approving action")
 	var approved actionSummary
 	httpPostJSON(t, "http://"+ksAddr+"/actions/"+actionID+"/approve",
-		map[string]string{"approved_by": "e2e-operator"}, &approved)
+		// The body's identity is ignored: the approver is the actor header.
+		map[string]string{"approved_by": "mallory"}, &approved)
 	assertEq(t, "approved.state", "active", approved.State)
 	assertEq(t, "approved.approved_by", "e2e-operator", approved.ApprovedBy)
 
@@ -231,25 +225,14 @@ func TestPhase1E2E(t *testing.T) {
 
 	// ── Killswitch: auto-block ──────────────────────────────────────
 
-	// signal_class is load-bearing: auto-block requires an externally
+	// The signals are load-bearing: auto-block requires an externally
 	// attested known-bad indicator (a feed match or an IDS signature), not
-	// just high confidence. See the heuristics case below.
+	// just high confidence, and a domain target to act on.
 	t.Log("evaluating critical-severity known-bad detection → auto-block")
 	var autoResult evalResp
-	httpPostJSON(t, "http://"+ksAddr+"/evaluate", map[string]any{
-		"schema_version": "1.0",
-		"id":             "DET-E2E-AUTO",
-		"domain":         "c2.evil.test",
-		"matched_ioc":    "c2.evil.test",
-		"ioc_type":       "domain",
-		"client_ip":      "192.168.1.99",
-		"client_mac":     "ff:ee:dd:cc:bb:aa",
-		"severity":       "critical",
-		"confidence":     95,
-		"source":         "e2e-test",
-		"threat":         "c2-beacon",
-		"signal_class":   events.SignalIoC,
-	}, &autoResult)
+	autoEv := v2Event("c2.evil.test", 95, events.SeverityCritical)
+	autoEv.ClientIP, autoEv.ClientMAC, autoEv.Threat = "192.168.1.99", "ff:ee:dd:cc:bb:aa", "c2-beacon"
+	httpPostJSON(t, "http://"+ksAddr+"/evaluate", autoEv, &autoResult)
 	assertEq(t, "auto.decision", "auto_block", autoResult.Decision.Action)
 	if autoResult.Action == nil {
 		t.Fatal("auto-block: action is nil")

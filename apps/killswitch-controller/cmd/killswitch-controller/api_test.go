@@ -2,105 +2,26 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"encoding/json"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
-	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/actions"
-	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/drivers"
-	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/policy"
 	"github.com/migel9090/netSoldier/libs/events"
 )
 
-type nopDriver struct{}
-
-func (nopDriver) Apply(_ context.Context, _ *events.EnforcementAction) error  { return nil }
-func (nopDriver) Revert(_ context.Context, _ *events.EnforcementAction) error { return nil }
-func (nopDriver) Name() string                                                { return "nop" }
-
-var _ drivers.Driver = nopDriver{}
-
-type testEnv struct {
-	srv    *httptest.Server
-	store  *actions.Store
-	policy *policy.Policy
-}
-
-func newTestEnv(t *testing.T) *testEnv {
-	t.Helper()
-	pol := policy.DefaultPolicy()
-	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
-	resolve := func(string) (drivers.Driver, error) { return nopDriver{}, nil }
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("GET /policy", handleGetPolicy(pol, true))
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true))
-	mux.HandleFunc("GET /allowlist", handleGetAllowlist(pol))
-	mux.HandleFunc("GET /actions/pending", handleListByState(store, events.StatePending))
-	mux.HandleFunc("GET /actions/active", handleListByState(store, events.StateActive))
-	mux.HandleFunc("GET /actions/{id}", handleGetAction(store))
-	mux.HandleFunc("POST /actions/{id}/approve", handleApprove(store, resolve))
-	mux.HandleFunc("POST /actions/{id}/reject", handleReject(store))
-	mux.HandleFunc("POST /actions/{id}/revert", handleRevert(store, resolve))
-
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-
-	return &testEnv{srv: srv, store: store, policy: pol}
-}
-
-func (e *testEnv) post(t *testing.T, path string, body any) *http.Response {
-	t.Helper()
-	data, _ := json.Marshal(body)
-	resp, err := http.Post(e.srv.URL+path, "application/json", bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("POST %s: %v", path, err)
-	}
-	return resp
-}
-
-func (e *testEnv) get(t *testing.T, path string) *http.Response {
-	t.Helper()
-	resp, err := http.Get(e.srv.URL + path)
-	if err != nil {
-		t.Fatalf("GET %s: %v", path, err)
-	}
-	return resp
-}
-
-func decodeJSON[T any](t *testing.T, resp *http.Response) T {
-	t.Helper()
-	defer resp.Body.Close()
-	var v T
-	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	return v
-}
-
 func TestHealthz(t *testing.T) {
-	env := newTestEnv(t)
-	resp := env.get(t, "/healthz")
-	if resp.StatusCode != 200 {
-		t.Fatalf("healthz: %d", resp.StatusCode)
-	}
-	result := decodeJSON[map[string]string](t, resp)
-	if result["status"] != "ok" {
-		t.Errorf("status: got %q, want ok", result["status"])
+	h := newHarness(t, harnessOpts{})
+	status, raw := h.request(http.MethodGet, "/healthz", "", nil, nil)
+	if status != 200 || !bytes.Contains(raw, []byte(`"ok"`)) {
+		t.Fatalf("healthz: %d %s", status, raw)
 	}
 }
 
 func TestGetPolicy(t *testing.T) {
-	env := newTestEnv(t)
-	resp := env.get(t, "/policy")
-	if resp.StatusCode != 200 {
-		t.Fatalf("policy: %d", resp.StatusCode)
+	h := newHarness(t, harnessOpts{})
+	var result map[string]any
+	if status := h.get("/policy", &result); status != 200 {
+		t.Fatalf("policy: %d", status)
 	}
-	result := decodeJSON[map[string]any](t, resp)
 	if int(result["auto_min_confidence"].(float64)) != 90 {
 		t.Errorf("auto_min_confidence: got %v, want 90", result["auto_min_confidence"])
 	}
@@ -110,294 +31,175 @@ func TestGetPolicy(t *testing.T) {
 	if result["default_action"] != events.ActionDNSSinkhole {
 		t.Errorf("default_action: got %v, want dns_sinkhole", result["default_action"])
 	}
+	types, _ := result["available_action_types"].([]any)
+	if len(types) != 1 || types[0] != events.ActionDNSSinkhole {
+		t.Errorf("available_action_types: %v", result["available_action_types"])
+	}
 }
 
 func TestGetAllowlist(t *testing.T) {
-	env := newTestEnv(t)
-	env.policy.Allowlist.AddMAC("aa:bb:cc:dd:ee:ff")
-	env.policy.Allowlist.AddIP("10.0.0.1")
+	h := newHarness(t, harnessOpts{})
+	h.pol.Allowlist.AddMAC("aa:bb:cc:dd:ee:ff")
 
-	resp := env.get(t, "/allowlist")
-	result := decodeJSON[map[string]any](t, resp)
-	macs := result["macs"].([]any)
-	ips := result["ips"].([]any)
-	if len(macs) != 1 {
-		t.Errorf("expected 1 MAC, got %d", len(macs))
-	}
-	if len(ips) != 1 {
-		t.Errorf("expected 1 IP, got %d", len(ips))
+	var result map[string][]string
+	h.get("/allowlist", &result)
+	if len(result["macs"]) != 1 || len(result["ips"]) != 1 {
+		t.Errorf("allowlist: %v", result)
 	}
 }
 
 func TestEvaluateAutoBlock(t *testing.T) {
-	env := newTestEnv(t)
-
-	resp := env.post(t, "/evaluate", events.DetectionEvent{
-		ID:          "DET-1",
-		Severity:    events.SeverityCritical,
-		Confidence:  95,
-		ClientIP:    "192.168.1.100",
-		ClientMAC:   "aa:bb:cc:dd:ee:ff",
-		Domain:      "evil.com",
-		MatchedIoC:  "evil.com",
-		IoCType:     "domain",
-		Source:      "test",
-		SignalClass: events.SignalIoC,
-	})
-	if resp.StatusCode != 200 {
-		t.Fatalf("evaluate: %d", resp.StatusCode)
+	h := newHarness(t, harnessOpts{})
+	ev := criticalIoCEvent()
+	got := h.evaluate(ev)
+	if got.status != 200 || got.Decision.Action != "auto_block" {
+		t.Fatalf("evaluate: %+v", got)
 	}
-
-	result := decodeJSON[map[string]any](t, resp)
-	decision := result["decision"].(map[string]any)
-	action := result["action"].(map[string]any)
-
-	if decision["Action"] != "auto_block" {
-		t.Errorf("decision.Action: got %v, want auto_block", decision["Action"])
+	a := got.Action
+	if a == nil || a.State != events.StateActive || !a.AutoApproved || a.ApprovedBy != "auto-policy" {
+		t.Fatalf("action: %+v", a)
 	}
-	if action["state"] != events.StateActive {
-		t.Errorf("action.state: got %v, want active (nop driver succeeds)", action["state"])
-	}
-	if action["auto_approved"] != true {
-		t.Errorf("action.auto_approved: got %v, want true", action["auto_approved"])
+	if a.BlockedDomain != "evil.com" || a.DetectionSummary != ev.Summary || a.ActivatedAt == nil || a.ExpiresAt == nil {
+		t.Errorf("action should carry the target domain, the summary and its TTL: %+v", a)
 	}
 }
 
 func TestEvaluatePending(t *testing.T) {
-	env := newTestEnv(t)
-
-	resp := env.post(t, "/evaluate", events.DetectionEvent{
-		ID:         "DET-2",
-		Severity:   events.SeverityMedium,
-		Confidence: 60,
-		ClientIP:   "192.168.1.100",
-		Domain:     "suspicious.com",
-		IoCType:    "domain",
-	})
-
-	result := decodeJSON[map[string]any](t, resp)
-	decision := result["decision"].(map[string]any)
-	action := result["action"].(map[string]any)
-
-	if decision["Action"] != "pending" {
-		t.Errorf("decision.Action: got %v, want pending", decision["Action"])
+	h := newHarness(t, harnessOpts{})
+	got := h.evaluate(withDomainTarget(testEvent(60, events.SeverityMedium), "suspicious.com"))
+	if got.Decision.Action != "pending" || got.Action == nil || got.Action.State != events.StatePending {
+		t.Fatalf("got %+v", got)
 	}
-	if action["state"] != events.StatePending {
-		t.Errorf("action.state: got %v, want pending", action["state"])
+	if got.Action.ExpiresAt != nil {
+		t.Errorf("a pending action has no expires_at until it is active: %v", got.Action.ExpiresAt)
 	}
 }
 
 func TestEvaluateIgnoreBelowThreshold(t *testing.T) {
-	env := newTestEnv(t)
-
-	resp := env.post(t, "/evaluate", events.DetectionEvent{
-		ID:         "DET-3",
-		Severity:   events.SeverityLow,
-		Confidence: 30,
-		ClientIP:   "192.168.1.100",
-	})
-
-	result := decodeJSON[map[string]any](t, resp)
-	decision := result["decision"].(map[string]any)
-
-	if decision["Action"] != "ignore" {
-		t.Errorf("decision.Action: got %v, want ignore", decision["Action"])
-	}
-	if result["action"] != nil {
-		t.Errorf("ignored events should have nil action, got %v", result["action"])
+	h := newHarness(t, harnessOpts{})
+	got := h.evaluate(testEvent(30, events.SeverityLow))
+	if got.Decision.Action != "ignore" || got.Action != nil {
+		t.Errorf("got %+v", got)
 	}
 }
 
 func TestEvaluateIgnoreAllowlisted(t *testing.T) {
-	env := newTestEnv(t)
-	env.policy.Allowlist.AddMAC("aa:bb:cc:dd:ee:ff")
-
-	resp := env.post(t, "/evaluate", events.DetectionEvent{
-		ID:         "DET-4",
-		Severity:   events.SeverityCritical,
-		Confidence: 99,
-		ClientMAC:  "aa:bb:cc:dd:ee:ff",
-		ClientIP:   "192.168.1.100",
-	})
-
-	result := decodeJSON[map[string]any](t, resp)
-	decision := result["decision"].(map[string]any)
-
-	if decision["Action"] != "ignore" {
-		t.Errorf("allowlisted device should be ignored, got %v", decision["Action"])
+	h := newHarness(t, harnessOpts{})
+	h.pol.Allowlist.AddMAC("aa:bb:cc:dd:ee:ff")
+	ev := testEvent(99, events.SeverityCritical)
+	ev.ClientMAC = "aa:bb:cc:dd:ee:ff"
+	if got := h.evaluate(ev); got.Decision.Action != "ignore" {
+		t.Errorf("allowlisted device should be ignored, got %v", got.Decision.Action)
 	}
 }
 
 func TestActionLifecycle(t *testing.T) {
-	env := newTestEnv(t)
+	h := newHarness(t, harnessOpts{})
+	ev := withDomainTarget(testEvent(60, events.SeverityMedium), "maybe-bad.com")
+	ev.ClientIP, ev.ClientMAC = "192.168.1.50", "02:22:33:44:55:66"
+	h.evaluate(ev)
 
-	// Create a pending action via evaluate
-	env.post(t, "/evaluate", events.DetectionEvent{
-		ID:         "DET-LC",
-		Severity:   events.SeverityMedium,
-		Confidence: 60,
-		ClientIP:   "192.168.1.50",
-		ClientMAC:  "11:22:33:44:55:66",
-		Domain:     "maybe-bad.com",
-		IoCType:    "domain",
-	})
-
-	// List pending — should have 1
-	resp := env.get(t, "/actions/pending")
-	pending := decodeJSON[[]map[string]any](t, resp)
+	pending := h.list("pending")
 	if len(pending) != 1 {
 		t.Fatalf("expected 1 pending, got %d", len(pending))
 	}
-	actionID := pending[0]["id"].(string)
+	id := pending[0].ID
 
-	// Get by ID
-	resp = env.get(t, "/actions/"+actionID)
-	if resp.StatusCode != 200 {
-		t.Fatalf("get action: %d", resp.StatusCode)
-	}
-	action := decodeJSON[map[string]any](t, resp)
-	if action["state"] != events.StatePending {
-		t.Errorf("state: got %v, want pending", action["state"])
+	var got events.EnforcementAction
+	if status := h.get("/actions/"+id, &got); status != 200 || got.State != events.StatePending {
+		t.Fatalf("get action: %d %s", status, got.State)
 	}
 
-	// Approve
-	resp = env.post(t, "/actions/"+actionID+"/approve", map[string]string{"approved_by": "admin"})
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		t.Fatalf("approve: %d %s", resp.StatusCode, body)
+	status, approved := h.approve(id, nil)
+	if status != 200 || approved.State != events.StateActive || approved.ApprovedBy != testActor {
+		t.Fatalf("approve: %d %+v", status, approved)
 	}
-	action = decodeJSON[map[string]any](t, resp)
-	if action["state"] != events.StateActive {
-		t.Errorf("after approve+activate: got %v, want active", action["state"])
+	if active := h.list("active"); len(active) != 1 || active[0].ID != id {
+		t.Fatalf("active: %+v", active)
 	}
 
-	// List active — should have 1
-	resp = env.get(t, "/actions/active")
-	active := decodeJSON[[]map[string]any](t, resp)
-	if len(active) != 1 {
-		t.Fatalf("expected 1 active, got %d", len(active))
+	status, reverted := h.revert(id, "bob")
+	if status != 200 || reverted.State != events.StateReverted || reverted.RevertedBy != "bob" {
+		t.Fatalf("revert: %d %+v", status, reverted)
 	}
-
-	// Revert
-	resp = env.post(t, "/actions/"+actionID+"/revert", map[string]string{"reason": "false positive"})
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		t.Fatalf("revert: %d %s", resp.StatusCode, body)
-	}
-	action = decodeJSON[map[string]any](t, resp)
-	if action["state"] != events.StateReverted {
-		t.Errorf("after revert: got %v, want reverted", action["state"])
-	}
-
-	// Active list now empty
-	resp = env.get(t, "/actions/active")
-	active = decodeJSON[[]map[string]any](t, resp)
-	if len(active) != 0 {
+	if active := h.list("active"); len(active) != 0 {
 		t.Errorf("expected 0 active after revert, got %d", len(active))
+	}
+	if history := h.list("history"); len(history) != 1 || history[0].ID != id {
+		t.Errorf("history: %+v", history)
 	}
 }
 
 func TestActionReject(t *testing.T) {
-	env := newTestEnv(t)
+	h := newHarness(t, harnessOpts{})
+	a := h.createPending("02:00:00:00:00:01", "192.168.1.10", "maybe-bad.com")
 
-	env.post(t, "/evaluate", events.DetectionEvent{
-		ID:         "DET-REJ",
-		Severity:   events.SeverityMedium,
-		Confidence: 60,
-		ClientIP:   "192.168.1.50",
-		Domain:     "maybe-bad.com",
-		IoCType:    "domain",
-	})
-
-	resp := env.get(t, "/actions/pending")
-	pending := decodeJSON[[]map[string]any](t, resp)
-	actionID := pending[0]["id"].(string)
-
-	resp = env.post(t, "/actions/"+actionID+"/reject", map[string]string{"reason": "false positive"})
-	if resp.StatusCode != 200 {
-		t.Fatalf("reject: %d", resp.StatusCode)
+	status, got := h.operate("/actions/"+a.ID+"/reject", "carol", map[string]string{"reason": "false positive"})
+	if status != 200 || got.State != events.StateRejected || got.RejectedBy != "carol" || got.Reason != "false positive" {
+		t.Fatalf("reject: %d %+v", status, got)
 	}
-	action := decodeJSON[map[string]any](t, resp)
-	if action["state"] != events.StateRejected {
-		t.Errorf("state: got %v, want rejected", action["state"])
+	// Rejecting again, or approving a rejected action: 409 with the action.
+	status, again := h.operate("/actions/"+a.ID+"/reject", "carol", nil)
+	if status != http.StatusConflict || again.State != events.StateRejected || again.Error == "" {
+		t.Fatalf("second reject: %d %+v", status, again)
+	}
+	if status, _ := h.approve(a.ID, nil); status != http.StatusConflict {
+		t.Fatalf("approve after reject: %d", status)
 	}
 }
 
 func TestGetActionNotFound(t *testing.T) {
-	env := newTestEnv(t)
-	resp := env.get(t, "/actions/ACT-NONEXISTENT")
-	if resp.StatusCode != 404 {
-		t.Errorf("expected 404, got %d", resp.StatusCode)
+	h := newHarness(t, harnessOpts{})
+	if status := h.get("/actions/ACT-NONEXISTENT", nil); status != 404 {
+		t.Errorf("expected 404, got %d", status)
 	}
-	resp.Body.Close()
-}
-
-func TestListPendingEmpty(t *testing.T) {
-	env := newTestEnv(t)
-	resp := env.get(t, "/actions/pending")
-	result := decodeJSON[[]any](t, resp)
-	if result != nil && len(result) != 0 {
-		t.Errorf("expected empty list, got %d items", len(result))
+	for _, verb := range []string{"approve", "reject", "revert"} {
+		if status, _ := h.operate("/actions/ACT-NONEXISTENT/"+verb, testActor, nil); status != 404 {
+			t.Errorf("%s of an unknown action: %d", verb, status)
+		}
 	}
 }
 
-func TestAuthMiddleware(t *testing.T) {
-	pol := policy.DefaultPolicy()
-	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
-	resolve := func(string) (drivers.Driver, error) { return nopDriver{}, nil }
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve, true))
-
-	handler := authMiddleware("test-secret", "", mux)
-	srv := httptest.NewServer(handler)
-	defer srv.Close()
-
-	// GET requests pass without auth
-	resp, _ := http.Get(srv.URL + "/healthz")
-	if resp.StatusCode != 200 {
-		t.Errorf("GET without auth should succeed, got %d", resp.StatusCode)
+// TestListsAreArraysNeverNull: Go encodes an empty slice as null.
+func TestListsAreArraysNeverNull(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	for _, path := range []string{"/actions/pending", "/actions/active", "/actions/failed", "/actions/history", "/audit"} {
+		status, raw := h.request(http.MethodGet, path, testOperatorToken, nil, nil)
+		if status != 200 || string(bytes.TrimSpace(raw)) != "[]" {
+			t.Errorf("GET %s: %d %s, want []", path, status, raw)
+		}
 	}
-	resp.Body.Close()
+}
 
-	// POST without auth → 401
-	body, _ := json.Marshal(events.DetectionEvent{})
-	resp, _ = http.Post(srv.URL+"/evaluate", "application/json", bytes.NewReader(body))
-	if resp.StatusCode != 401 {
-		t.Errorf("POST without auth: expected 401, got %d", resp.StatusCode)
+func TestListQueryValidation(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	for _, path := range []string{"/actions/history?limit=0", "/actions/history?limit=x", "/audit?limit=-1",
+		"/audit?before=abc", "/audit?before=0"} {
+		if status := h.get(path, nil); status != http.StatusBadRequest {
+			t.Errorf("GET %s: %d, want 400", path, status)
+		}
 	}
-	resp.Body.Close()
-
-	// POST with wrong key → 401
-	req, _ := http.NewRequest("POST", srv.URL+"/evaluate", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer wrong-key")
-	resp, _ = http.DefaultClient.Do(req)
-	if resp.StatusCode != 401 {
-		t.Errorf("POST with wrong key: expected 401, got %d", resp.StatusCode)
+	if status := h.get("/actions/history?limit=100000", nil); status != 200 {
+		t.Errorf("an oversized limit is capped, not refused: %d", status)
 	}
-	resp.Body.Close()
-
-	// POST with correct key → 200
-	req, _ = http.NewRequest("POST", srv.URL+"/evaluate", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer test-secret")
-	resp, _ = http.DefaultClient.Do(req)
-	if resp.StatusCode != 200 {
-		t.Errorf("POST with correct key: expected 200, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
 }
 
 func TestEvaluateInvalidBody(t *testing.T) {
-	env := newTestEnv(t)
-	resp, err := http.Post(env.srv.URL+"/evaluate", "application/json", bytes.NewReader([]byte("not json")))
-	if err != nil {
-		t.Fatal(err)
+	h := newHarness(t, harnessOpts{insecure: true})
+	if got := h.evaluateRaw([]byte("not json"), ""); got.status != 400 {
+		t.Errorf("invalid body: expected 400, got %d", got.status)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Errorf("invalid body: expected 400, got %d", resp.StatusCode)
+}
+
+func TestOperatorBodiesMustBeJSON(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	a := h.createPending("02:00:00:00:00:01", "192.168.1.10", "x.example")
+	status, _ := h.request(http.MethodPost, "/actions/"+a.ID+"/approve", testOperatorToken, []byte("{"),
+		map[string]string{actorHeader: testActor})
+	if status != http.StatusBadRequest {
+		t.Fatalf("malformed body: %d", status)
+	}
+	if got := h.action(a.ID); got.State != events.StatePending {
+		t.Fatalf("a malformed approve changed the action: %s", got.State)
 	}
 }

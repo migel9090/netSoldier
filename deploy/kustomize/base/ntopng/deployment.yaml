@@ -13,6 +13,7 @@ spec:
         app.kubernetes.io/name: ntopng
     spec:
       serviceAccountName: ntopng
+      automountServiceAccountToken: false
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       # ntopng starts as root to open the capture socket and immediately drops
@@ -82,7 +83,7 @@ spec:
               mountPath: /tmp
         # hostNetwork pod: redis must stay loopback-only
         - name: redis
-          image: redis:7-alpine
+          image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
           args:
             - "--bind"
             - "127.0.0.1"
@@ -110,6 +111,10 @@ spec:
             periodSeconds: 2
             failureThreshold: 15
           livenessProbe:
+            exec:
+              command: ["redis-cli", "-h", "127.0.0.1", "ping"]
+            periodSeconds: 10
+          readinessProbe:
             exec:
               command: ["redis-cli", "-h", "127.0.0.1", "ping"]
             periodSeconds: 10

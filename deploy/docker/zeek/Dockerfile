@@ -14,7 +14,7 @@
 # docs/adr/0003-first-party-ja4.md. Golden test: test/run.sh.
 #
 # amd64 only: Zeek runs solely on the proxmox-soc (x86) profile.
-FROM zeek/zeek:8.0.8
+FROM zeek/zeek:8.0.8@sha256:cc06c95fa3214786f576aff720e91455160864fbc4ad855a348fa831c63f1653
 
 USER root
 

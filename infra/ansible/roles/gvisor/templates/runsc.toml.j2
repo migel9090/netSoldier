@@ -1,0 +1,8 @@
+# Managed by Ansible (infra/ansible/roles/gvisor). Options for
+# containerd-shim-runsc-v1; [runsc_config] entries become runsc flags.
+binary_name = "{{ gvisor_install_dir }}/runsc"
+
+[runsc_config]
+{% for flag, value in gvisor_runsc_flags.items() %}
+  {{ flag }} = "{{ value }}"
+{% endfor %}

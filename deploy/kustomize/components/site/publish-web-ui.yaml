@@ -1,0 +1,17 @@
+# The web UI for the LAN: port 3000 on the node's LAN address only, plain
+# HTTP until TLS is set up (WEB_UI_ORIGIN must say http:// then). Only the
+# first port (`http`) is published: the metrics port (9464) gets no hostPort
+# and is not reachable from the LAN, and the UI port answers /metrics with
+# 404.
+- op: test
+  path: /spec/template/spec/containers/0/name
+  value: web-ui
+- op: test
+  path: /spec/template/spec/containers/0/ports/0/name
+  value: http
+- op: add
+  path: /spec/template/spec/containers/0/ports/0/hostPort
+  value: 3000
+- op: add
+  path: /spec/template/spec/containers/0/ports/0/hostIP
+  value: "site:NODE_LAN_IP"

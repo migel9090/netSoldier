@@ -94,19 +94,25 @@ spec:
     # is not working.
     - name: netsoldier.silent-failures
       rules:
+        # Off is the default and a choice (POLICY_AUTO_BLOCK absent or off),
+        # not a failure: alert only when a site switched automation on and
+        # the killswitch is holding it back.
         - alert: KillswitchAutoBlockDisabled
-          expr: killswitch_auto_block_enabled == 0
+          expr: killswitch_auto_block_configured == 1 and killswitch_auto_block_enabled == 0
           for: 10m
           labels:
             severity: warning
           annotations:
-            summary: "Killswitch auto-block is disabled"
+            summary: "Killswitch auto-block is switched on but held back"
             description: >-
-              The killswitch is queueing every action for human approval
-              because its allowlist is empty. Nothing is protected from
-              enforcement — including the router — so automatic blocking has
-              been refused by design. Populate ALLOWLIST_MACS/ALLOWLIST_IPS
-              (killswitch-allowlist ConfigMap) to re-enable it.
+              POLICY_AUTO_BLOCK=on, yet the killswitch is queueing every
+              action for human approval: its allowlist is empty (and
+              POLICY_ALLOW_EMPTY_ALLOWLIST is not set), or protection entries
+              were rejected at start-up (ALLOWLIST_ON_INVALID=pending-only).
+              GET /policy names the reason (auto_block_disabled_reason). Fix
+              ALLOWLIST_IPS / ALLOWLIST_MACS in the site's site.env (ConfigMap
+              netsoldier-site), or set POLICY_AUTO_BLOCK=off if automatic
+              blocking is not wanted.
 
         - alert: KillswitchAllowlistEmpty
           expr: killswitch_allowlist_entries == 0

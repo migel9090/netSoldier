@@ -9,9 +9,10 @@ then move to the S3 `cold` volume (in-cluster Garage, bucket
 horizon. Queries read both tiers transparently.
 
 Since step 124 the high-volume tables are partitioned by month
-(`audit_log` by year), so both the tier move and the delete operate on whole
-partitions instead of rewriting parts. See **DM-11** for applying that
-migration to an existing deployment.
+(`audit_log` by year; `device_events` since step 125.8), so both the tier
+move and the delete operate on whole partitions instead of rewriting parts.
+Since step 125.8 `audit_log.timestamp` and `device_events.timestamp` are
+`DateTime64(3)`. The schema is owned by the migration Job: see **DM-11**.
 
 | Table | Hot (local) | Delete | Engine | Notes |
 |-------|------------|--------|--------|-------|
@@ -40,6 +41,23 @@ ClickHouse enforces TTL automatically during merges and background moves.
 No manual cleanup is needed under normal operation. Inserts never touch
 S3 (`perform_ttl_move_on_insert=false`): if Garage is down, ingest
 continues hot-only and moves catch up later.
+
+**Authenticating `clickhouse-client`.** The `kubectl exec ... clickhouse-client`
+commands in this runbook run inside the pod as the local `default`
+administrator, which has a password since step 125.8 (it is refused from any
+other address). Define this once and use `ch` wherever a command below says
+`kubectl exec -n netsoldier clickhouse-0 -- clickhouse-client`; it passes the
+password on stdin, so it never shows up in a process listing:
+
+```bash
+ch() {
+  kubectl -n netsoldier get secret clickhouse-credentials \
+    -o jsonpath='{.data.default-password}' | base64 -d |
+  kubectl -n netsoldier exec -i clickhouse-0 -- sh -c \
+    'read -r CLICKHOUSE_PASSWORD; export CLICKHOUSE_PASSWORD; exec clickhouse-client "$@"' sh "$@"
+}
+ch --query "SELECT version()"
+```
 
 ---
 
@@ -334,90 +352,102 @@ Apply: `sudo systemctl restart systemd-journald`
 
 ---
 
-## DM-11: Apply the partitioning migration (020–022)
+## DM-11: Schema migrations (the clickhouse-migrate Job)
 
-**When:** once, during a maintenance window, after upgrading to the step-124
-release. Also read this before adding any new ClickHouse table.
+**Never apply a migration by hand** (`clickhouse-client < 0NN_*.sql`): the
+runner would not know about it and would apply it again.
 
-**Why:** no table had a `PARTITION BY`, so every TTL expiry rewrote data parts
-instead of dropping a partition. On the Pi profile that lands on a µSD card
-doing ~5 MB/s random write (`docs/performance-baseline.md`), and the S3
-cold-tier move added in step 119 works per-part too. `020_partitioning.sql`
-adds monthly partitions to the five highest-volume tables,
-`021_ml_beacons_history.sql` stops `ml_beacons` collapsing beacon history,
-and `022_feedback_retention.sql` brings `detection_feedback` back in line with
-the documented retention policy.
+**How the schema is owned.** `deploy/clickhouse/migrations/NNN_name.sql` is
+the only copy of the schema. `deploy/clickhouse/migrate.sh` applies the files
+in order with the `migrate` account (the only account allowed DDL) and
+records each one (version, file name, SHA-256) in
+`netsoldier.schema_migrations`. Services do not create tables, and the
+server's `/docker-entrypoint-initdb.d` hook is no longer used. In Kubernetes
+the Job `clickhouse-migrate` runs the script from ConfigMaps generated from
+that directory (`deploy/clickhouse/kustomization.yaml`).
 
-**Prerequisites**
+**When it runs.** On every ArgoCD sync of the proxmox-soc profile, as a Sync
+hook in wave -1: after the ClickHouse StatefulSet, its config, Service and
+NetworkPolicies (wave -2) are Ready, before the services (wave 0). With
+nothing pending it is a no-op that takes seconds. If it fails, the sync fails
+and nothing after it is rolled out.
 
-- A current backup (DM-5 verifies one exists). These migrations copy and swap
-  tables; a failure mid-way leaves the original intact, but take the backup
-  anyway.
-- Free disk ≥ the size of the largest table being migrated, since the copy
-  coexists with the original. Check first:
-
-```bash
-kubectl -n netsoldier exec sts/clickhouse -- clickhouse-client -q "
-  SELECT table, formatReadableSize(sum(bytes_on_disk)) AS size
-  FROM system.parts WHERE database = 'netsoldier' AND active
-  GROUP BY table ORDER BY sum(bytes_on_disk) DESC"
-```
-
-**Steps**
-
-1. Stop the writers so no rows land between the copy and the swap. The
-   services are fail-open: detection continues in memory and resumes writing
-   afterwards.
-
-   ```bash
-   kubectl -n netsoldier scale deploy/detection-engine deploy/device-inventory --replicas=0
-   ```
-
-   Leave `killswitch-controller` running — it only writes `audit_log`, which
-   is migrated last, and you do not want enforcement unavailable during a
-   maintenance window.
-
-2. Apply the migrations in order, one at a time, checking each:
-
-   ```bash
-   for f in 020_partitioning 021_ml_beacons_history 022_feedback_retention; do
-     echo "== $f"
-     kubectl -n netsoldier exec -i sts/clickhouse -- \
-       clickhouse-client --multiquery < deploy/clickhouse/migrations/$f.sql
-   done
-   ```
-
-3. Verify every table now has a partition key and the row counts survived:
-
-   ```bash
-   kubectl -n netsoldier exec sts/clickhouse -- clickhouse-client -q "
-     SELECT name, partition_key, sorting_key
-     FROM system.tables WHERE database = 'netsoldier' AND engine LIKE '%MergeTree%'
-     ORDER BY name FORMAT PrettyCompact"
-   ```
-
-   Every high-volume table should show `toYYYYMM(timestamp)`; `audit_log`
-   shows `toYYYY(timestamp)`. A table with an empty `partition_key` was not
-   migrated — check the client output from step 2 before continuing.
-
-4. Restart the writers and confirm ingest resumes:
-
-   ```bash
-   kubectl -n netsoldier scale deploy/detection-engine deploy/device-inventory --replicas=1
-   kubectl -n netsoldier logs -l app.kubernetes.io/name=detection-engine --tail=20
-   ```
-
-**Rollback:** the migrations use `EXCHANGE TABLES`, which is atomic. If a
-migration failed before its exchange, the original table is untouched and the
-`*_partitioned` copy can simply be dropped:
+Without ArgoCD, the Job is an ordinary resource and a finished Job cannot be
+updated, so delete it before re-applying the profile:
 
 ```bash
-kubectl -n netsoldier exec sts/clickhouse -- clickhouse-client -q "
-  DROP TABLE IF EXISTS netsoldier.dns_queries_partitioned"
+kubectl -n netsoldier delete job clickhouse-migrate --ignore-not-found
+kubectl apply -k deploy/kustomize/overlays/proxmox-soc
+kubectl -n netsoldier wait --for=condition=complete job/clickhouse-migrate --timeout=6h
+kubectl -n netsoldier logs job/clickhouse-migrate
 ```
 
-If it failed *after* an exchange, the old table is now the `*_partitioned`
-name and holds the pre-migration data — exchange it back.
+Outside Kubernetes (Podman, CI, tests), run the same script in place; any
+clickhouse-server image carries the client it needs:
+
+```bash
+podman run --rm --network <clickhouse network> \
+  -v "$PWD/deploy/clickhouse:/opt/migrate:ro" \
+  -e CLICKHOUSE_HOST=clickhouse -e CLICKHOUSE_USER=migrate -e CLICKHOUSE_PASSWORD \
+  --entrypoint /bin/sh clickhouse/clickhouse-server:24.3-alpine \
+  /opt/migrate/migrate.sh            # or: ... migrate.sh status
+```
+
+`migrate.sh status` verifies the checksums and lists applied and pending
+files; it exits 0 when nothing is pending and 3 when something is.
+
+**Check what is applied:**
+
+```bash
+ch --query "SELECT version, name, applied_at, applied_by
+            FROM netsoldier.schema_migrations ORDER BY version FORMAT PrettyCompact"
+```
+
+**Adding a migration**
+
+1. Create `deploy/clickhouse/migrations/NNN_name.sql` with the next unused
+   three-digit number, and add it to `deploy/clickhouse/kustomization.yaml`
+   (kustomize cannot glob; a file missing there never reaches the cluster).
+2. Write it so it can be re-run from its first statement after failing
+   part-way: the runner records a file only when all of it succeeded, and
+   re-applies an unrecorded file from the top. Use `IF [NOT] EXISTS`, and for
+   a rebuild the pattern in 020/021/023: drop a stale staging table, create
+   it, copy, `EXCHANGE TABLES`, drop the old table.
+3. New tables need grants for their clients in
+   `deploy/kustomize/base/clickhouse/configmap.yaml` (`users-override.xml`).
+   A migration that needs a privilege `migrate` lacks extends its grant there.
+4. Never edit a file that has been applied anywhere. The runner refuses to
+   run ("changed after it was applied") until the file matches again.
+
+**Migrations that rebuild tables on a database that holds data** (020, 021,
+023 when upgrading an existing installation; a fresh install has nothing to
+copy and swaps instantly):
+
+- Take a backup first (DM-5).
+- Free disk must exceed the largest table being rebuilt, since the copy
+  coexists with the original (sizes: DM-1).
+- Garage must be reachable and nothing stuck moving to the cold tier
+  (`ch --query "SELECT * FROM system.moves"` is empty; DM-9). A `DROP TABLE`
+  waits for any part move to the `s3_cold` disk in flight on that table, and
+  with Garage unreachable those moves only end when the S3 client gives up
+  retrying; the Job then sits in that statement until it ends or its 6 h
+  deadline expires.
+- Rows written to a table between its copy and its swap are lost with the old
+  table. To rule that out, stop the writers of the rebuilt tables for the
+  sync (with ArgoCD auto-sync paused, or self-heal scales them back up):
+  020 — Vector aggregator, detection-engine, killswitch-controller;
+  021 — ml-anomaly; 023 — killswitch-controller, device-inventory.
+
+**When the Job fails**, its log ends with one `FATAL:` line:
+
+| Message | What to do |
+|---|---|
+| `<file> failed (client exit N)` | Fix the cause shown above the line (disk space, a stuck move, bad SQL in a new file) and sync again. The file is re-applied from the top; leftover staging tables (`*_partitioned`, `*_v2`, `*_023`) are dropped by that re-run, so do not exchange or drop them by hand. |
+| `<file> changed after it was applied` | Restore the file to what was applied (git history) and put the change in a new migration. |
+| `<file> is recorded as applied but ... does not exist` | A migration was deleted or renamed, or is missing from `deploy/clickhouse/kustomization.yaml`. Restore it. |
+| `<file> is new but sorts before ...` | Renumber the new file after the last applied one. |
+| `cannot use ClickHouse ... as migrate (exit 4)` | Authentication: `migrate-password` and `migrate-password-sha256` in `clickhouse-credentials` do not match. The server reads the hashes only at pod start, so restart `clickhouse-0` after changing them. |
+| `... not reachable after Ns` | The server is not Ready, or the `allow-clickhouse-migrate` NetworkPolicy is missing. |
 
 **Note on `ml_beacons`:** migration 021 changes the sort key so each beacon
 observation is kept rather than collapsed to the newest per source→destination

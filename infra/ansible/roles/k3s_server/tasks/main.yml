@@ -1,4 +1,5 @@
 ---
-- ansible.builtin.include_tasks: prereqs.yml
-- ansible.builtin.include_tasks: install.yml
-- ansible.builtin.include_tasks: kubeconfig.yml
+- name: Kernel modules, sysctl, swap
+  ansible.builtin.include_tasks: prereqs.yml
+- name: Install k3s binary, config and service
+  ansible.builtin.include_tasks: install.yml

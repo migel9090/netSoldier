@@ -1,0 +1,11 @@
+# netSoldier lite: detection-engine's local store (SQLite: alerts, the
+# delivery outbox, ingest cursors). Without it undelivered detections are
+# lost on restart.
+[Unit]
+Description=netSoldier lite: volume detection-engine-data
+
+[Volume]
+VolumeName=netsoldier-detection-engine-data
+User=65532
+Group=65532
+Label=app=netsoldier
