@@ -52,16 +52,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	otelEndpoint := envOr(os.Getenv, "OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector.observability.svc:4317")
-	if !tracingEnabled(os.Getenv) {
-		slog.Info("tracing disabled (OTEL_SDK_DISABLED)")
-	} else if tp, err := tracing.Init(ctx, "detection-engine", otelEndpoint); err != nil {
-		slog.Warn("tracing disabled", "error", err)
-	} else {
+	if shutdown := startTracing(ctx, os.Getenv); shutdown != nil {
 		defer func() {
 			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := tp.Shutdown(sctx); err != nil {
+			if err := shutdown(sctx); err != nil {
 				slog.Error("tracer shutdown error", "error", err)
 			}
 		}()
@@ -518,10 +513,33 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// tracingEnabled honours OTEL_SDK_DISABLED, the OpenTelemetry switch for a
-// deployment without a collector: an empty OTEL_EXPORTER_OTLP_ENDPOINT falls
-// back to the in-cluster collector's name, so without this the exporter
-// retried a name that does not resolve and logged every ten seconds.
+// startTracing exports traces only when an OTLP endpoint is configured
+// (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT) and
+// OTEL_SDK_DISABLED does not switch tracing off. Otherwise there is no
+// exporter and nothing dials out; which of the two is said once. It returns
+// the provider's shutdown, or nil when tracing is off.
+func startTracing(ctx context.Context, getenv func(string) string) func(context.Context) error {
+	if !tracingEnabled(getenv) {
+		slog.Info("tracing disabled (OTEL_SDK_DISABLED)")
+		return nil
+	}
+	endpoint := tracing.EndpointFromEnv(getenv)
+	if endpoint == "" {
+		slog.Info("tracing off: OTEL_EXPORTER_OTLP_ENDPOINT is not set")
+		return nil
+	}
+	tp, err := tracing.Init(ctx, "detection-engine", endpoint)
+	if err != nil {
+		slog.Warn("tracing disabled", "error", err)
+		return nil
+	}
+	slog.Info("tracing enabled", "endpoint", endpoint)
+	return tp.Shutdown
+}
+
+// tracingEnabled honours OTEL_SDK_DISABLED, the standard OpenTelemetry
+// switch: true turns tracing off even where an endpoint is configured (an
+// overlay that inherits one, say). Without an endpoint it is off anyway.
 func tracingEnabled(getenv func(string) string) bool {
 	off, err := strconv.ParseBool(strings.TrimSpace(getenv("OTEL_SDK_DISABLED")))
 	return err != nil || !off
