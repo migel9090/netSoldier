@@ -26,6 +26,7 @@ func startKillswitch(t *testing.T, ksBin, agURL string, extra map[string]string)
 	ksAddr := freeAddr(t)
 	env := map[string]string{
 		"LISTEN_ADDR":             ksAddr,
+		"KILLSWITCH_DB_PATH":      ksDBPath(t),
 		"ADGUARD_URL":             agURL,
 		"ADGUARD_USER":            "admin",
 		"ADGUARD_PASSWORD":        "test",

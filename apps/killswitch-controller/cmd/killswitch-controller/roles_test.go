@@ -1,20 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/actions"
-	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/drivers"
-	"github.com/migel9090/netSoldier/apps/killswitch-controller/internal/policy"
 	"github.com/migel9090/netSoldier/libs/events"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // metricValue reads one counter or gauge series from the default registry.
@@ -44,68 +38,26 @@ func metricValue(t *testing.T, name string, labels map[string]string) float64 {
 	return 0
 }
 
-const (
-	testOperatorToken = "operator-token"
-	testIngestToken   = "ingest-token"
-	testWebhookSecret = "wh-secret"
-)
-
 // roleEnv is the production routing behind the production middleware.
 type roleEnv struct {
-	srv   *httptest.Server
-	store *actions.Store
-	drv   *recordingDriver
+	*harness
+	drv *recordingDriver
 }
 
 func newRoleEnv(t *testing.T) *roleEnv {
 	t.Helper()
-	pol := policy.DefaultPolicy()
-	if err := pol.Allowlist.AddIP("192.168.1.1"); err != nil {
-		t.Fatal(err)
-	}
-	env := &roleEnv{
-		store: actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{}),
-		drv:   &recordingDriver{},
-	}
-	resolve := func(string) (drivers.Driver, error) { return env.drv, nil }
-
-	mux := http.NewServeMux()
-	mux.HandleFunc(healthRoute, handleHealthz)
-	mux.Handle(metricsRoute, promhttp.Handler())
-	mux.HandleFunc("GET /policy", handleGetPolicy(pol))
-	mux.HandleFunc(evaluateRoute, handleEvaluate(pol, env.store, resolve, newEvaluationLedger(time.Hour)))
-	mux.HandleFunc("GET /allowlist", handleGetAllowlist(pol))
-	mux.HandleFunc("GET /actions/pending", handleListByState(env.store, events.StatePending))
-	mux.HandleFunc("GET /actions/active", handleListByState(env.store, events.StateActive))
-	mux.HandleFunc("GET /actions/{id}", handleGetAction(env.store))
-	mux.HandleFunc("POST /actions/{id}/approve", handleApprove(env.store, resolve))
-	mux.HandleFunc("POST /actions/{id}/reject", handleReject(env.store))
-	mux.HandleFunc("POST /actions/{id}/revert", handleRevert(env.store, resolve))
-
-	env.srv = httptest.NewServer(authMiddleware(
-		credentials{operator: testOperatorToken, ingest: testIngestToken},
-		&events.SignatureVerifier{Secret: testWebhookSecret}, mux))
-	t.Cleanup(env.srv.Close)
-	return env
+	drv := &recordingDriver{}
+	return &roleEnv{harness: newHarness(t, harnessOpts{driver: drv}), drv: drv}
 }
 
 func (e *roleEnv) do(t *testing.T, method, path, token string, body []byte, sign bool) int {
 	t.Helper()
-	req, _ := http.NewRequest(method, e.srv.URL+path, bytes.NewReader(body))
-	req.URL.Opaque = "" // keep the path spelling as written
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
+	hdr := map[string]string{actorHeader: testActor}
 	if sign {
-		req.Header.Set(events.SignatureHeader, events.SignPayload(testWebhookSecret, body))
+		hdr[events.SignatureHeader] = events.SignPayload(testWebhookSecret, body)
 	}
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
-	resp.Body.Close()
-	return resp.StatusCode
+	status, _ := e.request(method, path, token, body, hdr)
+	return status
 }
 
 // TestIngestTokenCannotOperate: one key used to do both jobs, so the
@@ -113,8 +65,7 @@ func (e *roleEnv) do(t *testing.T, method, path, token string, body []byte, sign
 // could approve, reject or revert the actions it had itself submitted.
 func TestIngestTokenCannotOperate(t *testing.T) {
 	env := newRoleEnv(t)
-	a := env.store.Create("DET-x-1", "02:00:00:00:00:01", "192.168.1.50",
-		events.ActionDNSSinkhole, "pending", 3600, false, "evil.example")
+	a := env.createPending("02:00:00:00:00:01", "192.168.1.50", "evil.example")
 
 	wrongRole := map[string]string{"reason": "wrong_role"}
 	for _, ep := range []struct{ method, path string }{
@@ -125,6 +76,8 @@ func TestIngestTokenCannotOperate(t *testing.T) {
 		{http.MethodGet, "/actions/" + a.ID},
 		{http.MethodGet, "/allowlist"},
 		{http.MethodGet, "/policy"},
+		{http.MethodGet, "/audit"},
+		{http.MethodPost, "/agent/v1/poll"},
 	} {
 		before := metricValue(t, "killswitch_rejected_requests_total", wrongRole)
 		if got := env.do(t, ep.method, ep.path, testIngestToken, []byte(`{}`), false); got != http.StatusUnauthorized {
@@ -134,7 +87,7 @@ func TestIngestTokenCannotOperate(t *testing.T) {
 			t.Errorf("%s %s: refusal not counted as wrong_role", ep.method, ep.path)
 		}
 	}
-	if got := env.store.Get(a.ID).State; got != events.StatePending || env.drv.applied.Load() != 0 {
+	if got := env.action(a.ID).State; got != events.StatePending || env.drv.applied.Load() != 0 {
 		t.Fatalf("the ingest token changed an action: state %q, %d applies", got, env.drv.applied.Load())
 	}
 
@@ -176,7 +129,7 @@ func TestPathSpellingsCannotSkipEvaluateChecks(t *testing.T) {
 			env.do(t, http.MethodPost, p, token, body, false)
 		}
 	}
-	if n := len(env.store.ListByState(events.StatePending)) + len(env.store.ListByState(events.StateActive)); n != 0 {
+	if n := env.actionCount(); n != 0 {
 		t.Fatalf("%d actions created without a signature", n)
 	}
 	if env.drv.applied.Load() != 0 {

@@ -79,7 +79,7 @@ func (d *SwitchPortDriver) Name() string { return "switch_acl" }
 func (d *SwitchPortDriver) Apply(ctx context.Context, action *events.EnforcementAction) error {
 	dev, err := d.guard.Vet(action.TargetMAC, action.TargetIP)
 	if err != nil {
-		return err
+		return NotApplied(err)
 	}
 
 	op := "disable_port"
@@ -161,6 +161,9 @@ func (d *SwitchPortDriver) call(ctx context.Context, sr SwitchRequest) error {
 		return nil
 	}
 
+	// The adapter answered and said no: by its contract nothing changed.
+	// A transport error above is different — the request may have been
+	// carried out — and is returned as is.
 	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	return fmt.Errorf("webhook %d: %s", resp.StatusCode, errBody)
+	return NotApplied(fmt.Errorf("webhook %d: %s", resp.StatusCode, errBody))
 }

@@ -41,8 +41,7 @@ func TestAuditCompositesNeverReachAdGuard(t *testing.T) {
 	if err := pol.Allowlist.AddIP("192.168.1.1"); err != nil {
 		t.Fatal(err)
 	}
-	sink := drivers.NewSinkholeDriver(ag.srv.URL, "u", "p")
-	env := newEvalEnvWith(t, pol, func(string) (drivers.Driver, error) { return sink, nil })
+	env := sinkHarness(t, ag, harnessOpts{pol: pol})
 
 	beacon := func(dst string) events.Signal {
 		return events.Signal{Class: events.SignalBeacon, Confidence: 75, Indicator: dst,
@@ -69,7 +68,7 @@ func TestAuditCompositesNeverReachAdGuard(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := env.post(t, tc.ev)
+			got := env.evaluate(tc.ev)
 			if got.Decision.Action != "pending" || got.Action == nil || got.Action.State != events.StatePending {
 				t.Fatalf("got %+v, want a pending action", got)
 			}
@@ -94,9 +93,13 @@ func TestDefaultActionNeverChangesAutoBlock(t *testing.T) {
 	byType := map[string]*recordingDriver{
 		events.ActionDNSSinkhole: {}, events.ActionARPIsolate: {}, events.ActionSwitchACL: {},
 	}
-	env := newEvalEnvWith(t, pol, func(at string) (drivers.Driver, error) { return byType[at], nil })
+	drvs := map[string]drivers.Driver{}
+	for k, v := range byType {
+		drvs[k] = v
+	}
+	env := newHarness(t, harnessOpts{pol: pol, drivers: drvs})
 
-	auto := env.post(t, criticalIoCEvent())
+	auto := env.evaluate(criticalIoCEvent())
 	if auto.Decision.Action != "auto_block" || auto.Action == nil || auto.Action.ActionType != events.ActionDNSSinkhole {
 		t.Fatalf("auto-block must enforce through the DNS sinkhole, got %+v", auto)
 	}
@@ -104,7 +107,7 @@ func TestDefaultActionNeverChangesAutoBlock(t *testing.T) {
 		t.Fatal("only the sinkhole driver may run without a human")
 	}
 
-	held := env.post(t, withDomainTarget(testEvent(60, events.SeverityMedium), "maybe.example"))
+	held := env.evaluate(withDomainTarget(testEvent(60, events.SeverityMedium), "maybe.example"))
 	if held.Action == nil || held.Action.State != events.StatePending || held.Action.ActionType != events.ActionARPIsolate {
 		t.Fatalf("the default action is what a human approves, got %+v", held.Action)
 	}
@@ -120,12 +123,12 @@ func TestPendingOnlyModeCountsEveryWithheldAutoBlock(t *testing.T) {
 	}
 	pol.RejectedEntries = []string{`ALLOWLIST_MACS entry "aa:bb:cc:dd:ee:fg"`}
 	drv := &recordingDriver{}
-	env := newEvalEnvWith(t, pol, func(string) (drivers.Driver, error) { return drv, nil })
+	env := newHarness(t, harnessOpts{pol: pol, driver: drv})
 	label := map[string]string{"reason": policy.WithheldInvalidProtection}
 	before := metricValue(t, "killswitch_auto_block_withheld_total", label)
 
 	ev := criticalIoCEvent()
-	got := env.post(t, ev)
+	got := env.evaluate(ev)
 	if got.Decision.Action != "pending" || got.Decision.Withheld != policy.WithheldInvalidProtection ||
 		got.Action == nil || got.Action.State != events.StatePending {
 		t.Fatalf("got %+v, want a withheld pending action", got)
@@ -133,11 +136,11 @@ func TestPendingOnlyModeCountsEveryWithheldAutoBlock(t *testing.T) {
 	if !strings.Contains(got.Action.PolicyRule, "protection entry was rejected at start-up") {
 		t.Errorf("policy_rule should say why: %q", got.Action.PolicyRule)
 	}
-	if again := env.post(t, ev); !again.Duplicate {
+	if again := env.evaluate(ev); !again.Duplicate {
 		t.Fatalf("repeat delivery: %+v", again)
 	}
-	env.post(t, testEvent(60, events.SeverityMedium)) // would not have auto-blocked anyway
-	env.post(t, criticalIoCEvent())
+	env.evaluate(testEvent(60, events.SeverityMedium)) // would not have auto-blocked anyway
+	env.evaluate(criticalIoCEvent())
 
 	if got := metricValue(t, "killswitch_auto_block_withheld_total", label); got != before+2 {
 		t.Fatalf("withheld counter moved %v → %v, want +2", before, got)
