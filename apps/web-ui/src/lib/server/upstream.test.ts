@@ -11,6 +11,7 @@ describe('route allowlist', () => {
       ['GET', '/api/topology', '/topology'],
       ['GET', '/api/alerts', '/alerts'],
       ['POST', '/api/feedback', '/feedback'],
+      ['POST', '/api/feedback/lift', '/feedback/lift'],
       ['GET', '/api/killswitch/pending', '/actions/pending'],
       ['GET', '/api/killswitch/active', '/actions/active'],
       ['GET', '/api/killswitch/failed', '/actions/failed'],
@@ -66,6 +67,10 @@ describe('route allowlist', () => {
     expect(matchRoute('GET', '/api/devices/aa%253Abb%253Acc%253Add%253Aee%253Aff')).toBeNull()
     expect(matchRoute('GET', '/api/devices/aa:bb:cc:dd:ee:ff/secrets')).toBeNull()
     expect(matchRoute('POST', '/api/killswitch/audit')).toBeNull()
+    // Lifting is a POST; nothing else under /feedback/ is reachable.
+    expect(matchRoute('GET', '/api/feedback/lift')).toBeNull()
+    expect(matchRoute('POST', '/api/feedback/lift/x')).toBeNull()
+    expect(matchRoute('POST', '/api/feedback/other')).toBeNull()
   })
 })
 

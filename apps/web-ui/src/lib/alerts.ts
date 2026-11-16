@@ -1,4 +1,4 @@
-import type { FeedbackVerdict } from './api'
+import { formatTime, type FeedbackVerdict, type LiftRequest } from './api'
 import type { Alert, AlertSignal, DeviceAlert, Suppression } from './types'
 
 /**
@@ -57,11 +57,13 @@ export function signalClasses(a: Alert): string[] {
 // ── False-positive feedback (detection-engine internal/feedback) ──────
 
 /**
- * How long a false-positive verdict suppresses, unless the engine was
- * started with another FEEDBACK_SUPPRESSION_TTL. The engine does not report
- * it, so this is the default, and the page says so.
+ * How long a false-positive verdict suppresses unless the engine was started
+ * with another FEEDBACK_SUPPRESSION_TTL. Only used when nothing better is
+ * known: GET /feedback gives each suppression's `expires_at`.
  */
 export const SUPPRESSION_DAYS = 30
+
+const DAY_MS = 24 * 3600_000
 
 /** The signal class a verdict on this alert is scoped to: the alert's own. */
 export function alertSignalClass(a: Alert): string {
@@ -71,6 +73,71 @@ export function alertSignalClass(a: Alert): string {
 /** The engine's suppression key: indicator, client and class, case-folded. */
 function key(ioc: string | undefined, client: string | undefined, cls: string): string {
   return `${text(ioc).toLowerCase()}|${text(client).toLowerCase()}|${cls}`
+}
+
+/**
+ * True when the engine recorded this alert while a suppression applied: it
+ * is in the history but never reached the killswitch. Only `true` counts;
+ * engines that do not send the field mean "not suppressed".
+ */
+export function isSilenced(a: Pick<Alert, 'suppressed'>): boolean {
+  return a.suppressed === true
+}
+
+/** When a suppression stops silencing, and whether that is only an estimate. */
+export interface SuppressionEnd {
+  at: string
+  /** The engine sent no `expires_at` (it predates it): from the default TTL. */
+  estimated: boolean
+}
+
+export function suppressionEnds(s: Suppression): SuppressionEnd | null {
+  if (s.expires_at && !Number.isNaN(Date.parse(s.expires_at))) {
+    return { at: s.expires_at, estimated: false }
+  }
+  const made = Date.parse(s.timestamp)
+  if (Number.isNaN(made)) return null
+  return { at: new Date(made + SUPPRESSION_DAYS * DAY_MS).toISOString(), estimated: true }
+}
+
+/**
+ * How many days a new verdict will suppress for: the engine's TTL, read off
+ * a suppression it reported (expires_at − timestamp), or null when none
+ * says.
+ */
+export function suppressionDays(suppressions: readonly Suppression[]): number | null {
+  for (const s of suppressions) {
+    const ttl = Date.parse(s.expires_at ?? '') - Date.parse(s.timestamp)
+    if (ttl > 0) return Math.max(1, Math.round(ttl / DAY_MS))
+  }
+  return null
+}
+
+/** "30 days", or "30 days (the detection engine's default)" when it is a guess. */
+export function suppressionPeriod(days: number | null): string {
+  return days === null
+    ? `${SUPPRESSION_DAYS} days (the detection engine's default)`
+    : `${days} day${days === 1 ? '' : 's'}`
+}
+
+/** FNV-1a: a short, stable, id-safe name for an anchor. */
+function anchorHash(s: string): string {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(16).padStart(8, '0')
+}
+
+/** The element id of a suppression's row, for links to it. */
+export function suppressionAnchor(s: Suppression): string {
+  return `suppression-${anchorHash(key(s.matched_ioc, s.client_ip, s.signal_class))}`
+}
+
+/** The element id of an alert's row on the alerts page. */
+export function alertAnchor(a: Pick<Alert, 'id'>): string {
+  return `alert-${anchorHash(a.id)}`
 }
 
 /**
@@ -106,8 +173,11 @@ function deviceWords(name: string, ip: string): string {
   return ip || 'every device'
 }
 
-/** The confirmation asked before a false-positive verdict. */
-export function falsePositiveQuestion(a: Alert): string {
+/**
+ * The confirmation asked before a false-positive verdict. `days`: how long
+ * the engine suppresses (see suppressionDays), null when unknown.
+ */
+export function falsePositiveQuestion(a: Alert, days: number | null = null): string {
   const c = alertClient(a)
   const device = deviceWords(c.name, c.ip)
   const cls = alertSignalClass(a)
@@ -119,7 +189,7 @@ export function falsePositiveQuestion(a: Alert): string {
     `Signal: ${cls || 'unknown'}`,
     `Device: ${device}`,
     '',
-    `For ${SUPPRESSION_DAYS} days, detections of this indicator (${cls || 'this signal'}) on ` +
+    `For ${suppressionPeriod(days)}, detections of this indicator (${cls || 'this signal'}) on ` +
       `${device} are still listed here but no longer reach the killswitch: nothing will be ` +
       'blocked for them, even if the indicator turns out to be malicious after all.',
   ]
@@ -133,26 +203,58 @@ export function falsePositiveQuestion(a: Alert): string {
   return lines.join('\n')
 }
 
-/** The verdict that lifts a suppression: the engine's "confirmed", which ends it. */
-export function liftVerdict(s: Suppression): FeedbackVerdict {
+/** What "Lift" sends to POST /feedback/lift: exactly this suppression's key. */
+export function liftRequest(s: Suppression): LiftRequest {
   return {
     matched_ioc: s.matched_ioc,
     ...(s.client_ip ? { client_ip: s.client_ip } : {}),
     signal_class: s.signal_class,
-    verdict: 'confirmed',
     reason: 'suppression lifted in the web UI',
   }
 }
 
-export function liftQuestion(s: Suppression): string {
-  const where = s.client_ip ? `on ${s.client_ip}` : 'on every device'
-  return [
-    `Lift the suppression of ${s.matched_ioc} (${s.signal_class}) ${where}?`,
+/** Where a suppression applies, in words. */
+export function suppressionScope(s: Pick<Suppression, 'client_ip'>): string {
+  return s.client_ip ? `on ${s.client_ip}` : 'on every device'
+}
+
+/**
+ * The confirmation asked before lifting. Lifting ends this one suppression
+ * and says nothing about the indicator; `all` (the suppressions in force)
+ * tells whether another one keeps silencing the same detections.
+ */
+export function liftQuestion(s: Suppression, all: readonly Suppression[] = []): string {
+  const same = (o: Suppression) =>
+    o !== s &&
+    o.signal_class === s.signal_class &&
+    text(o.matched_ioc).toLowerCase() === text(s.matched_ioc).toLowerCase()
+  const end = suppressionEnds(s)
+  const lines = [
+    `Lift the suppression of ${s.matched_ioc} (${s.signal_class}) ${suppressionScope(s)}?`,
     '',
-    'Detections of it reach the killswitch again from now on.',
-    'The engine records this as a "confirmed" verdict, which ends this suppression' +
-      (s.client_ip
-        ? ' and any for the same indicator and signal on every device.'
-        : ' and every one for the same indicator and signal on a single device.'),
-  ].join('\n')
+  ]
+  const wide = s.client_ip ? all.find((o) => same(o) && !o.client_ip) : undefined
+  if (wide) {
+    lines.push(
+      `${s.matched_ioc} is also suppressed on every device, and that suppression stays: ` +
+        `detections of it on ${s.client_ip} keep being silenced until it ends too.`,
+    )
+  } else {
+    lines.push(
+      `Detections of it ${suppressionScope(s)} reach the killswitch again from now on, and can ` +
+        'be blocked.',
+    )
+  }
+  const narrow = s.client_ip ? [] : all.filter((o) => same(o) && o.client_ip)
+  if (narrow.length > 0) {
+    lines.push(
+      `Its suppressions on single devices (${narrow.map((o) => o.client_ip).join(', ')}) stay ` +
+        'in force: detections there stay silenced.',
+    )
+  }
+  lines.push(
+    'This ends only this suppression; it does not record the indicator as malicious.' +
+      (end ? ` Otherwise it would end on ${formatTime(end.at)}.` : ''),
+  )
+  return lines.join('\n')
 }

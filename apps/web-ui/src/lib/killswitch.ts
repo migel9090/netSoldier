@@ -1,6 +1,6 @@
 import type { ActionResult } from './api'
 import { formatActionType } from './api'
-import type { AuditEntry, EnforcementAction } from './types'
+import type { AuditEntry, EnforcementAction, KillswitchPolicy } from './types'
 
 /**
  * What an enforcement action means for the household, in the killswitch's
@@ -26,6 +26,32 @@ export function isStillEnforced(a: EnforcementAction): boolean {
 
 export function enforcedSince(a: EnforcementAction): string {
   return a.activated_at || a.timestamp
+}
+
+export type Operation = 'apply' | 'revert'
+
+/** Whether the controller that served this action says what is in flight. */
+export function reportsInFlight(a: Pick<EnforcementAction, 'in_flight'>): boolean {
+  return a.in_flight === 'apply' || a.in_flight === 'revert'
+}
+
+/**
+ * The driver operation outstanding on an action, as the controller reports
+ * it in `in_flight`. A controller that predates the field still implies one
+ * case: an `approved` action always has its apply outstanding. A revert
+ * under way cannot be read from the state at all (the action stays active,
+ * or revert_failed, until it is confirmed).
+ */
+export function operationInFlight(
+  a: Pick<EnforcementAction, 'in_flight' | 'state'>,
+): Operation | null {
+  if (a.in_flight === 'apply' || a.in_flight === 'revert') return a.in_flight
+  return a.state === 'approved' ? 'apply' : null
+}
+
+/** Still in force, and a revert of it is under way: "being lifted". */
+export function isBeingLifted(a: EnforcementAction): boolean {
+  return isStillEnforced(a) && operationInFlight(a) === 'revert'
 }
 
 export interface DeviceRef {
@@ -217,26 +243,59 @@ function waitingFor(actionType: string): string {
 
 /**
  * True once an operation the controller answered with 202 has an outcome:
- * an approve leaves `approved` (for active, apply_failed or revert_failed),
- * a revert leaves `active` (for reverted or revert_failed).
+ * nothing of its kind is in flight any more.
+ *
+ * `inFlightKnown`: the controller reports `in_flight` (it did when it
+ * answered the 202). Only then can a revert be followed: a retried revert of
+ * a revert_failed action stays revert_failed until the retry answers, which
+ * the state cannot tell from a retry that already failed. From a controller
+ * that predates the field, the state is all there is: an approve settles
+ * when the action leaves `approved`, a revert when it leaves `active`.
  */
-export function hasSettled(verb: Verb, a: EnforcementAction): boolean {
-  if (verb === 'approve') return a.state !== 'approved'
-  if (verb === 'revert') return a.state !== 'active'
+export function hasSettled(
+  verb: Verb,
+  a: EnforcementAction,
+  inFlightKnown = reportsInFlight(a),
+): boolean {
+  const op = operationInFlight(a)
+  if (verb === 'approve') return op !== 'apply'
+  if (verb === 'revert') return inFlightKnown ? op !== 'revert' : a.state !== 'active'
   return true
+}
+
+/**
+ * What an operation still in flight is doing, for the "in progress" list.
+ * `verb` is what this page asked for, the fallback for a controller that
+ * does not report `in_flight`.
+ */
+export function progressWords(a: EnforcementAction, verb?: Verb): string {
+  const op = operationInFlight(a) ?? (verb === 'revert' ? 'revert' : verb ? 'apply' : null)
+  if (op === 'revert') {
+    const waiting = a.action_type ? ` — waiting for ${waitingFor(a.action_type)}` : ''
+    return a.state === 'revert_failed'
+      ? `retrying a revert that failed${waiting}; still in force until it is confirmed`
+      : `being lifted${waiting}; still in force until it is confirmed`
+  }
+  if (!a.action_type) return 'approved — checking…'
+  // Every approved action has its apply in flight; whether that waits for
+  // the network agent, the switch or AdGuard is told by the action type.
+  return `being applied as ${formatActionType(a.action_type)} — waiting for ${waitingFor(a.action_type)}; not enforced until confirmed`
 }
 
 /** The action's state in words. */
 export function stateWords(a: EnforcementAction): string {
+  const lifting = operationInFlight(a) === 'revert'
   switch (a.state) {
     case 'pending':
       return 'waiting for approval'
     case 'approved':
       return 'approved, still being applied'
     case 'active':
-      return 'enforced'
+      return lifting ? 'enforced, being lifted (still in force until confirmed)' : 'enforced'
     case 'revert_failed':
-      return 'STILL ENFORCED (a revert failed and is being retried)'
+      return lifting
+        ? 'STILL ENFORCED (a revert failed; a retry is under way)'
+        : 'STILL ENFORCED (a revert failed and is being retried)'
     case 'reverted':
       return 'reverted (lifted)'
     case 'rejected':
@@ -287,10 +346,13 @@ export function describeOutcome(
 
   // 202: the driver has not answered yet. Neither success nor failure.
   if (result.status === 202 && reported && !hasSettled(verb, reported)) {
+    const waiting = `in progress — waiting for ${waitingFor(reported.action_type)}`
     const text =
       verb === 'approve'
-        ? `Approved ${a.id} as ${formatActionType(reported.action_type)}; in progress — waiting for ${waitingFor(reported.action_type)}. Nothing is enforced on ${who} until it does.`
-        : `Reverting ${a.id}: in progress — waiting for ${waitingFor(reported.action_type)}. The block on ${who} stays in force until then.`
+        ? `Approved ${a.id} as ${formatActionType(reported.action_type)}; ${waiting}. Nothing is enforced on ${who} until it does.`
+        : reported.state === 'revert_failed'
+          ? `Retrying the revert of ${a.id}: ${waiting}. The block on ${who} stays in force until then.`
+          : `Reverting ${a.id}: ${waiting}. The block on ${who} stays in force until then.`
     return { tone: 'progress', state: reported.state, text, settling: true }
   }
 
@@ -411,18 +473,62 @@ export function describeSettled(verb: Verb, a: EnforcementAction, device: Device
 
 /**
  * Actions approved but not yet confirmed, from the audit log (newest
- * first): those whose most recent transition went to `approved`. They are
- * in no list — GET /actions/active does not include `approved` — so this is
- * how the page finds an approval made elsewhere, or before a reload, while
- * its driver is still working.
+ * first): the transitions to `approved` that are the most recent of their
+ * action. Such actions are in no list — GET /actions/active does not
+ * include `approved`, and `in_flight` does not change that — so this is how
+ * the page finds an approval made elsewhere, or before a reload, while its
+ * driver is still working. The entry says when it was approved.
  */
-export function awaitingConfirmation(entries: readonly AuditEntry[]): string[] {
+export function awaitingConfirmation(entries: readonly AuditEntry[]): AuditEntry[] {
   const latest = new Map<string, AuditEntry>()
   for (const e of entries) {
     const seen = latest.get(e.action_id)
     if (!seen || e.seq > seen.seq) latest.set(e.action_id, e)
   }
-  return [...latest.values()].filter((e) => e.to_state === 'approved').map((e) => e.action_id)
+  return [...latest.values()].filter((e) => e.to_state === 'approved')
+}
+
+// ── Automatic blocking (GET /policy) ──────────────────────────────────
+
+export interface AutoBlockStatus {
+  /** null: the controller did not say. */
+  on: boolean | null
+  /** The controller's own reason, verbatim; '' when it gave none. */
+  reason: string
+  /** Plain words for a reason this UI recognises; '' for any other. */
+  explanation: string
+}
+
+/**
+ * Whether the controller blocks on its own, and why not. The reason is
+ * always shown as the controller gave it: it is free text, and new reasons
+ * appear (POLICY_AUTO_BLOCK, for one) without this UI knowing them.
+ */
+export function autoBlockStatus(
+  p: Pick<KillswitchPolicy, 'auto_block_allowed' | 'auto_block_disabled_reason'>,
+): AutoBlockStatus {
+  const reason =
+    typeof p.auto_block_disabled_reason === 'string' ? p.auto_block_disabled_reason.trim() : ''
+  const on =
+    typeof p.auto_block_allowed === 'boolean' ? p.auto_block_allowed : reason ? false : null
+  return {
+    on,
+    reason: on === false ? reason : '',
+    explanation: on === false ? explain(reason) : '',
+  }
+}
+
+function explain(reason: string): string {
+  if (/POLICY_AUTO_BLOCK/i.test(reason)) {
+    return 'It is switched off in the killswitch settings (POLICY_AUTO_BLOCK).'
+  }
+  if (/allowlist is empty/i.test(reason)) {
+    return 'No device is on the allowlist, so nothing (not even the router) is protected from an automatic block.'
+  }
+  if (/protection entr/i.test(reason)) {
+    return 'Some of the protected-device settings could not be read when the killswitch started.'
+  }
+  return ''
 }
 
 // ── Audit log in words ────────────────────────────────────────────────

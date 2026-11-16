@@ -19,6 +19,7 @@
   import {
     actionTypeChoices,
     approveQuestion,
+    autoBlockStatus,
     awaitingConfirmation,
     defaultChoice,
     describeActor,
@@ -30,6 +31,9 @@
     enforcedSince,
     failureKind,
     hasSettled,
+    isBeingLifted,
+    progressWords,
+    reportsInFlight,
     type ActionTypeChoice,
     type Outcome,
     type Verb,
@@ -56,12 +60,16 @@
    * audit log that have no outcome yet. An `approved` action is in no list
    * (GET /actions/active leaves it out), so it is read by id until it
    * settles. `ours`: started on this page, so its outcome is reported.
+   * `since`: when it was asked for, if known. `inFlightKnown`: the
+   * controller reports `in_flight`, so that — not the state — says when it
+   * is done.
    */
   interface Tracked {
     verb: Verb
     action: EnforcementAction
-    since: Date
+    since: Date | null
     ours: boolean
+    inFlightKnown: boolean
   }
   let tracking: Map<string, Tracked> = $state(new Map())
 
@@ -70,9 +78,33 @@
   let pending = $derived(oldestFirst(pendingRaw))
   let enforced = $derived(newestFirst(activeRaw, enforcedSince))
   let failures = $derived(newestFirst(failedRaw))
-  let inProgress = $derived(
-    [...tracking.values()].sort((a, b) => a.since.getTime() - b.since.getTime()),
-  )
+
+  /**
+   * Still in force with a revert under way. The controller says so in
+   * `in_flight`, whoever started the revert (an operator elsewhere, the TTL
+   * reaper, a retry); from a controller that does not, only a revert this
+   * page started and is still following can be known.
+   */
+  function beingLifted(a: EnforcementAction): boolean {
+    if (isBeingLifted(a)) return true
+    const t = tracking.get(a.id)
+    return !!t && t.verb === 'revert' && !t.inFlightKnown && !reportsInFlight(a)
+  }
+
+  // What is in flight: the operations being followed, and every block the
+  // controller lists as being lifted.
+  let inProgress = $derived.by(() => {
+    const rows = [...tracking.values()]
+    for (const a of enforced) {
+      if (!tracking.has(a.id) && isBeingLifted(a)) {
+        rows.push({ verb: 'revert', action: a, since: null, ours: false, inFlightKnown: true })
+      }
+    }
+    const at = (t: Tracked) => t.since?.getTime() ?? Number.MAX_SAFE_INTEGER
+    return rows.sort((x, y) => at(x) - at(y) || x.action.id.localeCompare(y.action.id))
+  })
+
+  let autoBlock = $derived(policy ? autoBlockStatus(policy) : null)
 
   function device(a: EnforcementAction) {
     return deviceOf(a, names)
@@ -127,11 +159,18 @@
       failedError = message(f.reason, 'Failed to load failures')
     }
     if (audit.status === 'fulfilled') {
-      const found = awaitingConfirmation(audit.value).filter((id) => !tracking.has(id))
+      const found = awaitingConfirmation(audit.value).filter((e) => !tracking.has(e.action_id))
       if (found.length > 0) {
         const next = new Map(tracking)
-        for (const id of found) {
-          next.set(id, { verb: 'approve', action: placeholder(id), since: new Date(), ours: false })
+        for (const e of found) {
+          const at = new Date(e.timestamp)
+          next.set(e.action_id, {
+            verb: 'approve',
+            action: placeholder(e.action_id),
+            since: Number.isNaN(at.getTime()) ? null : at,
+            ours: false,
+            inFlightKnown: false,
+          })
         }
         tracking = next
         await pollTracked()
@@ -171,14 +210,15 @@
         } catch {
           continue // keep it; try again on the next tick
         }
+        const known = !!current && (t.inFlightKnown || reportsInFlight(current))
         if (!current) {
           updates.set(t, null)
-        } else if (hasSettled(t.verb, current)) {
+        } else if (hasSettled(t.verb, current, known)) {
           updates.set(t, null)
           settled = true
           if (t.ours) record(describeSettled(t.verb, current, device(current)))
         } else {
-          updates.set(t, { ...t, action: current })
+          updates.set(t, { ...t, action: current, inFlightKnown: known })
         }
       }
       const next = new Map(tracking)
@@ -211,6 +251,7 @@
           action: result.action,
           since: new Date(),
           ours: true,
+          inFlightKnown: reportsInFlight(result.action),
         })
       }
       if (result.status === 422) void refreshPolicy()
@@ -305,13 +346,6 @@
     return a.auto_approved ? describeActor('auto-policy') : '—'
   }
 
-  function progressText(t: Tracked): string {
-    const a = t.action
-    if (t.verb === 'revert') return 'being lifted — still in force until the controller confirms'
-    if (!a.action_type) return 'approved — checking…'
-    return `being applied as ${formatActionType(a.action_type)} — not enforced until confirmed`
-  }
-
   onMount(() => {
     void load().finally(() => {
       loading = false
@@ -338,6 +372,29 @@
 
 <h1>Killswitch</h1>
 <KillswitchNav />
+
+{#if autoBlock?.on === false}
+  <section class="auto-block auto-block-off" data-testid="auto-block" data-on="false">
+    <p>
+      <strong>Automatic blocking is off.</strong> Nothing is blocked unless someone approves it here:
+      every detection the policy would act on waits in Pending Approvals.
+    </p>
+    {#if autoBlock.explanation}<p>{autoBlock.explanation}</p>{/if}
+    <p class="muted">
+      {#if autoBlock.reason}
+        The killswitch gives this reason:
+        <span class="mono" data-testid="auto-block-reason">{autoBlock.reason}</span>
+      {:else}
+        The killswitch did not say why.
+      {/if}
+    </p>
+  </section>
+{:else if autoBlock?.on === true}
+  <p class="muted auto-block" data-testid="auto-block" data-on="true">
+    Automatic blocking is on: a detection that meets every automatic condition of the policy is
+    blocked by DNS sinkhole without waiting here. Everything else waits for approval.
+  </p>
+{/if}
 
 {#if outcomes.length > 0}
   <section class="outcomes" aria-live="polite">
@@ -513,10 +570,13 @@
             {@const a = t.action}
             <tr data-action-id={a.id} data-state={a.state} data-verb={t.verb}>
               <td class="mono">{a.id}</td>
-              <td>{t.since.toLocaleTimeString()}</td>
+              <td>{t.since ? t.since.toLocaleTimeString() : '—'}</td>
               {@render target(a)}
               <td>{a.action_type ? formatActionType(a.action_type) : '—'}</td>
-              <td><span class="badge badge-medium">in progress</span> {progressText(t)}</td>
+              <td data-testid="progress-what">
+                <span class="badge badge-medium">in progress</span>
+                {progressWords(a, t.verb)}
+              </td>
               <td>{approver(a)}</td>
             </tr>
           {/each}
@@ -555,7 +615,11 @@
                 {@render target(a)}
                 <td>{formatActionType(a.action_type)}</td>
                 <td>
-                  {#if failureKind(a) === 'revert'}
+                  {#if failureKind(a) === 'revert' && beingLifted(a)}
+                    <span class="badge badge-high"
+                      >revert failed — retrying now, still enforced</span
+                    >
+                  {:else if failureKind(a) === 'revert'}
                     <span class="badge badge-high">revert failed — still enforced</span>
                   {:else}
                     <span class="badge badge-medium">apply failed — not enforced</span>
@@ -590,8 +654,13 @@
         </thead>
         <tbody>
           {#each enforced as a (a.id)}
-            {@const reverting = tracking.get(a.id)?.verb === 'revert'}
-            <tr data-action-id={a.id} data-state={a.state}>
+            {@const lifting = beingLifted(a)}
+            <tr
+              data-action-id={a.id}
+              data-state={a.state}
+              data-lifting={lifting ? 'true' : undefined}
+              class:lifting
+            >
               <td class="mono">{a.id}</td>
               <td>{formatTime(enforcedSince(a))}</td>
               <td class="mono" title={a.detection_summary}>{a.blocked_domain || a.detection_id}</td>
@@ -603,8 +672,12 @@
                     >revert failed — still enforced</span
                   >
                 {/if}
-                {#if reverting}
-                  <span class="badge badge-medium">revert in progress</span>
+                {#if lifting}
+                  <span class="badge badge-medium" data-testid="being-lifted"
+                    >{failureKind(a) === 'revert'
+                      ? 'retrying the revert — still in force'
+                      : 'being lifted — still in force'}</span
+                  >
                 {/if}
               </td>
               <td>{a.expires_at ? formatTime(a.expires_at) : 'never'}</td>
@@ -612,7 +685,8 @@
               <td class="actions-cell">
                 <button
                   class="btn-revert"
-                  disabled={busy.has(a.id) || reverting}
+                  disabled={busy.has(a.id) || lifting}
+                  title={lifting ? 'A revert is already under way' : undefined}
                   onclick={() => handleRevert(a)}>Revert</button
                 >
               </td>
@@ -632,6 +706,20 @@
   .progress-section {
     border-left: 3px solid var(--warning);
     padding-left: 1rem;
+  }
+  .auto-block {
+    max-width: 48rem;
+    margin-bottom: 1.5rem;
+  }
+  .auto-block-off {
+    border-left: 3px solid var(--warning);
+    padding-left: 1rem;
+  }
+  .auto-block-off p + p {
+    margin-top: 0.25rem;
+  }
+  tr.lifting td {
+    background: rgba(210, 153, 34, 0.06);
   }
   .warn {
     color: #c0392b;

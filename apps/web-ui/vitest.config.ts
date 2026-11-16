@@ -8,6 +8,7 @@ export default defineConfig({
       // SvelteKit's virtual env module, replaced by a mutable object the
       // tests fill in (see src/testing/env.ts).
       '$env/dynamic/private': resolve('./src/testing/env.ts'),
+      '$app/environment': resolve('./src/testing/app-environment.ts'),
     },
   },
   test: {

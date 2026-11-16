@@ -1,7 +1,8 @@
 /**
  * Prometheus counters for the two things an operator needs to be alerted on:
  * password guessing against the sign-in form, and a backend refusing the
- * web UI's API key. Served as text exposition format on GET /metrics.
+ * web UI's API key. Served as text exposition format on GET /metrics of the
+ * metrics listener (metrics-listener.ts, METRICS_ADDR), not on the UI's port.
  *
  * Every series is pre-initialised to zero, so "no failures yet" is a 0 and
  * not a missing series that an alert rule cannot tell apart from no data.

@@ -6,7 +6,7 @@ import { handle } from './hooks.server'
 import * as loginEndpoint from './routes/api/login/+server'
 import * as logoutEndpoint from './routes/api/logout/+server'
 import { issueDeviceToken } from '$lib/server/device'
-import { resetMetrics } from '$lib/server/metrics'
+import { renderMetrics, resetMetrics } from '$lib/server/metrics'
 import { loginLimiter } from '$lib/server/ratelimit'
 import { env } from './testing/env'
 import { PAGE_CSP, TestBrowser, parseSetCookie, type Endpoints } from './testing/kit'
@@ -153,6 +153,25 @@ describe('configuration', () => {
     const probe = await browser().fetch('/healthz')
     expect(probe.status).toBe(200)
     expect(await probe.json()).toEqual({ status: 'ok' })
+  })
+
+  // This port is published on the LAN; the counters are on the metrics
+  // listener (metrics-listener.ts) only.
+  it('answers /metrics with a 404, signed in or not, configured or not', async () => {
+    const b = browser()
+    const check = async (what: string) => {
+      for (const method of ['GET', 'HEAD', 'POST']) {
+        const res = await b.fetch('/metrics', { method })
+        expect(res.status, `${what} ${method}`).toBe(404)
+        expect(res.headers.get('location'), what).toBeNull()
+        if (method === 'GET') expect(await res.text(), what).not.toContain('netsoldier_webui')
+      }
+    }
+    await check('anonymous')
+    await b.signIn(PASSWORD)
+    await check('signed in')
+    for (const key of Object.keys(env)) delete env[key]
+    await check('unconfigured')
   })
 })
 
@@ -310,7 +329,7 @@ describe('password guessing', () => {
     ).toHaveLength(5)
     expect(lines.at(-1)).toMatchObject({ client: '10.0.0.7', scope: 'client' })
 
-    const metrics = await (await b.fetch('/metrics')).text()
+    const metrics = renderMetrics()
     expect(metrics).toContain('netsoldier_webui_login_failures_total{reason="bad_password"} 5')
     expect(metrics).toContain('netsoldier_webui_login_failures_total{reason="rate_limited"} 1')
 
@@ -549,7 +568,7 @@ describe('API proxy', () => {
     }
     reply = () => ({ status: 401, body: '{}' })
     expect((await b.fetch('/api/devices')).status).toBe(502)
-    const metrics = await (await b.fetch('/metrics')).text()
+    const metrics = renderMetrics()
     expect(metrics).toContain(
       'netsoldier_webui_upstream_errors_total{service="killswitch",kind="auth"} 2',
     )
@@ -637,6 +656,30 @@ describe('API proxy', () => {
       ['/actions/ACT-1/revert', 'Anna K.'],
     ])
     expect(seen[0].body).toBe('{"action_type":"arp_isolate"}')
+  })
+
+  it('lifts a suppression through POST /feedback/lift, as the actor and only with CSRF', async () => {
+    reply = () => ({ status: 200, body: '{"status":"lifted","persisted":true}' })
+    const b = await signedIn('anna')
+    const body = '{"matched_ioc":"evil.example","client_ip":"192.168.1.77","signal_class":"ioc"}'
+    const lift = (headers: Record<string, string>) =>
+      b.fetch('/api/feedback/lift', { method: 'POST', headers, body })
+
+    expect((await lift({})).status).toBe(403)
+    expect(seen).toHaveLength(0)
+
+    const res = await lift({ 'X-CSRF-Token': b.csrf(), 'X-Netsoldier-Actor': 'admin' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ status: 'lifted', persisted: true })
+    expect(seen[0]).toMatchObject({ method: 'POST', url: '/feedback/lift', body })
+    expect(seen[0].headers['x-netsoldier-actor']).toBe('anna')
+    expect(seen[0].headers.authorization).toBe('Bearer detection-key')
+
+    // "No such suppression" is the engine's answer, passed on as such.
+    reply = () => ({ status: 404, body: '{"error":"no such suppression is in force"}' })
+    const gone = await lift({ 'X-CSRF-Token': b.csrf() })
+    expect(gone.status).toBe(404)
+    expect(gone.headers.has('x-netsoldier-upstream-error')).toBe(false)
   })
 
   it('passes the inventory’s X-Total-Count on, and no other backend header', async () => {

@@ -139,8 +139,13 @@ test('a 202 approve is in progress — neither success nor failure — until the
     'in progress — waiting for the network agent to confirm',
   )
   // Not listed as enforced, and not pending any more: only "in progress".
+  // in_flight says "apply" for every approval; who it waits for comes from
+  // the action type.
   const progress = row(page, 'progress-table', 'ACT-e2e-p3')
   await expect(progress).toContainText('not enforced until confirmed')
+  await expect(progress.getByTestId('progress-what')).toContainText(
+    'being applied as ARP Isolation — waiting for the network agent to confirm',
+  )
   await expect(row(page, 'active-table', 'ACT-e2e-p3')).toHaveCount(0)
   await expect(row(page, 'pending-table', 'ACT-e2e-p3')).toHaveCount(0)
 
@@ -190,26 +195,143 @@ test('an approval still in progress is found again after a reload', async ({ pag
   await expect(page.getByTestId('progress-table')).toHaveCount(0)
 })
 
-test('a 202 revert keeps the block listed as in force until the driver confirms', async ({
+// Once with a controller that reports in_flight, once with one that
+// predates it: the page's own revert is followed either way.
+for (const inFlight of [true, false]) {
+  test(`a 202 revert keeps the block listed as in force until the driver confirms${inFlight ? '' : ' (no in_flight)'}`, async ({
+    page,
+    stub,
+  }) => {
+    await stub.set({ slowRevert: ['ACT-e2e-a1'], inFlight })
+    await openKillswitch(page)
+    page.once('dialog', (d) => void d.accept('done with it'))
+    await row(page, 'active-table', 'ACT-e2e-a1').getByRole('button', { name: 'Revert' }).click()
+
+    await expect(outcome(page)).toHaveAttribute('data-state', 'active')
+    await expect(outcome(page)).toHaveClass(/outcome-progress/)
+    await expect(outcome(page)).toContainText('stays in force until then')
+    const active = row(page, 'active-table', 'ACT-e2e-a1')
+    await expect(active.getByTestId('being-lifted')).toHaveText('being lifted — still in force')
+    await expect(active.getByRole('button', { name: 'Revert' })).toBeDisabled()
+    await expect(row(page, 'progress-table', 'ACT-e2e-a1')).toContainText('being lifted')
+
+    await stub.settle('ACT-e2e-a1')
+    await expect(outcome(page)).toHaveAttribute('data-state', 'reverted', SETTLE)
+    await expect(outcome(page)).toContainText('the block on laptop')
+    await expect(active).toHaveCount(0)
+  })
+}
+
+test('a block someone else is lifting shows as being lifted, not as an ordinary block', async ({
   page,
   stub,
 }) => {
-  await stub.set({ slowRevert: ['ACT-e2e-a1'] })
+  // The TTL reaper (or another operator) started a revert the driver has
+  // not confirmed; this page did not start it.
+  await stub.beginRevert('ACT-e2e-a1', 'ttl')
+  await openKillswitch(page)
+  const active = row(page, 'active-table', 'ACT-e2e-a1')
+  await expect(active).toHaveAttribute('data-lifting', 'true')
+  await expect(active.getByTestId('being-lifted')).toHaveText('being lifted — still in force')
+  await expect(active.getByRole('button', { name: 'Revert' })).toBeDisabled()
+  const progress = row(page, 'progress-table', 'ACT-e2e-a1')
+  await expect(progress).toHaveAttribute('data-verb', 'revert')
+  await expect(progress.getByTestId('progress-what')).toContainText(
+    'being lifted — waiting for AdGuard to answer; still in force until it is confirmed',
+  )
+  // Nobody asked from here: nothing to report.
+  await expect(page.getByTestId('outcome')).toHaveCount(0)
+
+  await stub.settle('ACT-e2e-a1')
+  await page.reload()
+  await expect(page.getByTestId('active-table')).toHaveCount(0)
+  await expect(page.getByTestId('progress-table')).toHaveCount(0)
+})
+
+test('without in_flight, an older controller’s active block is shown as it was', async ({
+  page,
+  stub,
+}) => {
+  await stub.set({ inFlight: false })
+  await stub.beginRevert('ACT-e2e-a1', 'ttl')
+  await openKillswitch(page)
+  const active = row(page, 'active-table', 'ACT-e2e-a1')
+  await expect(active).toHaveAttribute('data-state', 'active')
+  await expect(active.getByTestId('being-lifted')).toHaveCount(0)
+  await expect(active.getByRole('button', { name: 'Revert' })).toBeEnabled()
+  await expect(page.getByTestId('progress-table')).toHaveCount(0)
+})
+
+// The state stays revert_failed while a retry runs: only in_flight tells a
+// retry under way from one that failed again.
+test('retrying a failed revert is in progress, not another failure, until it answers', async ({
+  page,
+  stub,
+}) => {
+  await stub.set({ failRevert: ['ACT-e2e-a1'] })
   await openKillswitch(page)
   page.once('dialog', (d) => void d.accept('done with it'))
   await row(page, 'active-table', 'ACT-e2e-a1').getByRole('button', { name: 'Revert' }).click()
+  await expect(outcome(page)).toHaveAttribute('data-state', 'revert_failed')
 
-  await expect(outcome(page)).toHaveAttribute('data-state', 'active')
-  await expect(outcome(page)).toHaveClass(/outcome-progress/)
-  await expect(outcome(page)).toContainText('stays in force until then')
+  // AdGuard is back, but slow.
+  await stub.set({ failRevert: [], slowRevert: ['ACT-e2e-a1'] })
+  page.once('dialog', (d) => void d.accept('try again'))
   const active = row(page, 'active-table', 'ACT-e2e-a1')
-  await expect(active).toContainText('revert in progress')
-  await expect(active.getByRole('button', { name: 'Revert' })).toBeDisabled()
+  await active.getByRole('button', { name: 'Revert' }).click()
+  await expect(outcome(page)).toHaveClass(/outcome-progress/)
+  await expect(outcome(page)).toHaveAttribute('data-state', 'revert_failed')
+  await expect(outcome(page)).toContainText('Retrying the revert of ACT-e2e-a1: in progress')
+  await expect(active.getByTestId('being-lifted')).toHaveText(
+    'retrying the revert — still in force',
+  )
+  await expect(row(page, 'failures-table', 'ACT-e2e-a1')).toContainText(
+    'revert failed — retrying now, still enforced',
+  )
+  await expect(row(page, 'progress-table', 'ACT-e2e-a1')).toContainText(
+    'retrying a revert that failed',
+  )
 
   await stub.settle('ACT-e2e-a1')
   await expect(outcome(page)).toHaveAttribute('data-state', 'reverted', SETTLE)
-  await expect(outcome(page)).toContainText('the block on laptop')
   await expect(active).toHaveCount(0)
+})
+
+test.describe('why automatic blocking is off', () => {
+  test('on: the page says what happens without anyone approving', async ({ page }) => {
+    await openKillswitch(page)
+    const status = page.getByTestId('auto-block')
+    await expect(status).toHaveAttribute('data-on', 'true')
+    await expect(status).toContainText('Automatic blocking is on')
+  })
+
+  test('off for a reason the UI knows: the reason as given, and what it means', async ({
+    page,
+    stub,
+  }) => {
+    await stub.set({ autoBlockReason: 'auto-block disabled: POLICY_AUTO_BLOCK is off' })
+    await openKillswitch(page)
+    const status = page.getByTestId('auto-block')
+    await expect(status).toHaveAttribute('data-on', 'false')
+    await expect(status).toContainText('Automatic blocking is off.')
+    await expect(status).toContainText('Nothing is blocked unless someone approves it here')
+    await expect(status).toContainText(
+      'switched off in the killswitch settings (POLICY_AUTO_BLOCK)',
+    )
+    await expect(status.getByTestId('auto-block-reason')).toHaveText(
+      'auto-block disabled: POLICY_AUTO_BLOCK is off',
+    )
+  })
+
+  test('off for a reason the UI has never heard of: shown verbatim', async ({ page, stub }) => {
+    await stub.set({ autoBlockReason: 'auto-block disabled: maintenance window until 18:00' })
+    await openKillswitch(page)
+    const status = page.getByTestId('auto-block')
+    await expect(status).toContainText('Automatic blocking is off.')
+    await expect(status.getByTestId('auto-block-reason')).toHaveText(
+      'auto-block disabled: maintenance window until 18:00',
+    )
+  })
 })
 
 test('an action someone else already handled: the 409 says so, with its state now', async ({

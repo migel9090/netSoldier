@@ -89,6 +89,14 @@ export const ROUTES: Route[] = [
     pattern: /^\/api\/feedback$/,
     upstream: () => '/feedback',
   },
+  // Ends one suppression. A "confirmed" verdict used to stand in for it,
+  // which records the indicator as a true positive: a different statement.
+  {
+    service: 'detection-engine',
+    method: 'POST',
+    pattern: /^\/api\/feedback\/lift$/,
+    upstream: () => '/feedback/lift',
+  },
   // The fixed killswitch names come before the generic {id} route: matching
   // is first-hit, and {id} would otherwise swallow them (it used to make
   // /api/killswitch/policy unreachable, and would send `audit` to

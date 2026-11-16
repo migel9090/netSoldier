@@ -22,10 +22,17 @@ import type { AddressInfo } from 'node:net'
  *   action's state does not allow gives 409 with the action and an `error`;
  *   a failed revert gives 502 with the action `revert_failed` and an
  *   `error`; `approved` actions are in no list; every transition is in
- *   GET /audit (newest first, `before`, `action_id`).
- * - detection engine: GET /alerts newest first with ?limit=; POST /feedback
- *   needs a signal class (or an alert id it holds) and answers 202 with
- *   `persisted`; a `confirmed` verdict ends the matching suppressions.
+ *   GET /audit (newest first, `before`, `action_id`); every action carries
+ *   `in_flight` (`apply` while approved, `revert` while a revert is under
+ *   way, absent otherwise — or always absent, as from a controller that
+ *   predates it); GET /policy says whether auto-block is allowed and why not.
+ * - detection engine: GET /alerts newest first with ?limit=, `suppressed:
+ *   true` on alerts recorded while silenced (a backend change in progress;
+ *   the real engine does not send it yet); POST /feedback needs a signal
+ *   class (or an alert id it holds) and answers 202 with `persisted`; a
+ *   `confirmed` verdict ends the matching suppressions; POST /feedback/lift
+ *   ends exactly one (200 with `persisted`, 404 when none is in force);
+ *   GET /feedback lists them with `expires_at`.
  * - device inventory: provenance, binding state, `conflict_count` on lists,
  *   `conflicts` on single reads, X-Total-Count.
  */
@@ -70,6 +77,26 @@ export interface Scenario {
   manyConflicts: boolean
   /** GET /policy answers 500 (everything else works). */
   policyDown: boolean
+  /** GET /policy auto_block_disabled_reason; empty: auto-block is allowed. */
+  autoBlockReason: string
+  /** Actions carry `in_flight`; false is a controller that predates it. */
+  inFlight: boolean
+  /** Alert ids the engine recorded while a suppression applied (`suppressed: true`). */
+  silenced: string[]
+  /** GET /feedback sends `expires_at`; false is an engine that predates it. */
+  suppressionExpiry: boolean
+  /** The engine's suppression TTL. */
+  suppressionTtlDays: number
+}
+
+/** A suppression put in place through the control port, `ageMinutes` old. */
+export interface SeededSuppression {
+  matched_ioc: string
+  client_ip?: string
+  signal_class: string
+  analyst?: string
+  reason?: string
+  ageMinutes?: number
 }
 
 export interface Seen {
@@ -132,6 +159,11 @@ const DEFAULT_SCENARIO: Scenario = {
   deviceTotal: null,
   manyConflicts: false,
   policyDown: false,
+  autoBlockReason: '',
+  inFlight: true,
+  silenced: [],
+  suppressionExpiry: true,
+  suppressionTtlDays: 30,
 }
 
 export const INTRUDER_MAC = '02:de:ad:be:ef:01'
@@ -409,7 +441,27 @@ class State {
   }
 
   get alerts() {
-    return this.scenario.alertsShape === 'v1' ? alertsV1(this.base) : alertsV2(this.base)
+    const list: Record<string, unknown>[] =
+      this.scenario.alertsShape === 'v1' ? alertsV1(this.base) : alertsV2(this.base)
+    const silenced = new Set(this.scenario.silenced)
+    return list.map((a) => (silenced.has(String(a.id)) ? { ...a, suppressed: true } : a))
+  }
+
+  /** GET /feedback: each suppression with when it ends. */
+  listedSuppressions() {
+    const ttl = this.scenario.suppressionTtlDays * 24 * 3600_000
+    return this.suppressions.map((s) =>
+      this.scenario.suppressionExpiry
+        ? { ...s, expires_at: new Date(Date.parse(s.timestamp) + ttl).toISOString() }
+        : s,
+    )
+  }
+
+  /** The wire form of an action: `in_flight` from what is outstanding on it. */
+  wire(a: Action): Action {
+    if (!this.scenario.inFlight) return a
+    const op = a.state === 'approved' ? 'apply' : this.reverting.has(a.id) ? 'revert' : ''
+    return op ? { ...a, in_flight: op } : a
   }
 
   reset(s: Partial<Scenario> = {}) {
@@ -593,8 +645,8 @@ function killswitch(
         auto_min_severity: 'critical',
         default_action: 'dns_sinkhole',
         default_ttl: 3600,
-        auto_block_allowed: true,
-        auto_block_disabled_reason: '',
+        auto_block_allowed: state.scenario.autoBlockReason === '',
+        auto_block_disabled_reason: state.scenario.autoBlockReason,
         available_action_types: state.scenario.available,
         pending_ttl_seconds: 86400,
       },
@@ -702,6 +754,29 @@ function killswitch(
   return [404, { error: 'not found' }]
 }
 
+/**
+ * Every action in a killswitch reply in its wire form (with `in_flight`).
+ * Audit entries name theirs by `action_id`, the policy has no `id`: both
+ * are left alone.
+ */
+function wireReply(state: State, payload: unknown): unknown {
+  const isAction = (v: unknown): v is Action =>
+    typeof v === 'object' && v !== null && 'id' in v && 'state' in v && 'action_type' in v
+  if (Array.isArray(payload)) return payload.map((v) => (isAction(v) ? state.wire(v) : v))
+  return isAction(payload) ? state.wire(payload) : payload
+}
+
+/**
+ * A revert started somewhere else — another operator, the TTL reaper, a
+ * retry of a failed revert — and not answered yet: POST /begin-revert {id}.
+ */
+function beginRevert(state: State, id: string, actor = 'ttl'): boolean {
+  const a = state.actions.get(id)
+  if (!a || (a.state !== 'active' && a.state !== 'revert_failed')) return false
+  state.reverting.set(id, { actor, reason: `reverted by ${actor}` })
+  return true
+}
+
 /** What a 202 was waiting for arrives: POST /settle {id, state?}. */
 function settle(state: State, id: string, to?: string): boolean {
   const a = state.actions.get(id)
@@ -725,12 +800,17 @@ function settle(state: State, id: string, to?: string): boolean {
     return true
   }
   const pending = state.reverting.get(id)
-  if (a.state === 'active' && pending) {
+  if ((a.state === 'active' || a.state === 'revert_failed') && pending) {
     state.reverting.delete(id)
-    a.reverted_at = now
-    a.reverted_by = pending.actor
-    a.reason = pending.reason
-    state.move(a, to ?? 'reverted', pending.actor, pending.reason)
+    const target = to ?? 'reverted'
+    if (target === 'reverted') {
+      a.reverted_at = now
+      a.reverted_by = pending.actor
+      a.reason = pending.reason
+    } else {
+      a.failure_reason = 'revert failed: adguard: connection refused'
+    }
+    if (target !== a.state) state.move(a, target, pending.actor, pending.reason)
     return true
   }
   return false
@@ -854,6 +934,42 @@ function feedback(state: State, body: string, headers: http.IncomingHttpHeaders)
   return [202, { status: 'recorded', persisted: state.scenario.persistFeedback }]
 }
 
+const SIGNAL_CLASSES = new Set(['ioc', 'ids-signature', 'tls', 'beacon', 'volumetric', 'composite'])
+
+/** feedback.go HandleLift: ends exactly the one suppression named, 404 when none is in force. */
+function lift(state: State, body: string, headers: http.IncomingHttpHeaders): Reply {
+  let v: Record<string, unknown>
+  try {
+    v = JSON.parse(body)
+  } catch {
+    return [400, { error: 'invalid body' }]
+  }
+  const str = (k: string) => (typeof v[k] === 'string' ? (v[k] as string).trim() : '')
+  const analyst = String(headers['x-netsoldier-actor'] ?? '') || str('analyst')
+  const ioc = str('matched_ioc')
+  const cls = str('signal_class')
+  if (!ioc) return [400, { error: 'matched_ioc required' }]
+  if (!cls) {
+    return [
+      400,
+      { error: 'signal_class required (or the alert_id of an alert this service still holds)' },
+    ]
+  }
+  if (!SIGNAL_CLASSES.has(cls))
+    return [400, { error: `signal_class "${cls}" is not a signal class` }]
+  if (!analyst) return [400, { error: 'analyst required' }]
+  const key = (i: string, c: string, k: string) => `${i.toLowerCase()}|${c.toLowerCase()}|${k}`
+  const want = key(ioc, str('client_ip'), cls)
+  const before = state.suppressions.length
+  state.suppressions = state.suppressions.filter(
+    (s) => key(s.matched_ioc, s.client_ip ?? '', s.signal_class) !== want,
+  )
+  if (state.suppressions.length === before) {
+    return [404, { error: 'no such suppression is in force' }]
+  }
+  return [200, { status: 'lifted', persisted: state.scenario.persistFeedback }]
+}
+
 function listen(server: http.Server): Promise<string> {
   return new Promise((ok) =>
     server.listen(0, '127.0.0.1', () => {
@@ -905,7 +1021,7 @@ export async function startStubs(): Promise<Stubs> {
           body,
           req.headers,
         )
-        return send(res, status, payload, type)
+        return send(res, status, wireReply(state, payload), type)
       }
       if (service === 'device-inventory') {
         const [status, payload, type] = deviceInventory(method, url.pathname, state)
@@ -920,10 +1036,14 @@ export async function startStubs(): Promise<Stubs> {
         return send(res, 200, state.alerts.slice(0, limit))
       }
       if (method === 'GET' && url.pathname === '/feedback') {
-        return send(res, 200, state.suppressions)
+        return send(res, 200, state.listedSuppressions())
       }
       if (method === 'POST' && url.pathname === '/feedback') {
         const [status, payload] = feedback(state, body, req.headers)
+        return send(res, status, payload)
+      }
+      if (method === 'POST' && url.pathname === '/feedback/lift') {
+        const [status, payload] = lift(state, body, req.headers)
         return send(res, status, payload)
       }
       return send(res, 404, { error: 'not found' })
@@ -945,6 +1065,27 @@ export async function startStubs(): Promise<Stubs> {
       return settle(state, id, to)
         ? send(res, 200, state.actions.get(id))
         : send(res, 409, { error: `${id} has nothing outstanding` })
+    }
+    if (req.method === 'POST' && url.pathname === '/begin-revert') {
+      const { id, actor } = JSON.parse(body) as { id: string; actor?: string }
+      return beginRevert(state, id, actor)
+        ? send(res, 200, state.wire(state.actions.get(id)!))
+        : send(res, 409, { error: `${id} is not enforced` })
+    }
+    // Replaces the suppressions in force, as if they had been made earlier
+    // (or lifted behind the page's back, with an empty list).
+    if (req.method === 'POST' && url.pathname === '/suppressions') {
+      const seeded = JSON.parse(body) as SeededSuppression[]
+      state.suppressions = seeded.map((s) => ({
+        matched_ioc: s.matched_ioc,
+        ...(s.client_ip ? { client_ip: s.client_ip } : {}),
+        signal_class: s.signal_class,
+        verdict: 'false_positive',
+        ...(s.reason ? { reason: s.reason } : {}),
+        analyst: s.analyst ?? 'Anna',
+        timestamp: new Date(Date.now() - (s.ageMinutes ?? 60) * 60_000).toISOString(),
+      }))
+      return send(res, 200, state.listedSuppressions())
     }
     if (req.method === 'GET' && url.pathname === '/seen') return send(res, 200, state.seen)
     send(res, 404, { error: 'not found' })
