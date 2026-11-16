@@ -1,3 +1,5 @@
+# The web UI serves its counters on a listener of their own (Service port
+# `metrics`, 9464); its UI port answers /metrics with 404.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -8,6 +10,6 @@ spec:
     matchLabels:
       app.kubernetes.io/name: web-ui
   endpoints:
-    - port: http
+    - port: metrics
       path: /metrics
       interval: 30s

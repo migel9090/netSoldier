@@ -113,10 +113,9 @@ spec:
                   key: api-key
             - name: COMPOSITE_WINDOW
               value: "15m"
-            # No collector in the core stack; overlays/proxmox-soc turns
-            # tracing on and points it at the observability namespace.
-            - name: OTEL_SDK_DISABLED
-              value: "true"
+            # No OTEL_EXPORTER_OTLP_ENDPOINT: the core stack has no
+            # collector, and without an endpoint detection-engine creates no
+            # exporter and dials nothing. overlays/proxmox-soc sets one.
           startupProbe:
             httpGet:
               path: /healthz

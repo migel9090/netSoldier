@@ -3,7 +3,10 @@
 # revocation is held in memory. Recreate, because a site may publish it on a
 # host port (components/site), which two pods on one node cannot share.
 #
-# /metrics is unauthenticated: it is scraped in-cluster and never published.
+# Metrics are served on a listener of their own (METRICS_ADDR, port
+# `metrics`), unauthenticated, and never published: only a NetworkPolicy
+# decides who scrapes them (overlays that run Prometheus admit it). The UI's
+# port, which a site publishes on its LAN, answers /metrics with 404.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,13 +37,23 @@ spec:
       containers:
         - name: web-ui
           image: ghcr.io/migel9090/web-ui:main
+          # `http` stays the first port: components/site publishes ports/0
+          # (and tests its name before it does). `metrics` gets no hostPort.
           ports:
             - name: http
               containerPort: 3000
               protocol: TCP
+            - name: metrics
+              containerPort: 9464
+              protocol: TCP
           env:
             - name: PORT
               value: "3000"
+            # GET /metrics only, on every interface of the pod. A port that
+            # cannot be bound stops the web UI, so `metrics` above and this
+            # value move together.
+            - name: METRICS_ADDR
+              value: ":9464"
             # The exact origin people open (scheme, host, port; no path).
             # It decides the Origin check and whether cookies are Secure.
             - name: ORIGIN

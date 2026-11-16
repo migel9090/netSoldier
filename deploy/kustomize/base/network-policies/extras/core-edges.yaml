@@ -129,6 +129,9 @@ spec:
 ---
 # Metrics scrapes of the core services by Prometheus only (not the whole
 # observability namespace: audit DP-23), and the detection-engine's traces.
+# The web UI's counters are on its metrics listener (9464); its UI port
+# (3000) is not a scrape target and stays admitted from the LAN only
+# (components/site).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -156,7 +159,7 @@ spec:
           protocol: TCP
         - port: 8084
           protocol: TCP
-        - port: 3000
+        - port: 9464
           protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1

@@ -78,8 +78,19 @@ spec:
                 secretKeyRef:
                   name: killswitch-credentials
                   key: webhook-secret
+            # Automatic blocking is the site's decision, never a side effect
+            # of another setting: POLICY_AUTO_BLOCK=on in its site.env, or
+            # absent (= off), in which case every action waits for a human.
+            # Even when on, the killswitch holds automation back while the
+            # allowlist below is empty.
+            - name: POLICY_AUTO_BLOCK
+              valueFrom:
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: POLICY_AUTO_BLOCK
+                  optional: true
             # Protected devices: the site's gateway (by IP and MAC) and its
-            # allowlist. Without an allowlist nothing is auto-blocked.
+            # allowlist. They are never acted against, automation on or off.
             - name: GATEWAY_IP
               valueFrom:
                 configMapKeyRef:

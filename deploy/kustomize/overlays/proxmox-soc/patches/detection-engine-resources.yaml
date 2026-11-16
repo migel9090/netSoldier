@@ -1,6 +1,8 @@
-# The SOC profile has an OpenTelemetry collector: tracing on. The capture
-# settings this patch used to carry (SPAN_INTERFACE, FLOW_IDLE_TIMEOUT,
-# NET_RAW) are gone with the capture itself; flows come from Zeek.
+# The SOC profile has an OpenTelemetry collector: naming its endpoint is what
+# turns tracing on (without one, detection-engine exports nothing). The
+# capture settings this patch used to carry (SPAN_INTERFACE,
+# FLOW_IDLE_TIMEOUT, NET_RAW) are gone with the capture itself; flows come
+# from Zeek.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -12,8 +14,6 @@ spec:
       containers:
         - name: detection-engine
           env:
-            - name: OTEL_SDK_DISABLED
-              value: "false"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "otel-collector.observability.svc:4317"
           resources:

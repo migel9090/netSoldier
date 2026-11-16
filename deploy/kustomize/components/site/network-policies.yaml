@@ -4,6 +4,9 @@
 #
 # Published ports keep the client's source address (the host-port DNAT does
 # not masquerade), so the LAN can be named by its CIDR.
+#
+# The LAN reaches the web UI on its UI port (3000) only, never on its metrics
+# port (9464), which is not published either.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
