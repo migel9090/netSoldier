@@ -30,6 +30,10 @@ import (
 )
 
 func main() {
+	if code, handled := subcommand(os.Args[1:], os.Getenv, time.Now, os.Stdout, os.Stderr); handled {
+		os.Exit(code)
+	}
+
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
 	cfg, err := config.Load(os.Getenv)
