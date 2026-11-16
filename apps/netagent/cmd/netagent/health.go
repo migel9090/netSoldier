@@ -60,6 +60,15 @@ func runHealthCheck(getenv func(string) string, now time.Time, out io.Writer) in
 		return unhealthy("%s was last written %s ago (limit %s): the agent has stopped", path,
 			age.Round(time.Second), maxAge)
 	}
+	// Ahead of the clock by more than the limit is not fresh either. The
+	// agent stamps every write with the current time, so after the clock
+	// steps back its next heartbeat corrects the file; when none comes, the
+	// agent has stopped — and its last file would otherwise pass until the
+	// clock caught up with it.
+	if ahead := h.Time.Sub(now); ahead > maxAge {
+		return unhealthy("%s is stamped %s in the future (limit %s): the clock moved back and the agent "+
+			"has not rewritten it since", path, ahead.Round(time.Second), maxAge)
+	}
 	fmt.Fprintf(out, "healthy: agent %s, health written %s ago\n", h.Agent,
 		max(now.Sub(h.Time), 0).Round(time.Millisecond))
 	return 0
