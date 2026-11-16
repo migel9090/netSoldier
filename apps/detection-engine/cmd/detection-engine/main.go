@@ -116,11 +116,14 @@ func run(ctx context.Context, getenv func(string) string, onListen func(addr str
 		}
 	}
 
-	agClient := adguard.NewClient(
-		env("ADGUARD_URL", "http://adguard-web.dns.svc:3000"),
-		env("ADGUARD_USER", "admin"),
-		env("ADGUARD_PASSWORD", "changeme"),
-	)
+	// No fallback credential: admin/changeme used to be tried whenever the
+	// account was not configured (audit DP-5).
+	agUser, agPass := getenv("ADGUARD_USER"), getenv("ADGUARD_PASSWORD")
+	if agUser == "" || agPass == "" {
+		slog.Error("ADGUARD_USER/ADGUARD_PASSWORD not set — AdGuard will refuse the query-log " +
+			"reads and DNS detection is off until they are")
+	}
+	agClient := adguard.NewClient(env("ADGUARD_URL", "http://adguard-web.dns.svc:3000"), agUser, agPass)
 
 	matcher := iocmatch.New()
 	tlPath := env("THREATLIST_PATH", "/etc/detection-engine/domains.txt")
