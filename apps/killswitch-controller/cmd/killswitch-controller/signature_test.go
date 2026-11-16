@@ -17,6 +17,7 @@ import (
 func newSignedEnv(t *testing.T, autoBlockAllowed bool) *harness {
 	t.Helper()
 	pol := policy.DefaultPolicy()
+	pol.AutoBlock = true
 	if autoBlockAllowed {
 		if err := pol.Allowlist.AddIP("192.168.1.1"); err != nil {
 			t.Fatalf("allowlist: %v", err)

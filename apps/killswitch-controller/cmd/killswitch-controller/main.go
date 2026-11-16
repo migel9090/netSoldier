@@ -42,6 +42,14 @@ var (
 		Name:      "auto_block_enabled",
 		Help:      "1 when automatic enforcement is permitted, 0 when every action needs approval.",
 	})
+	// autoBlockConfigured is the operator's switch. Off is the default and
+	// a choice, so an alert on "auto-block disabled" has to be able to ask
+	// whether it was switched on and is being held back.
+	autoBlockConfigured = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "killswitch",
+		Name:      "auto_block_configured",
+		Help:      "1 when POLICY_AUTO_BLOCK=on asks for automatic enforcement, 0 when it is off.",
+	})
 	rejectedRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "killswitch",
 		Name:      "rejected_requests_total",
@@ -73,9 +81,9 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(allowlistEntries, autoBlockEnabled, rejectedRequests, duplicateEvents,
+	prometheus.MustRegister(allowlistEntries, autoBlockEnabled, autoBlockConfigured, rejectedRequests, duplicateEvents,
 		autoBlockWithheld, protectionEntriesRejected)
-	for _, r := range []string{policy.WithheldEmptyAllowlist, policy.WithheldInvalidProtection} {
+	for _, r := range []string{policy.WithheldAutoBlockOff, policy.WithheldEmptyAllowlist, policy.WithheldInvalidProtection} {
 		autoBlockWithheld.WithLabelValues(r)
 	}
 }
@@ -106,24 +114,33 @@ func main() {
 	defer stop()
 
 	// A protection entry that does not parse means a device the operator
-	// believes is protected is not; that stops the start (see LoadFromEnv).
+	// believes is protected is not; that stops the start, and so does a
+	// POLICY_AUTO_BLOCK that is neither on nor off (see LoadFromEnv).
 	pol, err := policy.LoadFromEnv()
 	if err != nil {
-		slog.Error("refusing to start: invalid protection configuration", "error", err)
+		slog.Error("refusing to start: invalid policy configuration", "error", err)
 		os.Exit(1)
 	}
 
-	// An empty allowlist means NOTHING the operator chose is protected — the
-	// router among them, and this project's own threat model notes that
-	// blocking the router takes the whole network offline. Rather than refuse
-	// to start (which would also stop detection, a worse outcome) the policy
-	// degrades to pending-only: every action still gets queued and audited,
-	// but a human has to approve it.
+	// Automation is the operator's decision (POLICY_AUTO_BLOCK), so off is
+	// said once, not alarmed about. An empty allowlist means NOTHING the
+	// operator chose is protected — the router among them, and this
+	// project's own threat model notes that blocking the router takes the
+	// whole network offline. Rather than refuse to start (which would also
+	// stop detection, a worse outcome) the policy degrades to pending-only:
+	// every action still gets queued and audited, but a human has to approve
+	// it.
+	if !pol.AutoBlock {
+		slog.Info("auto-block is OFF (POLICY_AUTO_BLOCK=off): every action requires human approval; " +
+			"set POLICY_AUTO_BLOCK=on to let the policy sinkhole attested known-bad domains on its own")
+	}
 	switch hold, _ := pol.AutoBlockHold(); {
 	case len(pol.RejectedEntries) > 0:
 		slog.Error("auto-block DISABLED: started with rejected protection entries "+
 			"(ALLOWLIST_ON_INVALID=pending-only); every action requires human approval",
 			"rejected", pol.RejectedEntries)
+	case !pol.AutoBlock:
+		// Said above; the allowlist only matters to automation once it is on.
 	case hold != "":
 		slog.Error("allowlist is EMPTY — auto-block disabled, every action requires " +
 			"human approval. Set ALLOWLIST_MACS/ALLOWLIST_IPS to protect critical " +
@@ -135,6 +152,7 @@ func main() {
 	autoBlockAllowed := pol.AutoBlockEnabled()
 	allowlistEntries.Set(float64(pol.Allowlist.Len()))
 	autoBlockEnabled.Set(boolGauge(autoBlockAllowed))
+	autoBlockConfigured.Set(boolGauge(pol.AutoBlock))
 	protectionEntriesRejected.Set(float64(len(pol.RejectedEntries)))
 
 	agURL := envOr("ADGUARD_URL", "http://adguard-web.dns.svc:3000")
@@ -159,6 +177,7 @@ func main() {
 		"gateway_ip", pol.GatewayIP.String(),
 		"gateway_mac", pol.GatewayMAC,
 		"infrastructure", append(pol.Infrastructure.IPs(), pol.Infrastructure.MACs()...),
+		"auto_block", autoBlockSetting(pol),
 		"auto_block_allowed", autoBlockAllowed,
 	)
 
@@ -427,6 +446,14 @@ func validBearer(header, apiKey string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(header[len(prefix):]), []byte(apiKey)) == 1
+}
+
+// autoBlockSetting is POLICY_AUTO_BLOCK as it was read.
+func autoBlockSetting(pol *policy.Policy) string {
+	if pol.AutoBlock {
+		return policy.AutoBlockOn
+	}
+	return policy.AutoBlockOff
 }
 
 func boolGauge(b bool) float64 {

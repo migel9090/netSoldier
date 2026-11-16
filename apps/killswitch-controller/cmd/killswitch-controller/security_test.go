@@ -14,6 +14,7 @@ import (
 
 func TestSecAllowlistBlocksAllSeverities(t *testing.T) {
 	pol := policy.DefaultPolicy()
+	pol.AutoBlock = true
 	pol.Allowlist.AddMAC("aa:bb:cc:dd:ee:ff")
 	pol.AutoMinConfidence = 0
 	pol.AutoMinSeverity = events.SeverityLow
@@ -40,6 +41,7 @@ func TestSecAllowlistBlocksAllSeverities(t *testing.T) {
 
 func TestSecAllowlistProtectsViaIPAlone(t *testing.T) {
 	pol := policy.DefaultPolicy()
+	pol.AutoBlock = true
 	pol.Allowlist.AddIP("192.168.1.1")
 
 	d := pol.Evaluate(events.DetectionEvent{
@@ -55,6 +57,7 @@ func TestSecAllowlistProtectsViaIPAlone(t *testing.T) {
 
 func TestSecAllowlistProtectsViaMACAlone(t *testing.T) {
 	pol := policy.DefaultPolicy()
+	pol.AutoBlock = true
 	pol.Allowlist.AddMAC("aa:bb:cc:dd:ee:ff")
 
 	d := pol.Evaluate(events.DetectionEvent{

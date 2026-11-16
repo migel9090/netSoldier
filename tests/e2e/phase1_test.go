@@ -84,6 +84,8 @@ func TestPhase1E2E(t *testing.T) {
 		"WEBHOOK_SECRET":          e2eWebhookSecret,
 		"ALLOWLIST_IPS":           "192.168.1.1",
 		"ALLOWLIST_MACS":          "aa:bb:cc:00:00:01",
+		// The allowlist alone no longer enables automation.
+		"POLICY_AUTO_BLOCK": "on",
 	})
 	t.Cleanup(stopKs)
 

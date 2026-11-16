@@ -7,8 +7,11 @@ import (
 	"github.com/migel9090/netSoldier/libs/events"
 )
 
+// newTestPolicy is a policy that may auto-block: switched on, with an
+// allowlist.
 func newTestPolicy() *Policy {
 	p := DefaultPolicy()
+	p.AutoBlock = true
 	_ = p.Allowlist.AddMAC("aa:bb:cc:dd:ee:ff")
 	_ = p.Allowlist.AddIP("192.168.1.1")
 	return p
@@ -163,6 +166,9 @@ func TestDefaultPolicyValues(t *testing.T) {
 	}
 	if p.AutoMinSignals != 1 {
 		t.Errorf("expected AutoMinSignals 1, got %d", p.AutoMinSignals)
+	}
+	if p.AutoBlock {
+		t.Error("the default policy must not enforce without a human")
 	}
 }
 
@@ -444,6 +450,7 @@ func TestUnlabelledEventNeverAutoBlocks(t *testing.T) {
 // to let corroborated heuristics auto-block. The variable is now ignored.
 func TestKnownBadOptOutNoLongerWidens(t *testing.T) {
 	t.Setenv("POLICY_AUTO_REQUIRE_KNOWN_BAD", "false")
+	t.Setenv("POLICY_AUTO_BLOCK", AutoBlockOn)
 	t.Setenv("ALLOWLIST_IPS", "192.168.1.1")
 	p := mustLoad(t)
 	d := p.Evaluate(composite(93, evilDomain,
@@ -459,6 +466,8 @@ func TestKnownBadOptOutNoLongerWidens(t *testing.T) {
 // auto-block to a bare confidence check. A typo must never widen enforcement.
 func TestInvalidSeverityEnvDoesNotWidenPolicy(t *testing.T) {
 	t.Setenv("POLICY_AUTO_SEVERITY", "CRITICAL_TYPO")
+	t.Setenv("POLICY_AUTO_BLOCK", AutoBlockOn)
+	t.Setenv("POLICY_ALLOW_EMPTY_ALLOWLIST", "true")
 	p := mustLoad(t)
 	if p.AutoMinSeverity != events.SeverityCritical {
 		t.Fatalf("invalid severity should fall back to critical, got %q", p.AutoMinSeverity)

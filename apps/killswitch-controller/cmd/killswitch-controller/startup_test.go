@@ -194,6 +194,8 @@ func TestServiceRefusesToStart(t *testing.T) {
 	}{
 		{"allowlist typo", map[string]string{"ALLOWLIST_MACS": "aa:bb:cc:dd:ee:fg"}, `aa:bb:cc:dd:ee:fg`},
 		{"gateway MAC typo", map[string]string{"GATEWAY_MAC": "aa:00:00:00:00:0g"}, `GATEWAY_MAC entry`},
+		// Neither on nor off: guessing either way decides automation.
+		{"auto-block switch misspelt", map[string]string{"POLICY_AUTO_BLOCK": "true"}, `POLICY_AUTO_BLOCK=\"true\"`},
 		{"no ingest token", map[string]string{"KILLSWITCH_INGEST_TOKEN": ""}, "KILLSWITCH_INGEST_TOKEN"},
 		{"no operator token", map[string]string{"KILLSWITCH_API_KEY": ""}, "KILLSWITCH_API_KEY"},
 		{"one key for both roles", map[string]string{"KILLSWITCH_INGEST_TOKEN": "op"}, "same value"},
@@ -263,5 +265,61 @@ func TestPendingOnlyStartIsVisibleInMetrics(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "auto-block DISABLED") {
 		t.Errorf("start-up should say auto-block is disabled:\n%s", out)
+	}
+}
+
+// scrapeMetrics waits for the service at addr and returns its /metrics.
+func scrapeMetrics(t *testing.T, addr string, out *lockedBuffer) string {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get("http://" + addr + "/metrics")
+		if err == nil {
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return string(b)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("service did not come up:\n%s", out)
+	return ""
+}
+
+// TestAutoBlockIsOffUntilSwitchedOn: the shipped start (an allowlist, no
+// POLICY_AUTO_BLOCK) used to enable automation. It now starts with it off,
+// says so once, and the metric that counts what that withholds exists from
+// the first scrape; POLICY_AUTO_BLOCK=on is what enables it.
+func TestAutoBlockIsOffUntilSwitchedOn(t *testing.T) {
+	for _, tc := range []struct {
+		setting, gauge, configured, log string
+	}{
+		{"", "killswitch_auto_block_enabled 0", "killswitch_auto_block_configured 0",
+			"auto-block is OFF (POLICY_AUTO_BLOCK=off)"},
+		{policy.AutoBlockOn, "killswitch_auto_block_enabled 1", "killswitch_auto_block_configured 1",
+			`"auto_block":"on"`},
+	} {
+		t.Run("POLICY_AUTO_BLOCK="+tc.setting, func(t *testing.T) {
+			addr := freeTCPAddr(t)
+			env := secureEnv(addr)
+			env["POLICY_AUTO_BLOCK"] = tc.setting
+			cmd, out := startMain(t, env)
+			t.Cleanup(func() {
+				_ = cmd.Process.Signal(syscall.SIGTERM)
+				_ = cmd.Wait()
+			})
+			metrics := scrapeMetrics(t, addr, out)
+			for _, want := range []string{tc.gauge, tc.configured, "killswitch_allowlist_entries 1",
+				`killswitch_auto_block_withheld_total{reason="auto_block_off"} 0`} {
+				if !strings.Contains(metrics, want) {
+					t.Errorf("/metrics should contain %q", want)
+				}
+			}
+			if !strings.Contains(out.String(), tc.log) {
+				t.Errorf("start-up log should contain %q:\n%s", tc.log, out)
+			}
+			if strings.Contains(out.String(), "allowlist is EMPTY") {
+				t.Errorf("the allowlist is not empty:\n%s", out)
+			}
+		})
 	}
 }

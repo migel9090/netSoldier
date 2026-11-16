@@ -99,7 +99,7 @@ type harness struct {
 }
 
 type harnessOpts struct {
-	pol     *policy.Policy            // default: DefaultPolicy, allowlist 192.168.1.1
+	pol     *policy.Policy            // default: DefaultPolicy, auto-block on, allowlist 192.168.1.1
 	drivers map[string]drivers.Driver // default: dns_sinkhole → driver
 	driver  drivers.Driver            // the default driver, when drivers is nil
 	// driversFor builds the drivers once the store exists (for drivers
@@ -116,6 +116,7 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 	t.Helper()
 	if o.pol == nil {
 		o.pol = policy.DefaultPolicy()
+		o.pol.AutoBlock = true
 		if err := o.pol.Allowlist.AddIP("192.168.1.1"); err != nil {
 			t.Fatal(err)
 		}

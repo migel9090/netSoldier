@@ -56,7 +56,7 @@ func specAutoBlock(p *Policy, ev events.DetectionEvent) bool {
 	if p.AutoMinSignals > 1 && len(classes) > 1 && len(classes) < p.AutoMinSignals {
 		return false
 	}
-	if len(p.RejectedEntries) > 0 || (p.Allowlist.Len() == 0 && !p.AllowEmptyAllowlist) {
+	if !p.AutoBlock || len(p.RejectedEntries) > 0 || (p.Allowlist.Len() == 0 && !p.AllowEmptyAllowlist) {
 		return false
 	}
 	return true
@@ -99,6 +99,7 @@ func genPolicy(r *rand.Rand) *Policy {
 		_ = p.Allowlist.AddMAC("aa:bb:cc:dd:ee:ff")
 	}
 	p.AllowEmptyAllowlist = r.IntN(2) == 0
+	p.AutoBlock = r.IntN(6) > 0
 	if r.IntN(6) == 0 {
 		p.RejectedEntries = []string{`ALLOWLIST_MACS entry "aa:bb:cc:dd:ee:fg"`}
 	}
@@ -281,11 +282,12 @@ func FuzzNoAutoBlockWithoutAttestedDomainTarget(f *testing.F) {
 
 // ---- the auditors' scenarios, in the v2 shape ------------------------------
 
-// auditPolicy is the shipped proxmox-soc posture: corroboration required,
-// the router allowlisted.
+// auditPolicy is the shipped proxmox-soc posture with automation on:
+// corroboration required, the router allowlisted.
 func auditPolicy(t *testing.T) *Policy {
 	t.Helper()
 	p := DefaultPolicy()
+	p.AutoBlock = true
 	p.AutoMinSignals = 2
 	if err := p.Allowlist.AddIP("192.168.1.1"); err != nil {
 		t.Fatal(err)
@@ -412,6 +414,7 @@ func TestAutoBlockIsAlwaysSinkhole(t *testing.T) {
 	for _, def := range genActions {
 		t.Run(def, func(t *testing.T) {
 			t.Setenv("POLICY_DEFAULT_ACTION", def)
+			t.Setenv("POLICY_AUTO_BLOCK", AutoBlockOn)
 			t.Setenv("ALLOWLIST_IPS", "192.168.1.1")
 			p := mustLoad(t)
 
@@ -484,6 +487,7 @@ func TestAttestationComparesCanonicalDomains(t *testing.T) {
 
 func TestEmptyAllowlistWithholdsAutoBlock(t *testing.T) {
 	p := DefaultPolicy()
+	p.AutoBlock = true
 	d := p.Evaluate(feedMatch(95, events.SeverityCritical))
 	if d.Action != "pending" || d.Withheld != WithheldEmptyAllowlist ||
 		!strings.Contains(d.Reason, "auto-block disabled: allowlist is empty") {

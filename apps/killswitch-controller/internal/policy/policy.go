@@ -29,8 +29,15 @@ type Decision struct {
 
 // Labels for Decision.Withheld, also used as metric label values.
 const (
+	WithheldAutoBlockOff      = "auto_block_off"
 	WithheldEmptyAllowlist    = "empty_allowlist"
 	WithheldInvalidProtection = "invalid_protection_config"
+)
+
+// POLICY_AUTO_BLOCK values. Unset means AutoBlockOff.
+const (
+	AutoBlockOn  = "on"
+	AutoBlockOff = "off"
 )
 
 // OnInvalidPendingOnly is the ALLOWLIST_ON_INVALID value that lets the
@@ -49,7 +56,8 @@ const OnInvalidPendingOnly = "pending-only"
 //  3. the event clears AutoMinConfidence / AutoMinSeverity and carries at
 //     least AutoMinSignals distinct signal classes when it is a composite;
 //  4. the client is neither allowlisted nor protected infrastructure;
-//  5. auto-block is enabled service-wide (AutoBlockHold).
+//  5. the operator switched auto-block on (POLICY_AUTO_BLOCK=on) and nothing
+//     holds it service-wide (AutoBlockHold).
 //
 // The automatic path always enforces through the DNS sinkhole. Everything
 // else that clears the thresholds becomes a pending action whose
@@ -68,9 +76,16 @@ type Policy struct {
 	// composite must carry at least this many distinct signal classes.
 	AutoMinSignals int
 
+	// AutoBlock is POLICY_AUTO_BLOCK=on: the operator's explicit consent to
+	// enforcement without a human. Nothing else turns automation on. It used
+	// to follow from a non-empty allowlist, so "never touch this server" —
+	// or an installer protecting the host's own address — switched it on as
+	// a side effect.
+	AutoBlock bool
+
 	// Allowlist is the operator's list of devices that must never be
 	// enforced against. While it is empty auto-block is disabled, unless
-	// AllowEmptyAllowlist says otherwise.
+	// AllowEmptyAllowlist says otherwise; a non-empty one never enables it.
 	Allowlist           Allowlist
 	AllowEmptyAllowlist bool
 
@@ -135,8 +150,21 @@ var validActions = map[string]struct{}{
 // so it is an error that names the entry and stops the service — unless
 // ALLOWLIST_ON_INVALID=pending-only, in which case the policy loads with
 // auto-block disabled and RejectedEntries says why.
+//
+// POLICY_AUTO_BLOCK is the one switch that is neither: a value other than
+// on or off is an error, because falling back to either would guess at the
+// one decision the operator has to make on purpose.
 func LoadFromEnv() (*Policy, error) {
 	p := DefaultPolicy()
+
+	switch v := os.Getenv("POLICY_AUTO_BLOCK"); v {
+	case "", AutoBlockOff:
+	case AutoBlockOn:
+		p.AutoBlock = true
+	default:
+		return nil, fmt.Errorf("POLICY_AUTO_BLOCK=%q: want %q or %q (unset means %q)",
+			v, AutoBlockOn, AutoBlockOff, AutoBlockOff)
+	}
 
 	if v := os.Getenv("POLICY_AUTO_CONFIDENCE"); v != "" {
 		if n, ok := parseConfidence("POLICY_AUTO_CONFIDENCE", v); ok {
@@ -313,7 +341,15 @@ func parseSeverity(key, v string) (string, bool) {
 
 // AutoBlockHold returns why auto-block is disabled for every event, with the
 // matching Withheld label, or two empty strings when it is enabled.
+//
+// The switch comes first: while it is off, that is the reason, and the
+// conditions below only say what would still hold automation back once it is
+// switched on. (Rejected entries stay visible on their own: the start-up log,
+// GET /policy and the protection_entries_rejected gauge report them.)
 func (p *Policy) AutoBlockHold() (reason, label string) {
+	if !p.AutoBlock {
+		return "auto-block disabled: POLICY_AUTO_BLOCK=" + AutoBlockOff, WithheldAutoBlockOff
+	}
 	if n := len(p.RejectedEntries); n > 0 {
 		reason = fmt.Sprintf("auto-block disabled: %d protection entr%s rejected at start-up, ALLOWLIST_ON_INVALID=%s",
 			n, plural(n, "y was", "ies were"), OnInvalidPendingOnly)
