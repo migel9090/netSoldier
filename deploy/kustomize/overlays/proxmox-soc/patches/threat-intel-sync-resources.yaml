@@ -1,14 +1,26 @@
+# The SOC profile runs MISP in-cluster (port 8080, plain HTTP behind
+# NetworkPolicy). Without the API key only MISP is disabled, loudly.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: threat-intel-sync
+  namespace: netsoldier
 spec:
   template:
     spec:
       containers:
         - name: threat-intel-sync
-          securityContext:
-            allowPrivilegeEscalation: false
+          env:
+            - name: MISP_URL
+              value: "http://misp.netsoldier.svc:8080"
+            - name: MISP_ALLOW_INSECURE_HTTP
+              value: "true"
+            - name: MISP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: threat-intel-sync-credentials
+                  key: misp-api-key
+                  optional: true
           resources:
             limits:
               cpu: 300m

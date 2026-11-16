@@ -1,0 +1,82 @@
+# Site `lab`: the core profile on the lab VM (netsoldier-soc), serving the
+# simulated home LAN that infra/ansible/roles/lab_lan builds inside the VM.
+#
+#   infra/lab/deploy.sh     builds the images, generates every Secret, applies
+#   infra/lab/scenario.sh   runs the end-to-end scenario against it
+#
+# The site's values are in site/site.env and nowhere else. What follows them
+# here is lab-only: the indicators the scenario resolves, and timings short
+# enough to watch.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../overlays/core
+  - site/
+
+components:
+  - ../../components/site
+
+labels:
+  - pairs:
+      netsoldier.io/site: lab
+
+patches:
+  # The lab's known-bad indicators. Every name under netsoldier.test resolves
+  # on the simulated LAN (the gateway's resolver answers the zone), so a name
+  # that is blocked and later unblocked visibly resolves again.
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: detection-engine-threatlist
+        namespace: netsoldier
+      data:
+        domains.txt: |
+          # Lab indicators (static list: source "local", confidence 80).
+          pending-c2.netsoldier.test
+          auto-c2.netsoldier.test
+          gateway-c2.netsoldier.test
+  # Short enough to see an action expire within the scenario.
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: killswitch-controller
+        namespace: netsoldier
+      spec:
+        template:
+          spec:
+            containers:
+              - name: killswitch-controller
+                env:
+                  - name: POLICY_DEFAULT_TTL
+                    value: "120"
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: detection-engine
+        namespace: netsoldier
+      spec:
+        template:
+          spec:
+            containers:
+              - name: detection-engine
+                env:
+                  - name: POLL_INTERVAL
+                    value: "10s"
+                  # A repeat of the same detection within the window is
+                  # folded into the first; the scenario repeats its lookups
+                  # on every run.
+                  - name: WEBHOOK_AGGREGATION_WINDOW
+                    value: "1m"
+  # The lab's LAN has no internet: AdGuard's upstream is the simulated
+  # gateway, and no filter list is downloaded.
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-adguard-filter-updates
+        namespace: dns

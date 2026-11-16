@@ -5,10 +5,13 @@ commonLabels:
   app.kubernetes.io/name: detection-engine
   app.kubernetes.io/part-of: netsoldier
 
+# The ServiceMonitor lives in base/observability (it needs the Prometheus
+# Operator's CRDs). The Secrets are generated at deploy time; the
+# *.example.yaml files next to this one only document their keys.
 resources:
   - serviceaccount.yaml
   - configmap.yaml
+  - pvc.yaml
   - deployment.yaml
   - service.yaml
-  - servicemonitor.yaml
   - pdb.yaml

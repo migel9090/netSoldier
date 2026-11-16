@@ -1,0 +1,28 @@
+# Profile `core`: the smallest netSoldier that detects and enforces.
+#
+#   ClickHouse (+ the migration Job), AdGuard Home, threat-intel-sync,
+#   detection-engine, device-inventory, netagent, killswitch-controller,
+#   web-ui, and the NetworkPolicies of exactly these.
+#
+# Not here, by design: the sensors (Suricata, Zeek and their Vector
+# sidecars), RITA, ml-anomaly, MISP, ntopng, Garage and the ClickHouse cold
+# export, fluent-bit, backup, and the observability objects (ServiceMonitors,
+# PrometheusRules, dashboards), which need the Prometheus Operator's CRDs.
+# overlays/proxmox-soc adds them.
+#
+# A profile is not deployable on its own: the site values (interfaces,
+# addresses, the allowlist) come from a site overlay, deploy/kustomize/sites/
+# <site>, which also decides how DNS and the web UI are published. The
+# Secrets are generated at deploy time (infra/lab/deploy.sh for the lab).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/instance: core
+
+resources:
+  # Everything in the netsoldier namespace, in a nested kustomization so its
+  # namespace transformer cannot reach AdGuard's `dns` namespace.
+  - netsoldier/
+  - ../../../adguard/

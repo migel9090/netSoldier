@@ -1,9 +1,14 @@
+# device-inventory parses the frames netagent captures (ADR-0004): an
+# ordinary pod in gVisor, no host network, no capability, no raw socket.
+# One replica with Recreate: the SQLite store has a single writer.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: device-inventory
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: device-inventory
@@ -13,8 +18,9 @@ spec:
         app.kubernetes.io/name: device-inventory
     spec:
       serviceAccountName: device-inventory
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      runtimeClassName: gvisor
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -34,20 +40,57 @@ spec:
               value: ":8081"
             - name: DB_PATH
               value: "/data/devices.db"
+            # Every endpoint but the probes, the metrics and the agent's
+            # ingest needs this key, reads included (contract 5).
+            - name: DEVICE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: device-inventory-credentials
+                  key: api-key
+            # The agent's own credential for POST /agent/v1/frames.
+            - name: NETAGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: netagent-credentials
+                  key: inventory-token
+            # The captures netagent is expected to run; /readyz fails while
+            # no agent heartbeat names them.
+            - name: NETAGENT_EXPECT_CAPTURE
+              value: "dhcp,arp,lldp,mdns,ssdp"
+            - name: NETAGENT_HEARTBEAT_TIMEOUT
+              value: "15s"
+            - name: BINDING_TTL
+              value: "1h"
+            - name: DEVICE_MAX_ROWS
+              value: "5000"
+            - name: CLICKHOUSE_URL
+              value: "http://clickhouse.netsoldier.svc:8123"
+            - name: CLICKHOUSE_DATABASE
+              value: "netsoldier"
+            # Own account: INSERT on devices and device_events, SELECT on the
+            # tables the detail and topology APIs read; no DDL.
+            - name: CLICKHOUSE_USER
+              value: "inventory"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: inventory-password
           startupProbe:
             httpGet:
               path: /healthz
               port: http
             periodSeconds: 2
-            failureThreshold: 15
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
             periodSeconds: 15
+          # Ready = an agent heartbeat arrived within the timeout.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             periodSeconds: 10
           securityContext:
@@ -55,8 +98,6 @@ spec:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
             capabilities:
-              add:
-                - NET_BIND_SERVICE
               drop:
                 - ALL
           resources:
@@ -64,15 +105,17 @@ spec:
               cpu: 250m
               memory: 256Mi
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: 50m
+              memory: 96Mi
           volumeMounts:
             - name: data
               mountPath: /data
             - name: tmp
               mountPath: /tmp
       volumes:
+        # Labels, first-seen times and bindings survive a pod restart.
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: device-inventory-data
         - name: tmp
           emptyDir: {}

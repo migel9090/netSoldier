@@ -1,9 +1,16 @@
+# detection-engine: matches AdGuard's query log and the sensor tables
+# against the indicators and delivers detections to the killswitch through a
+# durable outbox. It captures nothing (ADR-0004): gVisor, no capability.
+# One replica with Recreate: the local store (alerts, outbox, ingest
+# cursors) has a single writer.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: detection-engine
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: detection-engine
@@ -13,6 +20,9 @@ spec:
         app.kubernetes.io/name: detection-engine
     spec:
       serviceAccountName: detection-engine
+      automountServiceAccountToken: false
+      runtimeClassName: gvisor
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -30,6 +40,8 @@ spec:
           env:
             - name: LISTEN_ADDR
               value: ":8080"
+            - name: DB_PATH
+              value: "/var/lib/detection-engine/detection-engine.db"
             - name: ADGUARD_URL
               value: "http://adguard-web.dns.svc:3000"
             - name: ADGUARD_USER
@@ -46,14 +58,71 @@ spec:
               value: "/etc/detection-engine/domains.txt"
             - name: POLL_INTERVAL
               value: "30s"
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "otel-collector.observability.svc:4317"
+            # The site's LAN: orients Suricata alerts and the TLS heuristics.
+            - name: LOCAL_NETWORKS
+              valueFrom:
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: LAN_CIDR
+            - name: CLICKHOUSE_URL
+              value: "http://clickhouse.netsoldier.svc:8123"
+            - name: CLICKHOUSE_DATABASE
+              value: "netsoldier"
+            # Own account: SELECT on the sensor and ML tables it tails,
+            # SELECT and INSERT on detection_feedback, no DDL.
+            - name: CLICKHOUSE_USER
+              value: "detection"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: detection-password
+            # Client IP -> MAC and name for every detection (contract 5).
+            - name: DEVICE_INVENTORY_URL
+              value: "http://device-inventory.netsoldier.svc:8081"
+            - name: DEVICE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: device-inventory-credentials
+                  key: api-key
+            # Base URL only: the sync appends /export/json.
+            - name: THREAT_INTEL_URL
+              value: "http://threat-intel-sync.netsoldier.svc:8083"
+            - name: IOC_SYNC_INTERVAL
+              value: "5m"
+            - name: WEBHOOK_URL
+              value: "http://killswitch-controller.netsoldier.svc:8084/evaluate"
+            # Signature v2 (contract 2) and the INGEST token: valid on POST
+            # /evaluate only, so this service cannot approve its own actions.
+            - name: WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: killswitch-credentials
+                  key: webhook-secret
+            - name: WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: killswitch-credentials
+                  key: ingest-token
+            # Authenticates POST /feedback: a false-positive verdict
+            # suppresses detections before they reach the killswitch.
+            - name: DETECTION_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: detection-engine-credentials
+                  key: api-key
+            - name: COMPOSITE_WINDOW
+              value: "15m"
+            # No collector in the core stack; overlays/proxmox-soc turns
+            # tracing on and points it at the observability namespace.
+            - name: OTEL_SDK_DISABLED
+              value: "true"
           startupProbe:
             httpGet:
               path: /healthz
               port: http
             periodSeconds: 2
-            failureThreshold: 15
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /healthz
@@ -73,20 +142,28 @@ spec:
                 - ALL
           resources:
             limits:
-              cpu: 250m
-              memory: 256Mi
+              cpu: 500m
+              memory: 384Mi
             requests:
-              cpu: 100m
+              cpu: 50m
               memory: 128Mi
           volumeMounts:
             - name: threatlist
               mountPath: /etc/detection-engine
               readOnly: true
+            - name: data
+              mountPath: /var/lib/detection-engine
             - name: tmp
               mountPath: /tmp
       volumes:
         - name: threatlist
           configMap:
             name: detection-engine-threatlist
+        # Alerts, the delivery outbox and the ingest positions survive a
+        # restart; on an unwritable path the service would fall back to
+        # memory (detection_engine_store_durable 0).
+        - name: data
+          persistentVolumeClaim:
+            claimName: detection-engine-data
         - name: tmp
           emptyDir: {}

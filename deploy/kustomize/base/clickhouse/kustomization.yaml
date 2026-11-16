@@ -7,6 +7,9 @@ commonLabels:
   app.kubernetes.io/name: clickhouse
   app.kubernetes.io/part-of: netsoldier
 
+# The server and the migration Job. The cold-tier export to Garage is its own
+# component (base/clickhouse-cold-export), pulled in by the profiles that run
+# Garage.
 resources:
   - serviceaccount.yaml
   - configmap.yaml
@@ -16,6 +19,4 @@ resources:
   # deploy/clickhouse/ (the only copy), and the Job that applies them.
   - ../../../clickhouse
   - migrate-job.yaml
-  - cold-export-cm.yaml
-  - cold-export-cronjob.yaml
   - pdb.yaml

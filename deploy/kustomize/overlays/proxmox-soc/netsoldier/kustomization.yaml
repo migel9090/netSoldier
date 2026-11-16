@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: netsoldier
+
+resources:
+  - ../../../base/fluent-bit
+  - ../../../base/clickhouse-cold-export
+  - ../../../base/misp
+  - ../../../base/ntopng
+  - ../../../base/suricata
+  - ../../../base/zeek
+  - ../../../base/rita
+  - ../../../base/ml-anomaly
+  - ../../../base/observability
+  - ../../../base/backup
+  - ../../../base/network-policies/extras
+
+# Patches to the core workloads go in ../ (they are not in this layer's
+# resources); this layer carries only the extras.

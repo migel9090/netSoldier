@@ -1,3 +1,14 @@
+# AdGuard Home: the household's resolver and the killswitch's DNS sinkhole.
+# Third-party, on the default runtime (ADR-0004 covers the first-party
+# pods). It runs as an unprivileged user with every capability dropped but
+# NET_BIND_SERVICE: the image's binary carries cap_net_bind_service as a file
+# capability, and the kernel refuses to exec a file whose capabilities are
+# not in the bounding set ("operation not permitted"), so this one has to
+# stay even though port 53 could be made unprivileged with a sysctl.
+#
+# How DNS reaches it from the LAN is the site's decision
+# (deploy/kustomize/components/site publishes port 53 on the node's LAN
+# address only).
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -17,37 +28,104 @@ spec:
       labels:
         app.kubernetes.io/name: adguard-home
     spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
       initContainers:
-        - name: init-config
+        # Renders the configuration. Fails closed: no account, a name that
+        # is not a plain identifier, a password that is not a bcrypt hash or
+        # an upstream that is not a plain resolver address stops the pod
+        # before AdGuard can start with it. The stock admin/changeme and the
+        # setup wizard are therefore never reachable.
+        - name: render-config
           image: busybox:1.37
+          command:
+            - sh
+            - -ec
+            - |
+              conf=/opt/adguardhome/conf/AdGuardHome.yaml
+              fail() { echo "FATAL: $*" >&2; exit 1; }
+              case "${ADGUARD_USER:-}" in
+                "" | *[!A-Za-z0-9._-]*) fail "the adguard-users Secret has no plain username" ;;
+              esac
+              case "${ADGUARD_PASSWORD_BCRYPT:-}" in
+                '$2a$'* | '$2b$'* | '$2y$'*) ;;
+                *) fail "the adguard-users Secret's password-bcrypt is not a bcrypt hash" ;;
+              esac
+              echo "$ADGUARD_PASSWORD_BCRYPT" | grep -Eqx '\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}' ||
+                fail "password-bcrypt is malformed"
+
+              if [ ! -s "$conf" ]; then
+                list=""
+                for u in $(echo "${UPSTREAM_DNS:-}" | tr ',' ' '); do
+                  echo "$u" | grep -Eqx '[]A-Za-z0-9.:/_[-]+' || fail "upstream '$u' is not a resolver address"
+                  list="$list    - $u\n"
+                done
+                [ -n "$list" ] || fail "UPSTREAM_DNS (site value) is empty"
+                awk -v list="$list" '/__UPSTREAM_DNS__/ { printf "%s", list; next } { print }' \
+                  /template/AdGuardHome.yaml >"$conf.tmp"
+                mv "$conf.tmp" "$conf"
+                echo "rendered the initial configuration"
+              fi
+
+              # Every start: the users block is the Secret's, whatever the
+              # file held before (AdGuard rewrites the file itself).
+              awk -v user="$ADGUARD_USER" -v hash="$ADGUARD_PASSWORD_BCRYPT" '
+                /^users:/ { print "users:"; print "  - name: " user; print "    password: \"" hash "\""; skip = 1; next }
+                skip && /^[^ \t-]/ { skip = 0 }
+                skip { next }
+                { print }' "$conf" >"$conf.tmp"
+              grep -q '^  - name: ' "$conf.tmp" || fail "no users block rendered"
+              if grep -q '__[A-Z_]*__' "$conf.tmp"; then fail "unsubstituted placeholder"; fi
+              mv "$conf.tmp" "$conf"
+              echo "users rendered from the Secret: $ADGUARD_USER"
+          env:
+            - name: ADGUARD_USER
+              valueFrom:
+                secretKeyRef:
+                  name: adguard-users
+                  key: username
+            - name: ADGUARD_PASSWORD_BCRYPT
+              valueFrom:
+                secretKeyRef:
+                  name: adguard-users
+                  key: password-bcrypt
+            - name: UPSTREAM_DNS
+              valueFrom:
+                configMapKeyRef:
+                  name: netsoldier-site
+                  key: UPSTREAM_DNS
           securityContext:
+            runAsNonRoot: true
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop:
                 - ALL
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              if [ ! -f /opt/adguardhome/conf/AdGuardHome.yaml ]; then
-                cp /tmp/AdGuardHome.yaml /opt/adguardhome/conf/AdGuardHome.yaml
-                echo "Copied initial config"
-              else
-                echo "Config already exists, skipping"
-              fi
+          resources:
+            limits:
+              cpu: 100m
+              memory: 32Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
           volumeMounts:
-            - name: config-source
-              mountPath: /tmp/AdGuardHome.yaml
-              subPath: AdGuardHome.yaml
+            - name: config-template
+              mountPath: /template
+              readOnly: true
             - name: conf
               mountPath: /opt/adguardhome/conf
       containers:
         - name: adguard-home
           image: adguard/adguardhome:v0.107.55
           securityContext:
+            runAsNonRoot: true
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
@@ -59,37 +137,35 @@ spec:
             - name: dns-tcp
               containerPort: 53
               protocol: TCP
-              hostPort: 53
             - name: dns-udp
               containerPort: 53
               protocol: UDP
-              hostPort: 53
             - name: http
               containerPort: 3000
               protocol: TCP
+          # The login page answers without credentials; the API does not.
           startupProbe:
             httpGet:
-              path: /
+              path: /login.html
               port: http
             periodSeconds: 5
-            failureThreshold: 12
+            failureThreshold: 24
           livenessProbe:
             httpGet:
-              path: /
+              path: /login.html
               port: http
             periodSeconds: 30
           readinessProbe:
-            httpGet:
-              path: /
-              port: http
+            tcpSocket:
+              port: dns-tcp
             periodSeconds: 10
           resources:
             limits:
-              cpu: 200m
+              cpu: 300m
               memory: 256Mi
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: 50m
+              memory: 96Mi
           volumeMounts:
             - name: conf
               mountPath: /opt/adguardhome/conf
@@ -98,7 +174,7 @@ spec:
             - name: tmp
               mountPath: /tmp
       volumes:
-        - name: config-source
+        - name: config-template
           configMap:
             name: adguard-config
         - name: tmp

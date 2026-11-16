@@ -1,3 +1,6 @@
+# The web UI's egress to the three backends. Who may reach it is the site's
+# decision: components/site admits the site's LAN (LAN_CIDR) on 3000, and
+# nothing else; without a site nothing reaches it (default-deny).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -9,10 +12,7 @@ spec:
   policyTypes:
     - Ingress
     - Egress
-  ingress:
-    - ports:
-        - port: 3000
-          protocol: TCP
+  ingress: []
   egress:
     - to:
         - podSelector:
@@ -39,6 +39,9 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
       ports:
         - port: 53
           protocol: UDP

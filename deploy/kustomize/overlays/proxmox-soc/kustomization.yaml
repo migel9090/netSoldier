@@ -1,25 +1,24 @@
+# Profile `proxmox-soc`: the core stack plus the sensors, ML, RITA, MISP,
+# ntopng, Garage (cold tier), fluent-bit, backup and the observability
+# objects. Like every profile it needs a site overlay for its site values
+# (deploy/kustomize/sites/<site>, see sites/lab) and Secrets generated at
+# deploy time.
+#
+# Not exercised on the lab (which runs overlays/core), and several of its
+# extras are known not to work as shipped (audit DP-9, DP-11..DP-14, DP-21).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-  - ../../base
-  # fluent-bit lives in base/ but was referenced by neither
-  # base/kustomization.yaml nor this overlay, so the server profile shipped
-  # without log forwarding while the audit recorded it as configured.
-  - ../../base/fluent-bit
-  - ../../base/clickhouse
+  - ../core
+  # The extras that live in the netsoldier namespace, nested so their
+  # namespace transformer does not reach Garage's `storage` namespace.
+  - netsoldier/
   - ../../base/garage
-  - ../../base/misp
-  - ../../base/killswitch-controller
-  - ../../base/threat-intel-sync
-  - ../../base/ntopng
-  - ../../base/suricata
-  - ../../base/zeek
-  - ../../base/rita
-  - ../../base/ml-anomaly
 
-commonLabels:
-  app.kubernetes.io/instance: proxmox-soc
+labels:
+  - pairs:
+      app.kubernetes.io/instance: proxmox-soc
 
 patches:
   - path: patches/detection-engine-resources.yaml

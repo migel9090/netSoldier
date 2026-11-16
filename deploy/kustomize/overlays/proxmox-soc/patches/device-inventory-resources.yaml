@@ -1,37 +1,15 @@
+# Resources only: device-inventory holds no capability on any profile
+# (ADR-0004); netagent captures.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: device-inventory
+  namespace: netsoldier
 spec:
   template:
     spec:
       containers:
         - name: device-inventory
-          env:
-            - name: CLICKHOUSE_URL
-              value: "http://clickhouse.netsoldier.svc:8123"
-            - name: CLICKHOUSE_DATABASE
-              value: "netsoldier"
-            # Own account: INSERT on device_events, SELECT on the flow, DNS
-            # and alert tables the detail/topology APIs read. No DDL, so the
-            # schema comes from the clickhouse-migrate Job, not from here.
-            - name: CLICKHOUSE_USER
-              value: "inventory"
-            - name: CLICKHOUSE_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: clickhouse-credentials
-                  key: inventory-password
-          securityContext:
-            runAsNonRoot: true
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              add:
-                - NET_BIND_SERVICE
-                - NET_RAW
-              drop:
-                - ALL
           resources:
             limits:
               cpu: 500m

@@ -1,23 +1,17 @@
+# NetworkPolicies of the core stack: default-deny plus one allow-list per
+# workload, naming only the edges the code uses. The edges of the optional
+# workloads (sensors, ML, RITA, MISP, ntopng, fluent-bit, backup, cold export,
+# observability) are in extras/, which the profiles that run them include.
+# Site-dependent edges (the LAN, the host network) are in components/site.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
   - default-deny.yaml
+  - clickhouse.yaml
+  - clickhouse-migrate.yaml
   - detection-engine.yaml
   - device-inventory.yaml
   - killswitch-controller.yaml
   - threat-intel-sync.yaml
   - web-ui.yaml
-  - clickhouse.yaml
-  - clickhouse-migrate.yaml
-  - clickhouse-cold-export.yaml
-  - misp-core.yaml
-  - misp-mariadb.yaml
-  - misp-redis.yaml
-  - fluent-bit.yaml
-  - ntopng.yaml
-  - suricata.yaml
-  - zeek.yaml
-  - rita.yaml
-  - ml-anomaly.yaml
-  - backup.yaml

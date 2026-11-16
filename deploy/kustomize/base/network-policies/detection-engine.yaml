@@ -10,6 +10,7 @@ spec:
     - Ingress
     - Egress
   ingress:
+    # /alerts and /feedback through the web UI's proxy.
     - from:
         - podSelector:
             matchLabels:
@@ -17,21 +18,8 @@ spec:
       ports:
         - port: 8080
           protocol: TCP
-    # Metrics scrape only. This used to admit the entire observability
-    # namespace, which also reached POST /feedback — the suppression
-    # endpoint. Narrowed to the Prometheus pod; the endpoint is authenticated
-    # now, but the blast radius should not depend on that alone.
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: observability
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: prometheus
-      ports:
-        - port: 8080
-          protocol: TCP
   egress:
+    # AdGuard's query log (the API, never DNS).
     - to:
         - namespaceSelector:
             matchLabels:
@@ -42,14 +30,7 @@ spec:
       ports:
         - port: 3000
           protocol: TCP
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: observability
-      ports:
-        - port: 4317
-          protocol: TCP
-    # correlator writes + unified sensor ingest reads (step 109)
+    # Sensor and ML ingest, feedback persistence.
     - to:
         - podSelector:
             matchLabels:
@@ -58,7 +39,7 @@ spec:
       ports:
         - port: 8123
           protocol: TCP
-    # device enrichment for the correlator
+    # Client IP -> MAC and name for every detection.
     - to:
         - podSelector:
             matchLabels:
@@ -66,7 +47,7 @@ spec:
       ports:
         - port: 8081
           protocol: TCP
-    # IoC feed sync (iocmatch.SyncLoop)
+    # IoC sync (/export/json).
     - to:
         - podSelector:
             matchLabels:
@@ -74,11 +55,8 @@ spec:
       ports:
         - port: 8083
           protocol: TCP
-    # Enforcement webhook → killswitch /evaluate. This rule was missing, and
-    # with the namespace-wide default-deny on Egress that silently dropped
-    # every detection on its way to the killswitch: the controller's ingress
-    # allowed detection-engine, but NetworkPolicy needs both halves. The
-    # detection → response path was severed in the shipped manifests.
+    # Enforcement webhook -> killswitch POST /evaluate. Without this half
+    # the killswitch's ingress rule alone admits nothing.
     - to:
         - podSelector:
             matchLabels:
@@ -90,6 +68,9 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
       ports:
         - port: 53
           protocol: UDP

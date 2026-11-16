@@ -1,0 +1,72 @@
+# NetworkPolicies of the dns namespace (audit DP-23: it had none). The
+# LAN-facing edges depend on the site and live in
+# deploy/kustomize/components/site: DNS from the LAN, and AdGuard's queries
+# to the site's upstream resolvers.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: dns
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# The API on 3000: the two services that drive AdGuard, nothing else. The
+# detection-engine reads the query log; the killswitch writes block rules.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-adguard-api
+  namespace: dns
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: adguard-home
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: netsoldier
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: detection-engine
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: netsoldier
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: killswitch-controller
+      ports:
+        - port: 3000
+          protocol: TCP
+---
+# Filter-list downloads (the lists in adguard-config) over HTTPS to public
+# addresses. A site that ships no lists drops this policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-adguard-filter-updates
+  namespace: dns
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: adguard-home
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10
+      ports:
+        - port: 443
+          protocol: TCP
