@@ -1,0 +1,10 @@
+---
+# The lite profile on the lab host through the podman_edge role, the path an
+# Ansible user takes (lite.sh install-ansible). The role runs the same
+# deploy/podman/netsoldier-lite as the plain install.
+- name: "Lab host: netSoldier lite through podman_edge"
+  hosts: all
+  become: true
+  gather_facts: false
+  roles:
+    - role: podman_edge

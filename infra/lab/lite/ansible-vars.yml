@@ -1,0 +1,20 @@
+---
+# podman_edge variables for the lab host: the same values as
+# netsoldier.lab.conf (host/lan.sh's simulated LAN, images built on the host).
+podman_edge_settings:
+  LAN_INTERFACE: nslab0
+  HOST_IP: 192.168.77.2
+  GATEWAY_IP: 192.168.77.1
+  GATEWAY_MAC: "02:00:5e:77:00:01"
+  LAN_NETWORKS: 192.168.77.0/24
+  PROTECTED_MACS: ""
+  PROTECTED_IPS: ""
+  BLOCK_TTL: 240
+  IMAGE_PREFIX: localhost/netsoldier
+  IMAGE_TAG: lab
+
+# Known-bad for the scenario (host/scenario.sh).
+podman_edge_local_indicators:
+  - example.com
+  - example.net
+  - example.org

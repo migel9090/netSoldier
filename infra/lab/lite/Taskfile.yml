@@ -1,0 +1,74 @@
+version: '3'
+
+# The lite profile (Podman + Quadlets) on the LXC lab host, with a simulated
+# home LAN inside it. Included by the root Taskfile as `lite:`; every task
+# runs lite.sh, which works over SSH (LITE_HOST is required; LITE_USER,
+# LITE_SSH_KEY, LITE_SRC, LITE_TAG have defaults; see lib.sh):
+#   LITE_HOST=192.0.2.10 task lite:e2e
+
+vars:
+  LITE_SH: '{{.TASKFILE_DIR}}/lite.sh'
+
+tasks:
+  sync:
+    desc: Copy the working tree to the lab host (LITE_SRC)
+    cmds:
+      - '{{.LITE_SH}} sync'
+
+  build:
+    desc: Build the six netSoldier images on the lab host with Podman
+    deps: [sync]
+    cmds:
+      - '{{.LITE_SH}} build'
+
+  lan:up:
+    desc: Create the simulated home LAN (bridge, router with DHCP, victim)
+    cmds:
+      - '{{.LITE_SH}} lan-up'
+
+  lan:down:
+    desc: Remove the simulated home LAN
+    cmds:
+      - '{{.LITE_SH}} lan-down'
+
+  install:
+    desc: Install the profile with deploy/podman/netsoldier-lite and netsoldier.lab.conf
+    deps: [sync]
+    cmds:
+      - '{{.LITE_SH}} install'
+
+  install:ansible:
+    desc: Install the profile through the podman_edge Ansible role (needs task lab:tools)
+    cmds:
+      - '{{.LITE_SH}} install-ansible'
+
+  uninstall:
+    desc: Remove the profile (images kept) and check that nothing else is left
+    cmds:
+      - '{{.LITE_SH}} uninstall'
+
+  uninstall:ansible:
+    desc: Remove the profile through podman_edge (images too) and check that nothing is left
+    cmds:
+      - '{{.LITE_SH}} uninstall-ansible'
+
+  scenario:
+    desc: Run the smoke scenario on the installed profile, sampling memory
+    deps: [sync]
+    cmds:
+      - '{{.LITE_SH}} scenario'
+
+  measure:
+    desc: Memory per container, now
+    cmds:
+      - '{{.LITE_SH}} measure'
+
+  e2e:
+    desc: From a clean host - sync, build, uninstall, LAN, install, scenario
+    cmds:
+      - '{{.LITE_SH}} e2e'
+
+  e2e:ansible:
+    desc: The same through podman_edge - absent, build, install twice, scenario
+    cmds:
+      - '{{.LITE_SH}} e2e-ansible'
