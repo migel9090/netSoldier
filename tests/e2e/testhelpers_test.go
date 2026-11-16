@@ -319,7 +319,7 @@ func (m *mockAdGuard) Rules() []string {
 func startMockAdGuard(t *testing.T, entryTime time.Time) *mockAdGuard {
 	t.Helper()
 	return startMockAdGuardWith(t, nil, map[string]any{
-		"question": map[string]string{"host": "evil.example.com", "type": "A"},
+		"question": map[string]string{"name": "evil.example.com", "type": "A"},
 		"client":   "192.168.1.42",
 		"time":     entryTime,
 		"reason":   "FilteredBlackList",

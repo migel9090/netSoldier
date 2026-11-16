@@ -179,11 +179,11 @@ func TestTypedTargetEndToEnd(t *testing.T) {
 	entryTime := time.Now().Add(time.Hour)
 	ag := startMockAdGuardWith(t, ready,
 		map[string]any{
-			"question": map[string]string{"host": "x.evil-ioc.example", "type": "A"},
+			"question": map[string]string{"name": "x.evil-ioc.example", "type": "A"},
 			"client":   "192.168.1.66", "time": entryTime,
 		},
 		map[string]any{
-			"question": map[string]string{"host": "cdn.legit.example", "type": "A"},
+			"question": map[string]string{"name": "cdn.legit.example", "type": "A"},
 			"client":   "192.168.1.67", "time": entryTime.Add(-time.Second),
 			"answer": []map[string]any{{"value": "203.0.113.7", "type": "A", "ttl": 60}},
 		},
