@@ -509,6 +509,12 @@ func TestRunVerdictSurvivesRestartWithoutClickHouse(t *testing.T) {
 	if n := metric(t, addr, "detection_engine_alerts_suppressed_total"); n <= suppressed {
 		t.Fatalf("the detection after the restart was not suppressed (%v -> %v)", suppressed, n)
 	}
+	// The history keeps it, and says it was silenced; the alert the analyst
+	// judged was recorded before the verdict and says nothing.
+	if hist := getAlerts(t, addr); !hist[0].Suppressed || hist[len(hist)-1].Suppressed || hist[len(hist)-1].ID != a.ID {
+		t.Errorf("GET /alerts suppressed marks: newest=%v (%s), oldest=%v (%s); want true for the new lookup only",
+			hist[0].Suppressed, hist[0].ID, hist[len(hist)-1].Suppressed, hist[len(hist)-1].ID)
+	}
 
 	// Lifting it is explicit, authenticated, and lasts across a restart too.
 	anon, err := http.Post("http://"+addr+"/feedback/lift", "application/json",

@@ -149,6 +149,69 @@ func TestSuppressedTriggerIsRecordedNotForwarded(t *testing.T) {
 	}
 }
 
+// TestRecordedAlertsSaySuppressed: a detection silenced by a verdict was
+// recorded exactly like a new one, so the analyst who marked it benign kept
+// seeing "new alerts" for it. Recorded under a verdict, it now says so; one
+// that is not, and a composite that is not, do not.
+func TestRecordedAlertsSaySuppressed(t *testing.T) {
+	recorded := func(h *harness, id string) detection.Alert {
+		t.Helper()
+		for _, a := range h.alerts.alerts {
+			if a.ID == id {
+				return a
+			}
+		}
+		t.Fatalf("alert %s was not recorded", id)
+		return detection.Alert{}
+	}
+
+	t.Run("no verdict", func(t *testing.T) {
+		h := newHarness()
+		a := c2Lookup("192.168.1.50")
+		h.p.Handle(a)
+		if recorded(h, a.ID).Suppressed {
+			t.Error("an alert no verdict applies to is marked suppressed")
+		}
+	})
+
+	t.Run("verdict on the detection", func(t *testing.T) {
+		h := newHarness()
+		_ = h.store.Record(feedback.Verdict{MatchedIoC: "c2.real-threat.example", SignalClass: detection.SignalIoC,
+			Verdict: feedback.VerdictFalsePositive, Analyst: "a"})
+		a := c2Lookup("192.168.1.50")
+		h.p.Handle(a)
+		if !recorded(h, a.ID).Suppressed || len(h.forwarded) != 0 {
+			t.Errorf("recorded %+v, forwarded %d; want it kept, marked suppressed, not delivered",
+				recorded(h, a.ID), len(h.forwarded))
+		}
+	})
+
+	t.Run("verdict on the composite", func(t *testing.T) {
+		h := newHarness()
+		h.p.Handle(beacon("192.168.1.50"))
+		_ = h.store.Record(feedback.Verdict{MatchedIoC: "telemetry.vendor.example", ClientIP: "192.168.1.50",
+			SignalClass: detection.SignalComposite, Verdict: feedback.VerdictFalsePositive, Analyst: "a"})
+		trigger := c2Lookup("192.168.1.50")
+		h.p.Handle(trigger)
+
+		var comps []detection.Alert
+		for _, a := range h.alerts.alerts {
+			if a.SignalClass == detection.SignalComposite {
+				comps = append(comps, a)
+			}
+		}
+		if len(comps) != 1 || !comps[0].Suppressed {
+			t.Errorf("composites recorded: %+v, want one marked suppressed", comps)
+		}
+		if recorded(h, trigger.ID).Suppressed {
+			t.Error("the trigger is judged on its own and no verdict applies to it")
+		}
+		if got := h.forwarded[len(h.forwarded)-1]; got.ID != trigger.ID || got.Suppressed {
+			t.Errorf("delivered %+v, want the trigger, unmarked", got)
+		}
+	})
+}
+
 func TestNothingConfigured(t *testing.T) {
 	p := &Pipeline{Alerts: &memAlerts{}}
 	p.Handle(c2Lookup("192.168.1.50")) // no suppressor, correlator or receiver: must not panic

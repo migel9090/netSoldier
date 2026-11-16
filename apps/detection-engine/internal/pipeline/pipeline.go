@@ -80,11 +80,12 @@ type RecordLedger interface {
 // it again rather than lose it.
 //
 // Every other detection is recorded, suppressed or not: suppression decides
-// what reaches the killswitch, not what the analyst can see. A composite
-// formed by this detection supersedes it for delivery — unless the composite
-// itself is suppressed. A verdict on a combination says the combination is
-// benign, not that this detection is: it is then judged, and delivered, on
-// its own.
+// what reaches the killswitch, not what the analyst can see — and what was
+// recorded under a verdict says so (Suppressed), so it does not read as a new
+// alert. A composite formed by this detection supersedes it for delivery —
+// unless the composite itself is suppressed. A verdict on a combination says
+// the combination is benign, not that this detection is: it is then judged,
+// and delivered, on its own.
 func (p *Pipeline) Handle(a detection.Alert) {
 	if a.Record != "" && p.Records != nil {
 		if p.Records.Seen(a.Record) {
@@ -93,14 +94,16 @@ func (p *Pipeline) Handle(a detection.Alert) {
 		}
 		defer p.Records.Remember(a.Record)
 	}
+	a.Suppressed = p.suppressed(a)
 	p.record(a)
-	if p.suppressed(a) {
+	if a.Suppressed {
 		return
 	}
 	if p.Correlate != nil {
 		if comp := p.Correlate.Observe(a); comp != nil {
+			comp.Suppressed = p.suppressed(*comp)
 			p.record(*comp)
-			if !p.suppressed(*comp) {
+			if !comp.Suppressed {
 				p.forward(*comp)
 				return
 			}
