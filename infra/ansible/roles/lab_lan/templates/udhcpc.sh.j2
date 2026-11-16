@@ -1,0 +1,25 @@
+#!/bin/sh
+# Managed by Ansible (infra/ansible/roles/lab_lan). busybox udhcpc hook for
+# the lab's victim namespaces: applies the lease to eth0 and writes the DNS
+# server the gateway handed out into the namespace's resolv.conf
+# (/etc/netns/<ns>/resolv.conf, bind-mounted by `ip netns exec`).
+set -eu
+case $1 in
+  deconfig)
+    ip -4 addr flush dev "$interface"
+    ;;
+  bound | renew)
+    ip -4 addr flush dev "$interface"
+    ip addr add "$ip/${mask:-24}" dev "$interface"
+    for r in ${router:-}; do
+      ip route replace default via "$r" dev "$interface"
+      break
+    done
+    : >/etc/resolv.conf
+    for d in ${dns:-}; do
+      echo "nameserver $d" >>/etc/resolv.conf
+    done
+    echo "lease: ip=$ip router=${router:-} dns=${dns:-} lease=${lease:-}s"
+    ;;
+esac
+exit 0

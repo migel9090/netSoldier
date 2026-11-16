@@ -1,0 +1,17 @@
+# Managed by Ansible (infra/ansible/roles/lab_lan). Local edits are lost.
+# The lab's simulated home LAN. Up before k3s so netagent finds its
+# interface and the published ports find their address after a reboot.
+[Unit]
+Description=netSoldier lab: simulated home LAN ({{ lab_lan_bridge }})
+After=network-online.target
+Wants=network-online.target
+Before=k3s.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/netsoldier-lab-lan up
+ExecStop=/usr/local/sbin/netsoldier-lab-lan down
+
+[Install]
+WantedBy=multi-user.target

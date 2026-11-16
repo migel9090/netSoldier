@@ -1,0 +1,51 @@
+---
+# The simulated home LAN of the lab (step 125.24 scenario). Everything lives
+# inside the lab VM: a bridge with no uplink, a gateway namespace (router,
+# DHCP and the upstream DNS AdGuard forwards to) and victim namespaces. The
+# VM's real interface (eth0) is never bridged, and traffic between it and
+# the simulated LAN is dropped in both directions.
+
+# The site values come from the site file the Kubernetes overlay renders, so
+# the bridge, the gateway and the node's LAN address cannot drift from what
+# netagent, the killswitch and the NetworkPolicies are told.
+lab_lan_site_file: "{{ playbook_dir }}/../../deploy/kustomize/sites/lab/site/site.env"
+lab_lan_site: >-
+  {{ dict(lookup('ansible.builtin.file', lab_lan_site_file).splitlines()
+          | map('trim') | reject('match', '^(#|$)')
+          | map('split', '=', 1)) }}
+
+lab_lan_bridge: "{{ lab_lan_site.LAN_INTERFACE }}"
+lab_lan_cidr: "{{ lab_lan_site.LAN_CIDR }}"
+lab_lan_prefix: "{{ lab_lan_cidr.split('/')[1] }}"
+lab_lan_node_ip: "{{ lab_lan_site.NODE_LAN_IP }}"
+lab_lan_node_mac: "{{ lab_lan_site.NODE_LAN_MAC }}"
+lab_lan_gateway_ip: "{{ lab_lan_site.GATEWAY_IP }}"
+lab_lan_gateway_mac: "{{ lab_lan_site.GATEWAY_MAC }}"
+
+# The VM's real interface: never bridged, never reachable from the lab LAN.
+lab_lan_uplink: eth0
+# The pod network's bridge (k3s/flannel): the only interface the lab LAN may
+# exchange forwarded traffic with (DNAT to AdGuard and the web UI, and
+# AdGuard's queries to the gateway's resolver).
+lab_lan_pod_bridge: cni0
+
+# DHCP on the simulated LAN, served by dnsmasq in the gateway namespace.
+lab_lan_dhcp_first: 10.77.0.100
+lab_lan_dhcp_last: 10.77.0.199
+lab_lan_dhcp_lease: 10m
+
+# The gateway's resolver answers the lab's own zone only (no uplink): every
+# name under it resolves to one address, so a name that is blocked and later
+# unblocked visibly resolves again.
+lab_lan_zone: netsoldier.test
+lab_lan_zone_address: 10.77.0.250
+
+# Victims: hosts on the simulated LAN that take a DHCP lease and resolve
+# names. Locally administered MACs.
+lab_lan_victims:
+  - { ns: nsv1, mac: "02:4e:53:00:01:01", hostname: lab-victim-1 }
+  - { ns: nsv2, mac: "02:4e:53:00:01:02", hostname: lab-victim-2 }
+
+lab_lan_gateway_ns: nsgw
+lab_lan_config_dir: /etc/netsoldier-lab
+lab_lan_run_dir: /run/netsoldier-lab

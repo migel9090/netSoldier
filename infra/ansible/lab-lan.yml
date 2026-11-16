@@ -1,0 +1,10 @@
+---
+# The simulated home LAN inside the lab VM (roles/lab_lan): run by
+# `infra/lab/lab.sh lan` (and infra/lab/deploy.sh) against the inventory
+# Terraform generates, never by site.yml. The role refuses any host that is
+# not the lab VM.
+- name: "Lab node: simulated home LAN"
+  hosts: proxmox_soc
+  become: true
+  roles:
+    - lab_lan

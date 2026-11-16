@@ -1,0 +1,25 @@
+# Managed by Ansible (infra/ansible/roles/lab_lan). Local edits are lost.
+#
+# The lab gateway's dnsmasq, run inside the {{ lab_lan_gateway_ns }} namespace only. It is
+# the simulated router's DHCP server and the resolver AdGuard forwards to.
+# It has no uplink and no upstream: it answers {{ lab_lan_zone }} and refuses
+# everything else, so nothing on the simulated LAN reaches the internet.
+interface=eth0
+bind-interfaces
+no-resolv
+no-hosts
+no-poll
+domain-needed
+bogus-priv
+address=/{{ lab_lan_zone }}/{{ lab_lan_zone_address }}
+
+dhcp-range={{ lab_lan_dhcp_first }},{{ lab_lan_dhcp_last }},{{ lab_lan_dhcp_lease }}
+dhcp-option=option:router,{{ lab_lan_gateway_ip }}
+# Clients resolve through AdGuard on the node, as a household would.
+dhcp-option=option:dns-server,{{ lab_lan_site.NODE_LAN_IP }}
+dhcp-authoritative
+dhcp-leasefile={{ lab_lan_run_dir }}/dnsmasq.leases
+
+log-dhcp
+log-queries
+log-facility=-
