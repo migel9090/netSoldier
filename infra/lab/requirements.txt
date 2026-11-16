@@ -1,0 +1,14 @@
+# Python tools the lab deployment needs on the workstation, installed into
+# .venv by `lab.sh tools` with --require-hashes. Hashes are the sha256 of the
+# release files on PyPI (https://pypi.org/project/bcrypt/5.0.0/#files).
+#
+# bcrypt (Apache-2.0): AdGuard Home stores its users' passwords as bcrypt
+# hashes; deploy.sh hashes the generated AdGuard password with it.
+bcrypt==5.0.0 \
+    --hash=sha256:560ddb6ec730386e7b3b26b8b4c88197aaed924430e7b74666a586ac997249ef \
+    --hash=sha256:0c8e093ea2532601a6f686edbc2c6b2ec24131ff5c52f7610dd64fa4553b5464 \
+    --hash=sha256:89042e61b5e808b67daf24a434d89bab164d4de1746b37a8d173b6b14f3db9ff \
+    --hash=sha256:c2388ca94ffee269b6038d48747f4ce8df0ffbea43f31abfa18ac72f0218effb \
+    --hash=sha256:d79e5c65dcc9af213594d6f7f1fa2c98ad3fc10431e7aa53c176b441943efbdd \
+    --hash=sha256:5b1589f4839a0899c146e8892efe320c0fa096568abd9b95593efac50a87cb75 \
+    --hash=sha256:f748f7c2d6fd375cc93d3fba7ef4a9e3a092421b8dbf34d8d4dc06be9492dfdd
