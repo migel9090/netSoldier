@@ -191,9 +191,27 @@ tasks:
           --metrics=off .
 
   scan:iac:
-    desc: Run Checkov IaC scan
+    desc: Run the IaC gates (Checkov, KICS, hadolint) against scan-exceptions.toml
+    deps: [ci:deps]
     cmds:
-      - checkov --directory . --quiet --compact --soft-fail
+      - task: scan:checkov
+      - task: scan:kics
+      - task: scan:hadolint
+
+  scan:checkov:
+    desc: Checkov on every rendered target and the repository's files
+    cmds:
+      - python3 scripts/ci/iac-gate.py checkov {{.CLI_ARGS}}
+
+  scan:kics:
+    desc: KICS (HIGH and CRITICAL) on every rendered target and the repository's files
+    cmds:
+      - python3 scripts/ci/iac-gate.py kics {{.CLI_ARGS}}
+
+  scan:hadolint:
+    desc: hadolint on every tracked Dockerfile and Containerfile
+    cmds:
+      - python3 scripts/ci/iac-gate.py hadolint {{.CLI_ARGS}}
 
   sbom:
     desc: Generate CycloneDX SBOM from GHCR image

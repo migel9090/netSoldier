@@ -29,4 +29,10 @@ EXPOSE 3000
 # node:alpine ships an unprivileged `node` user (uid 1000).
 USER node
 
+# The same unauthenticated /healthz the Kubernetes probes use (503 while the
+# UI is unconfigured). BusyBox wget rather than a second node process: the
+# lite profile caps this container at 128 MiB. Kubernetes ignores HEALTHCHECK.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD wget -q -O /dev/null "http://127.0.0.1:${PORT:-3000}/healthz" || exit 1
+
 CMD ["node", "build"]

@@ -1,6 +1,10 @@
 # Workloads for infra/lab/smoke.sh. Every pod meets the "restricted" Pod
 # Security Standard and the ADR-0004 defaults: non-root, no capabilities,
-# read-only root filesystem, RuntimeDefault seccomp.
+# read-only root filesystem, RuntimeDefault seccomp. Like the product's own
+# workloads they also carry resource requests and limits and run behind a
+# default-deny NetworkPolicy that admits only the one connection the check
+# makes (the policies at the end, the same pattern as
+# deploy/kustomize/base/network-policies).
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -15,6 +19,8 @@ kind: Pod
 metadata:
   name: kernel-gvisor
   namespace: netsoldier-smoke
+  labels:
+    app: kernel-gvisor
 spec:
   runtimeClassName: gvisor
   restartPolicy: Never
@@ -36,6 +42,9 @@ spec:
           echo "proc-version: $(cat /proc/version)"
           echo "seccomp: $(grep '^Seccomp:' /proc/self/status | tr -s '\t ' ' ')"
           echo "dmesg: $(dmesg 2>&1 | head -n 1)"
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 200m, memory: 128Mi }
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
@@ -47,6 +56,8 @@ kind: Pod
 metadata:
   name: kernel-runc
   namespace: netsoldier-smoke
+  labels:
+    app: kernel-runc
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
@@ -67,6 +78,9 @@ spec:
           echo "proc-version: $(cat /proc/version)"
           echo "seccomp: $(grep '^Seccomp:' /proc/self/status | tr -s '\t ' ' ')"
           echo "dmesg: $(dmesg 2>&1 | head -n 1)"
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 200m, memory: 128Mi }
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
@@ -95,6 +109,10 @@ spec:
   containers:
     - name: detection-engine
       image: ghcr.io/migel9090/detection-engine:main
+      # The check is about the image published now. With the default
+      # (IfNotPresent for a non-latest tag) a node that pulled :main once
+      # would keep testing that old build.
+      imagePullPolicy: Always
       ports:
         - name: http
           containerPort: 8080
@@ -103,9 +121,15 @@ spec:
           path: /healthz
           port: http
         periodSeconds: 3
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: http
+        periodSeconds: 10
+        failureThreshold: 6
       resources:
         requests: { cpu: 50m, memory: 32Mi }
-        limits: { memory: 256Mi }
+        limits: { cpu: 500m, memory: 256Mi }
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
@@ -132,6 +156,8 @@ kind: Pod
 metadata:
   name: healthz-client
   namespace: netsoldier-smoke
+  labels:
+    app: healthz-client
 spec:
   runtimeClassName: gvisor
   restartPolicy: Never
@@ -156,8 +182,94 @@ spec:
             sleep 2
           done
           echo "healthz: no answer"; exit 1
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 200m, memory: 128Mi }
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
         capabilities:
           drop: ["ALL"]
+---
+# Nothing in the namespace talks to anything unless a policy below says so.
+# The kernel-* pods only read their own kernel's view and need no network.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: netsoldier-smoke
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# The one connection the check makes: healthz-client -> detection-engine:8080.
+# detection-engine may resolve names (it fails fast on the services it is not
+# configured for, as it did without a policy); kubelet probes come from the
+# node and are not subject to the policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-detection-engine
+  namespace: netsoldier-smoke
+spec:
+  podSelector:
+    matchLabels:
+      app: detection-engine
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: healthz-client
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-healthz-client
+  namespace: netsoldier-smoke
+spec:
+  podSelector:
+    matchLabels:
+      app: healthz-client
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: detection-engine
+      ports:
+        - port: 8080
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

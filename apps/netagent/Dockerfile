@@ -40,4 +40,14 @@ COPY --from=setcap /netagent /netagent
 # the killswitch, and reports its own health through a file and its heartbeat.
 USER nonroot:nonroot
 
+# The image has no shell, so the check is the agent's own `health` command:
+# exit 0 when the health file the running agent rewrites every heartbeat is
+# fresh, 1 otherwise (it opens no socket). Podman and Docker run this;
+# Kubernetes ignores it and runs the same command as its exec probes
+# (deploy/kustomize/base/netagent). It needs NETAGENT_HEALTH_FILE, which every
+# deployment sets: without it the agent writes no file and is reported
+# unhealthy, which is the truth.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["/netagent", "health"]
+
 ENTRYPOINT ["/netagent"]
