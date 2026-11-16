@@ -12,12 +12,15 @@ podman_edge_state: present
 
 # The netsoldier.conf settings (keys and meaning:
 # deploy/podman/netsoldier.conf.example). The first five are required.
+# AUTO_BLOCK is "off" unless set to "on" (quote both: YAML reads a bare
+# on/off as a boolean; the template turns one back into on/off anyway).
 podman_edge_settings: {}
 #   LAN_INTERFACE: eth0
 #   HOST_IP: 192.0.2.10
 #   GATEWAY_IP: 192.0.2.1
 #   GATEWAY_MAC: "02:00:00:00:00:01"
 #   LAN_NETWORKS: 192.0.2.0/24
+#   AUTO_BLOCK: "off"
 
 # Optional: lines for /etc/netsoldier/local-indicators.txt (site-local
 # known-bad domains). Left alone when empty.
