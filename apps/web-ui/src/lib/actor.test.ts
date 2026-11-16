@@ -38,9 +38,28 @@ describe('actor rule (contract v2 §7)', () => {
     expect(validateActor({}).ok).toBe(false)
   })
 
+  // The killswitch answers 400 to every approve, reject and revert signed
+  // with one of its own actor names, compared without regard to case.
+  it('refuses the names the killswitch keeps for itself, explaining why', () => {
+    for (const name of ['ttl', 'auto-policy', 'reconcile', 'netagent', 'system', 'TTL', 'System']) {
+      const r = validateActor(` ${name} `)
+      expect(r.ok, name).toBe(false)
+      if (!r.ok) {
+        expect(r.message).toContain(`"${name}" is reserved`)
+        expect(r.message).toContain('audit log')
+        expect(r.message).toContain('Sign in with your own name')
+      }
+    }
+    // Only the exact names: these are fine.
+    for (const name of ['ttl-admin', 'systemd fan', 'Netagent Anna']) {
+      expect(validateActor(name)).toEqual({ ok: true, actor: name })
+    }
+  })
+
   it('isValidActor matches the rule', () => {
     expect(isValidActor('household')).toBe(true)
     expect(isValidActor('')).toBe(false)
     expect(isValidActor('Łukasz')).toBe(false)
+    expect(isValidActor('reconcile')).toBe(false)
   })
 })

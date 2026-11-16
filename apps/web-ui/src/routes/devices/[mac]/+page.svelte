@@ -11,6 +11,13 @@
     normaliseMac,
   } from '$lib/api'
   import { alertHeadline, alertObservedDomain } from '$lib/alerts'
+  import {
+    CONFLICTS_SHOWN,
+    bindingWords,
+    conflictCount,
+    describeConflict,
+    sourceName,
+  } from '$lib/devices'
   import { newestFirst } from '$lib/order'
   import type { Device, DeviceConnection, DeviceDNS, DeviceAlert } from '$lib/types'
 
@@ -88,16 +95,96 @@
 {:else if error}
   <p class="error">{error}</p>
 {:else if device}
+  {@const conflicts = device.conflicts ?? []}
+  {@const conflictTotal = conflictCount(device)}
+  <!-- A single-device read attaches at most CONFLICTS_SHOWN, and counts only those. -->
+  {@const atLeast = conflicts.length >= CONFLICTS_SHOWN ? 'at least ' : ''}
   <h1>{device.hostname || device.mac}</h1>
+
+  {#if conflictTotal > 0}
+    <section class="conflicts" data-testid="device-conflicts" role="alert">
+      <h2>
+        ⚠ Something on the network is claiming to be this device ({atLeast}{conflictTotal}
+        {conflictTotal === 1 ? 'conflict' : 'conflicts'} in the last 24 h)
+      </h2>
+      <p>
+        The inventory refused these claims because they contradict what it knows about this device.
+        A device that forges its MAC or address can make a detection, or a block, land on the wrong
+        device — check the claims before approving anything for this one.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>What happened</th>
+            <th>What it means</th>
+            <th>Seen</th>
+            <th>Times</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each conflicts as c, i (i)}
+            {@const t = describeConflict(c, device.mac)}
+            <tr data-testid="conflict" data-kind={c.kind}>
+              <td>
+                {t.what}
+                {#if t.other && normaliseMac(t.other)}
+                  <a class="mono" href="/devices/{encodeURIComponent(t.other)}">{t.other}</a>
+                {/if}
+              </td>
+              <td>{t.meaning}</td>
+              <td class="nowrap">
+                {formatTime(c.first_seen)}
+                {#if c.last_seen !== c.first_seen}<span class="secondary"
+                    >last {formatTime(c.last_seen)}</span
+                  >{/if}
+              </td>
+              <td class="mono">{c.count}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+      {#if conflicts.length >= CONFLICTS_SHOWN}
+        <p class="muted">The inventory shows the {CONFLICTS_SHOWN} most recent conflicts.</p>
+      {/if}
+    </section>
+  {/if}
 
   <section class="info-grid">
     <div class="info-card">
       <span class="info-label">MAC Address</span>
       <span class="info-value mono">{device.mac}</span>
+      {#if device.randomized_mac}
+        <span class="info-note">randomised (private) MAC address</span>
+      {/if}
+      {#if device.rotation_of && normaliseMac(device.rotation_of)}
+        <span class="info-note"
+          >probably the same device as <a
+            class="mono"
+            href="/devices/{encodeURIComponent(device.rotation_of)}">{device.rotation_of}</a
+          > before a MAC change</span
+        >
+      {/if}
     </div>
-    <div class="info-card">
+    <div class="info-card" data-testid="ip-card">
       <span class="info-label">IP Address</span>
       <span class="info-value mono">{device.ip || '—'}</span>
+      {#if device.ip}
+        <span class="info-note"
+          >{bindingWords(device)}; from {sourceName(device.ip_source)}{#if device.ip_since}, since {formatTime(
+              device.ip_since,
+            )}{/if}</span
+        >
+        {#if device.ip_confirmed_at}
+          <span class="info-note">last confirmed {formatTime(device.ip_confirmed_at)}</span>
+        {/if}
+      {/if}
+    </div>
+    <div class="info-card">
+      <span class="info-label">Hostname</span>
+      <span class="info-value">{device.hostname || '—'}</span>
+      {#if device.hostname}
+        <span class="info-note">from {sourceName(device.hostname_source)}</span>
+      {/if}
     </div>
     <div class="info-card">
       <span class="info-label">Vendor</span>
@@ -122,6 +209,9 @@
     <div class="info-card">
       <span class="info-label">Last Seen</span>
       <span class="info-value">{formatTime(device.last_seen)}</span>
+      {#if device.established}
+        <span class="info-note">established: its name and profile are no longer replaced</span>
+      {/if}
     </div>
   </section>
 
@@ -283,6 +373,31 @@
   .info-value {
     font-size: 0.875rem;
     word-break: break-all;
+  }
+  .info-note {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+  }
+  .info-note a,
+  .conflicts a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  .conflicts {
+    border-left: 3px solid var(--danger);
+    padding-left: 1rem;
+  }
+  .conflicts h2 {
+    color: var(--danger);
+    margin-top: 0;
+  }
+  .conflicts p {
+    max-width: 48rem;
+    margin-bottom: 0.75rem;
+  }
+  .nowrap {
+    white-space: nowrap;
   }
 
   .labels {

@@ -62,6 +62,20 @@ test('a non-ASCII name is rejected at sign-in with a helpful message', async ({
   expect(await context.cookies()).toEqual([])
 })
 
+// The killswitch refuses every approve, reject and revert signed with one of
+// its own actor names; such a session could look at the page but never act.
+test('a name the killswitch keeps for itself is rejected at sign-in', async ({ page, context }) => {
+  await page.goto('/login')
+  await page.getByLabel('Who are you?').fill('System')
+  await page.getByLabel('Password').fill(PASSWORD)
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  const error = page.getByTestId('login-error')
+  await expect(error).toContainText('"System" is reserved')
+  await expect(error).toContainText('Sign in with your own name')
+  await expect(page).toHaveURL(/\/login$/)
+  expect(await context.cookies()).toEqual([])
+})
+
 test('sign-out clears the session', async ({ page, context }) => {
   await signIn(page, 'Anna')
   const before = (await context.cookies()).find((c) => c.name === 'netsoldier_session')!

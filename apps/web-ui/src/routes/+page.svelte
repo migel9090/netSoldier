@@ -5,8 +5,11 @@
   import { newestFirst } from '$lib/order'
   import type { Alert } from '$lib/types'
 
+  // The detection engine reports no total; the count is of this many at most.
+  const ALERT_COUNT_LIMIT = 1000
+
   let deviceCount: number | null = $state(null)
-  let alertCount: number | null = $state(null)
+  let alertCount: string | null = $state(null)
   let recentAlerts: Alert[] = $state([])
   let errors: string[] = $state([])
   let loading: boolean = $state(true)
@@ -14,13 +17,17 @@
   onMount(async () => {
     // A backend outage is an error on the card, not a zero: "0 alerts" from
     // a detection engine that is down reads as "all quiet".
-    const [devices, alerts] = await Promise.allSettled([fetchDevices(), fetchAlerts()])
+    const [devices, alerts] = await Promise.allSettled([
+      fetchDevices(),
+      fetchAlerts(ALERT_COUNT_LIMIT),
+    ])
     const problems: string[] = []
-    if (devices.status === 'fulfilled') deviceCount = devices.value.length
+    if (devices.status === 'fulfilled') deviceCount = devices.value.total
     else problems.push(message(devices.reason))
     if (alerts.status === 'fulfilled') {
-      alertCount = alerts.value.length
-      // The detection engine appends, so its list is oldest-first.
+      const n = alerts.value.length
+      alertCount = n >= ALERT_COUNT_LIMIT ? `${ALERT_COUNT_LIMIT}+` : String(n)
+      // Newest first already; sorted anyway so the order never depends on it.
       recentAlerts = newestFirst(alerts.value).slice(0, 5)
     } else {
       problems.push(message(alerts.reason))

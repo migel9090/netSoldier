@@ -8,7 +8,13 @@ import {
   renderMetrics,
   type UpstreamErrorKind,
 } from '$lib/server/metrics'
-import { callUpstream, matchRoute, type Service } from '$lib/server/upstream'
+import {
+  PASSED_RESPONSE_HEADERS,
+  callUpstream,
+  matchRoute,
+  upstreamQuery,
+  type Service,
+} from '$lib/server/upstream'
 
 /**
  * Request pipeline for the household UI.
@@ -114,12 +120,16 @@ async function proxy(event: RequestEvent, session: Session, config: Config): Pro
   if (!matched) return json({ error: 'not found' }, 404)
 
   const { route, upstreamPath } = matched
+  const query = upstreamQuery(route, event.url.searchParams)
+  if (!query.ok) return json({ error: query.error }, 400)
   const upstream = config.upstreams[route.service]
-  const target = `${upstream.url}${upstreamPath}${event.url.search}`
+  const target = `${upstream.url}${upstreamPath}${query.search}`
 
   // Built from scratch: nothing the browser sent (cookies, Authorization,
   // a forged X-Netsoldier-Actor) is forwarded. The actor passed the
-  // printable-ASCII rule at sign-in, so it is a valid header value.
+  // printable-ASCII and reserved-name rules at sign-in, so it is a valid
+  // header value and one the killswitch accepts on approve, reject and
+  // revert (it refuses those without it).
   const headers: Record<string, string> = {
     Accept: 'application/json',
     Authorization: `Bearer ${upstream.key}`,
@@ -178,11 +188,14 @@ async function proxy(event: RequestEvent, session: Session, config: Config): Pro
   }
 
   // Always served as JSON: an upstream that answers with HTML must not get
-  // to render a document on this origin.
-  return new Response(res.body, {
-    status: res.status,
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
-  })
+  // to render a document on this origin. Other headers are dropped, except
+  // the few the pages read.
+  const out = new Headers({ 'Content-Type': 'application/json; charset=utf-8' })
+  for (const name of PASSED_RESPONSE_HEADERS) {
+    const value = res.headers.get(name)
+    if (value !== null && /^\d{1,12}$/.test(value)) out.set(name, value)
+  }
+  return new Response(res.body, { status: res.status, headers: out })
 }
 
 /**

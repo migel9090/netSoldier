@@ -1,8 +1,9 @@
 import { defineConfig, devices } from '@playwright/test'
 
 /**
- * Browser tests against the production build (`node build`) and stub
- * backends; servers are started by tests/browser/global-setup.ts on
+ * Browser tests against the production build (`node build`), in front of
+ * stub backends and, for real-backends.spec.ts, the real Go services built
+ * from this tree; servers are started by tests/browser/global-setup.ts on
  * ephemeral 127.0.0.1 ports. Run with `npm run test:e2e`, which builds first.
  *
  * Browser: Playwright's Chromium (`npx playwright install chromium`, or
@@ -31,11 +32,14 @@ export default defineConfig({
     },
   },
   projects: [
-    { name: 'lan-http' },
+    { name: 'lan-http', testIgnore: 'real-backends.spec.ts' },
     {
       name: 'tls',
       testMatch: 'auth.spec.ts',
       use: { ignoreHTTPSErrors: true },
     },
+    // The UI in front of the real Go services (tests/browser/real/stack.ts);
+    // needs the Go toolchain, or E2E_REAL_BACKENDS=skip to leave it out.
+    { name: 'real-backends', testMatch: 'real-backends.spec.ts' },
   ],
 })

@@ -8,6 +8,11 @@
   let signingOut = $state(false)
   let signOutError = $state('')
 
+  function section(prefix: string): boolean {
+    const path = page.url.pathname
+    return path === prefix || path.startsWith(`${prefix}/`)
+  }
+
   async function handleSignOut() {
     signingOut = true
     signOutError = ''
@@ -23,10 +28,10 @@
 
 <nav>
   <a href="/" class="logo">netSoldier</a>
-  <a href="/devices" class:active={page.url.pathname === '/devices'}>Devices</a>
-  <a href="/map" class:active={page.url.pathname === '/map'}>Map</a>
-  <a href="/alerts" class:active={page.url.pathname === '/alerts'}>Alerts</a>
-  <a href="/killswitch" class:active={page.url.pathname === '/killswitch'}>Killswitch</a>
+  <a href="/devices" class:active={section('/devices')}>Devices</a>
+  <a href="/map" class:active={section('/map')}>Map</a>
+  <a href="/alerts" class:active={section('/alerts')}>Alerts</a>
+  <a href="/killswitch" class:active={section('/killswitch')}>Killswitch</a>
   {#if data.actor}
     <span class="whoami">Signed in as <strong data-testid="actor">{data.actor}</strong></span>
     <button class="signout" onclick={handleSignOut} disabled={signingOut}>

@@ -17,6 +17,11 @@ export interface Route {
   pattern: RegExp
   /** Builds the upstream path from the match groups. */
   upstream: (m: RegExpMatchArray) => string
+  /**
+   * Query parameters passed on to the backend. Anything else is refused, so
+   * a page cannot reach a backend option the UI does not use either.
+   */
+  query?: readonly string[]
 }
 
 // {mac} and {id} are intentionally narrow: a MAC or an action ID, nothing
@@ -37,6 +42,7 @@ export const ROUTES: Route[] = [
     method: 'GET',
     pattern: /^\/api\/devices$/,
     upstream: () => '/devices',
+    query: ['limit', 'offset'],
   },
   {
     service: 'device-inventory',
@@ -61,12 +67,15 @@ export const ROUTES: Route[] = [
     method: 'GET',
     pattern: /^\/api\/topology$/,
     upstream: () => '/topology',
+    query: ['hours'],
   },
   {
     service: 'detection-engine',
     method: 'GET',
     pattern: /^\/api\/alerts$/,
     upstream: () => '/alerts',
+    // GET /alerts returns 1000 alerts without ?limit=, and up to 5000 with it.
+    query: ['limit'],
   },
   {
     service: 'detection-engine',
@@ -82,14 +91,28 @@ export const ROUTES: Route[] = [
   },
   // The fixed killswitch names come before the generic {id} route: matching
   // is first-hit, and {id} would otherwise swallow them (it used to make
-  // /api/killswitch/policy unreachable). `failed` and `history` are contract
-  // v2 lists; a controller that predates them answers 404, which the page
-  // reports as "not available yet".
+  // /api/killswitch/policy unreachable, and would send `audit` to
+  // /actions/audit).
   {
     service: 'killswitch',
     method: 'GET',
-    pattern: /^\/api\/killswitch\/(pending|active|failed|history)$/,
+    pattern: /^\/api\/killswitch\/(pending|active|failed)$/,
     upstream: (m) => `/actions/${m[1]}`,
+  },
+  {
+    service: 'killswitch',
+    method: 'GET',
+    pattern: /^\/api\/killswitch\/history$/,
+    upstream: () => '/actions/history',
+    query: ['limit'],
+  },
+  {
+    service: 'killswitch',
+    method: 'GET',
+    pattern: /^\/api\/killswitch\/audit$/,
+    upstream: () => '/audit',
+    // Newest first; ?before=<seq> pages back, ?action_id= narrows to one action.
+    query: ['limit', 'before', 'action_id'],
   },
   {
     service: 'killswitch',
@@ -129,6 +152,35 @@ export function matchRoute(method: string, pathname: string): Matched | null {
   }
   return null
 }
+
+export type QueryResult = { ok: true; search: string } | { ok: false; error: string }
+
+/**
+ * The query string sent upstream: the route's parameters, re-encoded, each
+ * at most once. A parameter the route does not take is refused rather than
+ * dropped, so a page asking for something the backend never sees fails
+ * loudly instead of quietly getting the default.
+ */
+export function upstreamQuery(route: Route, params: URLSearchParams): QueryResult {
+  const allowed = route.query ?? []
+  const out = new URLSearchParams()
+  for (const [name, value] of params) {
+    if (!allowed.includes(name)) {
+      return { ok: false, error: `query parameter "${name}" is not supported here` }
+    }
+    if (out.has(name)) return { ok: false, error: `query parameter "${name}" is repeated` }
+    out.set(name, value)
+  }
+  const search = out.toString()
+  return { ok: true, search: search ? `?${search}` : '' }
+}
+
+/**
+ * Response headers passed on to the page, numeric values only.
+ * device-inventory reports the size of its whole list in X-Total-Count;
+ * GET /devices returns one page of it.
+ */
+export const PASSED_RESPONSE_HEADERS = ['x-total-count'] as const
 
 /** Upstream request timeout: a hung backend must not hang the UI. */
 export const UPSTREAM_TIMEOUT_MS = 10_000

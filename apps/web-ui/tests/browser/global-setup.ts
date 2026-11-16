@@ -14,17 +14,21 @@ import net, { type AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { startRealStack, type RealStack, type Upstreams } from './real/stack'
 import { KEYS, startStubs } from './stub/backends'
 
 /**
  * Starts everything the browser tests talk to, on 127.0.0.1 ephemeral ports:
  *
  * - the stub backends (tests/browser/stub/backends.ts);
- * - the production build (`node build`) three times:
+ * - the real backends (tests/browser/real/stack.ts): the three Go services
+ *   built from this tree, unless E2E_REAL_BACKENDS=skip;
+ * - the production build (`node build`) up to four times:
  *   - "lan-http": ORIGIN=http://netsoldier.lan:<port>, as on a plain-HTTP LAN;
  *   - "tls": behind a TLS-terminating proxy, ORIGIN=https://netsoldier.lan:<port>,
  *     with ADDRESS_HEADER/XFF_DEPTH as a reverse-proxy deployment sets them;
- *   - "lockout": plain HTTP with ADDRESS_HEADER, used only by lockout.spec.ts.
+ *   - "lockout": plain HTTP with ADDRESS_HEADER, used only by lockout.spec.ts;
+ *   - "real": plain HTTP in front of the real backends, for real-backends.spec.ts.
  *
  * The browser resolves netsoldier.lan to 127.0.0.1 (see playwright.config.ts).
  * A real host name matters: Chromium treats http://127.0.0.1 as a secure
@@ -68,11 +72,19 @@ async function waitHealthy(url: string, child: ChildProcess, name: string): Prom
   throw new Error(`${name}: ${url} did not become healthy in 20 s; see ${logDir}`)
 }
 
+function stubUpstreams(stubs: Awaited<ReturnType<typeof startStubs>>): Upstreams {
+  return {
+    killswitch: { url: stubs.urls.killswitch, key: KEYS.killswitch },
+    'device-inventory': { url: stubs.urls['device-inventory'], key: KEYS['device-inventory'] },
+    'detection-engine': { url: stubs.urls['detection-engine'], key: KEYS['detection-engine'] },
+  }
+}
+
 function startApp(
   name: string,
   port: number,
   origin: string,
-  stubs: Awaited<ReturnType<typeof startStubs>>,
+  upstreams: Upstreams,
   extraEnv: Record<string, string> = {},
 ): ChildProcess {
   const log = createWriteStream(join(logDir, `${name}.log`))
@@ -87,12 +99,12 @@ function startApp(
       ORIGIN: origin,
       SESSION_SECRET: randomBytes(48).toString('base64'),
       WEB_UI_PASSWORD: E2E_PASSWORD,
-      KILLSWITCH_URL: stubs.urls.killswitch,
-      KILLSWITCH_API_KEY: KEYS.killswitch,
-      DEVICE_INVENTORY_URL: stubs.urls['device-inventory'],
-      DEVICE_API_KEY: KEYS['device-inventory'],
-      DETECTION_ENGINE_URL: stubs.urls['detection-engine'],
-      DETECTION_API_KEY: KEYS['detection-engine'],
+      KILLSWITCH_URL: upstreams.killswitch.url,
+      KILLSWITCH_API_KEY: upstreams.killswitch.key,
+      DEVICE_INVENTORY_URL: upstreams['device-inventory'].url,
+      DEVICE_API_KEY: upstreams['device-inventory'].key,
+      DETECTION_ENGINE_URL: upstreams['detection-engine'].url,
+      DETECTION_API_KEY: upstreams['detection-engine'].key,
       SHUTDOWN_TIMEOUT: '2',
       ...extraEnv,
     },
@@ -179,16 +191,43 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   mkdirSync(logDir, { recursive: true })
 
   const children: ChildProcess[] = []
-  const killAll = () => children.forEach((c) => c.kill('SIGKILL'))
+  let real: RealStack | null = null
+  const killAll = () => {
+    children.forEach((c) => c.kill('SIGKILL'))
+    real?.kill()
+  }
   process.once('exit', killAll)
 
   const stubs = await startStubs()
+  const upstreams = stubUpstreams(stubs)
   const certDir = mkdtempSync(join(tmpdir(), 'netsoldier-e2e-'))
   let proxy: https.Server | null = null
 
+  let realStarting: Promise<RealStack> | null = null
+
+  const teardown = async () => {
+    await Promise.all(children.map(stop))
+    await realStarting?.catch(() => {})
+    await real?.close()
+    if (proxy) {
+      proxy.closeAllConnections()
+      await new Promise((ok) => proxy!.close(ok))
+    }
+    await stubs.close()
+    rmSync(certDir, { recursive: true, force: true })
+    process.removeListener('exit', killAll)
+  }
+
   try {
+    // Building the Go services takes longest on a cold cache: start it first.
+    if (process.env.E2E_REAL_BACKENDS !== 'skip') {
+      realStarting = startRealStack(resolve(appDir, '../..'), logDir).then((s) => (real = s))
+      // Awaited below; this only keeps an early failure from counting as unhandled.
+      realStarting.catch(() => {})
+    }
+
     const httpPort = await freePort()
-    const httpApp = startApp('lan-http', httpPort, `http://${LAN_HOST}:${httpPort}`, stubs)
+    const httpApp = startApp('lan-http', httpPort, `http://${LAN_HOST}:${httpPort}`, upstreams)
     children.push(httpApp)
     await waitHealthy(`http://127.0.0.1:${httpPort}/healthz`, httpApp, 'lan-http')
     process.env.E2E_HTTP_URL = `http://${LAN_HOST}:${httpPort}`
@@ -202,7 +241,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       'lockout',
       lockoutPort,
       `http://${LAN_HOST}:${lockoutPort}`,
-      stubs,
+      upstreams,
       {
         ADDRESS_HEADER: 'X-Forwarded-For',
         XFF_DEPTH: '1',
@@ -219,7 +258,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       proxy = tlsProxy(credentials, appPort)
       await new Promise<void>((ok) => proxy!.listen(0, '127.0.0.1', ok))
       const tlsPort = (proxy.address() as AddressInfo).port
-      const tlsApp = startApp('tls', appPort, `https://${LAN_HOST}:${tlsPort}`, stubs, {
+      const tlsApp = startApp('tls', appPort, `https://${LAN_HOST}:${tlsPort}`, upstreams, {
         ADDRESS_HEADER: 'X-Forwarded-For',
         XFF_DEPTH: '1',
       })
@@ -230,22 +269,24 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       console.warn('openssl not found: the TLS project will be skipped')
     }
 
+    if (realStarting) {
+      const stack = await realStarting
+      const realPort = await freePort()
+      const realApp = startApp('real', realPort, `http://${LAN_HOST}:${realPort}`, stack.upstreams)
+      children.push(realApp)
+      await waitHealthy(`http://127.0.0.1:${realPort}/healthz`, realApp, 'real')
+      process.env.E2E_REAL_URL = `http://${LAN_HOST}:${realPort}`
+      process.env.E2E_REAL_CONTROL = stack.control
+    } else {
+      console.warn('E2E_REAL_BACKENDS=skip: the real-backend browser test will be skipped')
+    }
+
     process.env.E2E_STUB_CONTROL = stubs.control
     process.env.E2E_PASSWORD = E2E_PASSWORD
   } catch (e) {
-    await Promise.all(children.map(stop))
-    await stubs.close()
+    await teardown()
     throw e
   }
 
-  return async () => {
-    await Promise.all(children.map(stop))
-    process.removeListener('exit', killAll)
-    if (proxy) {
-      proxy.closeAllConnections()
-      await new Promise((ok) => proxy!.close(ok))
-    }
-    await stubs.close()
-    rmSync(certDir, { recursive: true, force: true })
-  }
+  return teardown
 }

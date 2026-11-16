@@ -21,6 +21,15 @@ export class Stub {
     if (!res.ok) throw new Error(`stub scenario: ${res.status}`)
   }
 
+  /** Delivers the driver's late answer to an operation that got a 202. */
+  async settle(id: string, state?: string): Promise<void> {
+    const res = await fetch(`${this.base}/settle`, {
+      method: 'POST',
+      body: JSON.stringify({ id, state }),
+    })
+    if (!res.ok) throw new Error(`stub settle ${id}: ${res.status}`)
+  }
+
   async seen(): Promise<Seen[]> {
     return (await fetch(`${this.base}/seen`)).json()
   }
@@ -41,7 +50,12 @@ export interface PageProblems {
 export const test = base.extend<{ stub: Stub; problems: PageProblems }>({
   // The servers run on ephemeral ports chosen in global-setup.ts.
   baseURL: async ({}, use, testInfo) => {
-    const url = testInfo.project.name === 'tls' ? process.env.E2E_TLS_URL : process.env.E2E_HTTP_URL
+    const urls: Record<string, string | undefined> = {
+      'lan-http': process.env.E2E_HTTP_URL,
+      tls: process.env.E2E_TLS_URL,
+      'real-backends': process.env.E2E_REAL_URL,
+    }
+    const url = urls[testInfo.project.name]
     if (!url) testInfo.skip(true, `no server for project ${testInfo.project.name}`)
     await use(url)
   },

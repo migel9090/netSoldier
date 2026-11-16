@@ -38,7 +38,14 @@ interface Seen {
 let upstream: http.Server
 let upstreamUrl = ''
 let seen: Seen[] = []
-let reply: (req: Seen) => { status: number; body: string; type?: string } = () => ({
+interface Reply {
+  status: number
+  body: string
+  type?: string
+  headers?: Record<string, string>
+}
+
+let reply: (req: Seen) => Reply = () => ({
   status: 200,
   body: '[]',
 })
@@ -51,7 +58,7 @@ beforeAll(async () => {
       const s: Seen = { method: req.method ?? '', url: req.url ?? '', headers: req.headers, body }
       seen.push(s)
       const r = reply(s)
-      res.writeHead(r.status, { 'Content-Type': r.type ?? 'application/json' })
+      res.writeHead(r.status, { 'Content-Type': r.type ?? 'application/json', ...r.headers })
       res.end(r.body)
     })
   })
@@ -264,6 +271,19 @@ describe('sign-in', () => {
     expect(body.error).toContain('ASCII')
     expect(body.error).toContain('"Lukasz"')
     expect(res.headers.getSetCookie()).toEqual([])
+  })
+
+  // The killswitch refuses every mutation under these names (400), so a
+  // session with one could look but never approve.
+  it('refuses a name the killswitch keeps for itself', async () => {
+    for (const name of ['ttl', 'System', 'netagent']) {
+      const res = await browser().signIn(PASSWORD, name)
+      expect(res.status, name).toBe(400)
+      const body = await res.json()
+      expect(body.field).toBe('actor')
+      expect(body.error).toContain('is reserved')
+      expect(res.headers.getSetCookie()).toEqual([])
+    }
   })
 
   it('does not sign in on GET', async () => {
@@ -575,16 +595,83 @@ describe('API proxy', () => {
     expect(res.headers.get('cache-control')).toBe('no-store')
   })
 
-  it('reaches the killswitch policy route and the v2 lists', async () => {
+  it('reaches the killswitch policy route, the v2 lists and the audit log', async () => {
     const b = await signedIn()
-    for (const path of ['policy', 'failed', 'history?limit=20']) {
-      await b.fetch(`/api/killswitch/${path}`)
+    for (const path of ['policy', 'failed', 'history?limit=20', 'audit?limit=50&before=7']) {
+      expect((await b.fetch(`/api/killswitch/${path}`)).status, path).toBe(200)
     }
     expect(seen.map((s) => s.url)).toEqual([
       '/policy',
       '/actions/failed',
       '/actions/history?limit=20',
+      '/audit?limit=50&before=7',
     ])
+  })
+
+  it('passes ?limit= on to the detection engine', async () => {
+    const b = await signedIn()
+    expect((await b.fetch('/api/alerts?limit=500')).status).toBe(200)
+    expect(seen[0].url).toBe('/alerts?limit=500')
+  })
+
+  it('refuses a query parameter the route does not take, before any backend call', async () => {
+    const b = await signedIn()
+    const res = await b.fetch('/api/killswitch/pending?state=active')
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toContain('"state"')
+    expect(seen).toHaveLength(0)
+  })
+
+  it('stamps the actor on every mutation the killswitch requires it for', async () => {
+    const b = await signedIn('Anna K.')
+    for (const verb of ['approve', 'reject', 'revert']) {
+      await b.fetch(`/api/killswitch/ACT-1/${verb}`, {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': b.csrf() },
+        body: verb === 'approve' ? '{"action_type":"arp_isolate"}' : '{"reason":"x"}',
+      })
+    }
+    expect(seen.map((s) => [s.url, s.headers['x-netsoldier-actor']])).toEqual([
+      ['/actions/ACT-1/approve', 'Anna K.'],
+      ['/actions/ACT-1/reject', 'Anna K.'],
+      ['/actions/ACT-1/revert', 'Anna K.'],
+    ])
+    expect(seen[0].body).toBe('{"action_type":"arp_isolate"}')
+  })
+
+  it('passes the inventory’s X-Total-Count on, and no other backend header', async () => {
+    reply = () => ({
+      status: 200,
+      body: '[]',
+      headers: { 'X-Total-Count': '812', 'Set-Cookie': 'evil=1', 'X-Backend': 'leak' },
+    })
+    const b = await signedIn()
+    const res = await b.fetch('/api/devices?limit=1000')
+    expect(res.headers.get('x-total-count')).toBe('812')
+    expect(res.headers.get('set-cookie')).toBeNull()
+    expect(res.headers.get('x-backend')).toBeNull()
+
+    reply = () => ({ status: 200, body: '[]', headers: { 'X-Total-Count': '<script>' } })
+    expect((await b.fetch('/api/devices')).headers.get('x-total-count')).toBeNull()
+  })
+
+  it('passes the controller’s 202, 409 and 422 through with their bodies', async () => {
+    const b = await signedIn()
+    for (const [status, body] of [
+      [202, '{"id":"ACT-1","state":"approved"}'],
+      [409, '{"id":"ACT-1","state":"rejected","error":"action ACT-1 is rejected, not pending"}'],
+      [422, '{"error":"not available","available_action_types":["dns_sinkhole"]}'],
+    ] as const) {
+      reply = () => ({ status, body })
+      const res = await b.fetch('/api/killswitch/ACT-1/approve', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': b.csrf() },
+        body: '{}',
+      })
+      expect(res.status).toBe(status)
+      expect(res.headers.has('x-netsoldier-upstream-error')).toBe(false)
+      expect(await res.text()).toBe(body)
+    }
   })
 
   it('never puts a non-ASCII actor into a header, even from a validly signed token', async () => {
@@ -601,6 +688,20 @@ describe('API proxy', () => {
     b.jar.set('netsoldier_session', token)
     const res = await b.fetch('/api/devices')
     expect(res.status).toBe(401)
+    expect(seen).toHaveLength(0)
+  })
+
+  it('refuses a session issued under a reserved name before the rule existed', async () => {
+    const payload = JSON.stringify({
+      v: 1,
+      sid: 'def',
+      exp: Math.floor(Date.now() / 1000) + 600,
+      actor: 'ttl',
+    })
+    const token = `${Buffer.from(payload).toString('base64url')}.${createHmac('sha256', SECRET).update(payload).digest('base64url')}`
+    const b = browser()
+    b.jar.set('netsoldier_session', token)
+    expect((await b.fetch('/api/killswitch/pending')).status).toBe(401)
     expect(seen).toHaveLength(0)
   })
 })
