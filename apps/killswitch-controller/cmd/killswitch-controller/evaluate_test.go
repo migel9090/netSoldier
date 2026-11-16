@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -186,14 +187,19 @@ type miniAdGuard struct {
 	mu       sync.Mutex
 	rules    []string
 	writes   int
-	setDelay time.Duration
 	failSets int
-	srv      *httptest.Server
+	// held, while set, holds the answer to every write: the rules are
+	// stored at once, the answer waits until the test releases it or the
+	// caller gives up. written says a held write has arrived.
+	held    chan struct{}
+	written chan struct{}
+	quit    chan struct{}
+	srv     *httptest.Server
 }
 
 func newMiniAdGuard(t *testing.T, rules ...string) *miniAdGuard {
 	t.Helper()
-	f := &miniAdGuard{rules: rules}
+	f := &miniAdGuard{rules: rules, written: make(chan struct{}, 1), quit: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/control/filtering/status", func(w http.ResponseWriter, _ *http.Request) {
 		f.mu.Lock()
@@ -204,7 +210,10 @@ func newMiniAdGuard(t *testing.T, rules ...string) *miniAdGuard {
 		var body struct {
 			Rules []string `json:"rules"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		// Read to the end: only then does the server notice a caller that
+		// gives up while the answer is held.
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
 		f.mu.Lock()
 		if f.failSets > 0 {
 			f.failSets--
@@ -213,13 +222,52 @@ func newMiniAdGuard(t *testing.T, rules ...string) *miniAdGuard {
 			return
 		}
 		f.rules, f.writes = body.Rules, f.writes+1 // AdGuard has applied the change…
-		delay := f.setDelay
+		held := f.held
 		f.mu.Unlock()
-		time.Sleep(delay) // …but may be slow to answer
+		if held == nil {
+			return
+		}
+		select {
+		case f.written <- struct{}{}:
+		default:
+		}
+		select { // …and answers when the test says so
+		case <-held:
+		case <-r.Context().Done():
+		case <-f.quit:
+		}
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
+	t.Cleanup(func() { close(f.quit) }) // runs first: Close waits for held answers
 	return f
+}
+
+// holdWrites makes AdGuard store every write and hold its answer.
+func (f *miniAdGuard) holdWrites() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.held = make(chan struct{})
+}
+
+// releaseWrites answers the held writes and stops holding new ones.
+func (f *miniAdGuard) releaseWrites() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.held != nil {
+		close(f.held)
+		f.held = nil
+	}
+}
+
+// awaitWrite waits for a held write to arrive.
+func (f *miniAdGuard) awaitWrite(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.written:
+	case <-time.After(time.Minute):
+		t.Fatal("no write reached AdGuard")
+	}
 }
 
 func (f *miniAdGuard) current() ([]string, int) {

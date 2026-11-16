@@ -68,6 +68,11 @@ type Analyzer struct {
 	suppressed map[string]*list.Element
 	order      *list.List
 	nextSweep  time.Time
+	// examined counts the suppressions the table's upkeep (sweeps and
+	// evictions) has looked at: what an insert costs beyond its own map
+	// write. Tests hold it to a constant per insert, whatever the table's
+	// size, rather than timing the inserts.
+	examined int
 }
 
 // suppression is one entry of the suppression table.
@@ -280,6 +285,7 @@ func (a *Analyzer) suppress(key string) bool {
 		return false
 	}
 	for a.order.Len() >= maxSuppressed {
+		a.examined++
 		oldest := a.order.Front()
 		delete(a.suppressed, oldest.Value.(*suppression).key)
 		a.order.Remove(oldest)
@@ -292,6 +298,7 @@ func (a *Analyzer) suppress(key string) bool {
 // sweep drops expired suppressions from the front of the order.
 func (a *Analyzer) sweep(now time.Time) {
 	for el := a.order.Front(); el != nil; el = a.order.Front() {
+		a.examined++
 		s := el.Value.(*suppression)
 		if now.Before(s.until) {
 			return

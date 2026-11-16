@@ -88,6 +88,9 @@ type receiver struct {
 	status atomic.Int32
 	calls  atomic.Int32
 	delay  time.Duration
+	// hold, when set, keeps every answer back until it is closed or the
+	// caller gives up.
+	hold chan struct{}
 }
 
 func newReceiver(t *testing.T) *receiver {
@@ -95,10 +98,17 @@ func newReceiver(t *testing.T) *receiver {
 	rx.status.Store(http.StatusOK)
 	rx.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rx.calls.Add(1)
+		body, _ := io.ReadAll(r.Body) // to the end: then a caller giving up ends r.Context()
 		time.Sleep(rx.delay)
+		if rx.hold != nil {
+			select {
+			case <-rx.hold:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		code := int(rx.status.Load())
 		if code == http.StatusOK {
-			body, _ := io.ReadAll(r.Body)
 			var ev events.DetectionEvent
 			_ = json.Unmarshal(body, &ev)
 			rx.mu.Lock()
@@ -342,9 +352,13 @@ func TestFlushDeliversWhatItCan(t *testing.T) {
 // TestCancelledAttemptLeavesEventUntouched: an attempt cut short by
 // shutdown is not the receiver's verdict and must not count against the
 // event.
+//
+// The receiver holds its answer until the attempt is cut short: with a
+// 300ms delay instead, a test scheduled late saw the delivery succeed.
 func TestCancelledAttemptLeavesEventUntouched(t *testing.T) {
 	rx := newReceiver(t)
-	rx.delay = 300 * time.Millisecond
+	rx.hold = make(chan struct{})
+	t.Cleanup(func() { close(rx.hold) }) // before the server closes
 	ob := newOutbox(t)
 	enqueue(t, ob, testEvent(1, events.SeverityHigh))
 	d := fastDispatcher(ob, NewSender(rx.srv.URL, "", ""))

@@ -65,7 +65,7 @@ func TestIngestAuth(t *testing.T) {
 
 func TestIngestDispatchesToParsersWithTimeAndInterface(t *testing.T) {
 	var got []discovery.Sighting
-	hb := NewHeartbeat(time.Second, []string{"arp"})
+	hb := NewHeartbeat(time.Minute, []string{"arp"}) // ready below must not depend on how fast this runs
 	in := NewIngestor("tok", func(s discovery.Sighting) { got = append(got, s) }, hb, NewCommandQueue())
 
 	capturedAt := time.Now().Add(-time.Second).Truncate(time.Nanosecond)

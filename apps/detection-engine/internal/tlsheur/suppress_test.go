@@ -2,6 +2,9 @@ package tlsheur
 
 import (
 	"fmt"
+	"io"
+	"log"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -20,18 +23,42 @@ func (r constResolver) Get(_, _ string) string { return string(r) }
 // inserted even when its sweep freed nothing, and swept all of itself on
 // every insert past the limit: it grew without bound and each insert walked
 // it whole.
+//
+// The cost is counted, not timed: a wall-clock bound on 65 536 inserts
+// failed on a loaded runner with -race and coverage, and a fast machine
+// would hide a quadratic walk behind it.
 func TestSuppressMapIsBounded(t *testing.T) {
+	quietLogs(t) // one INFO line per finding, 65 536 of them
+	now := time.Unix(1_800_000_000, 0)
 	alerts := 0
 	a := New(iocmatch.New(), constResolver("cdn.attacker.example"), DefaultLocalCIDRs,
 		func(detection.Alert) { alerts++ })
+	a.now = func() time.Time { return now }
 	evicted := counter(t)
-	const n = 4 * maxSuppressed
-	start := time.Now()
-	for i := 0; i < n; i++ {
-		a.Handle(ingest.SensorEvent{Kind: "tls-client", Timestamp: time.Now(), SrcIP: "192.168.1.66",
-			DstIP: "203.0.113.9", SNI: fmt.Sprintf("r%d.random-sni.example", i)})
+	key := func(i int) string {
+		return fmt.Sprintf("192.168.1.66|203.0.113.9|sni-dns-mismatch|r%d.random-sni.example vs cdn.attacker.example", i)
 	}
-	elapsed := time.Since(start)
+	insert := func(from, to int) {
+		for i := from; i < to; i++ {
+			a.Handle(ingest.SensorEvent{Kind: "tls-client", Timestamp: now, SrcIP: "192.168.1.66",
+				DstIP: "203.0.113.9", SNI: fmt.Sprintf("r%d.random-sni.example", i)})
+		}
+	}
+
+	// Up to the cap nothing is evicted, and the upkeep looks at nothing.
+	insert(0, maxSuppressed)
+	if a.examined != 0 || len(a.suppressed) != maxSuppressed {
+		t.Fatalf("filling the table: %d entries examined, %d kept", a.examined, len(a.suppressed))
+	}
+	// Past it, every insert costs the same however full the table is: one
+	// eviction, the oldest. The quadratic table walked all 16 384 entries
+	// on each of these inserts.
+	const n = 4 * maxSuppressed
+	insert(maxSuppressed, n)
+	if want := n - maxSuppressed; a.examined != want {
+		t.Errorf("the table's upkeep examined %d entries for %d inserts past the cap, want %d (one each)",
+			a.examined, n-maxSuppressed, want)
+	}
 	if len(a.suppressed) > maxSuppressed || a.order.Len() != len(a.suppressed) {
 		t.Fatalf("suppression table holds %d keys (list %d), cap %d", len(a.suppressed), a.order.Len(), maxSuppressed)
 	}
@@ -41,14 +68,27 @@ func TestSuppressMapIsBounded(t *testing.T) {
 	if got := counter(t) - evicted; got != n-maxSuppressed {
 		t.Errorf("evictions counted %v, want %d", got, n-maxSuppressed)
 	}
-	// Quadratic behaviour took tens of seconds here; linear is milliseconds.
-	if elapsed > 5*time.Second {
-		t.Errorf("%d inserts took %s", n, elapsed)
+	// The newest keys are the ones kept, the oldest the ones gone.
+	for i, kept := range map[int]bool{n - 1: true, n - maxSuppressed: true, n - maxSuppressed - 1: false, 0: false} {
+		if _, ok := a.suppressed[key(i)]; ok != kept {
+			t.Errorf("suppression %d kept=%v, want %v: the oldest must go first", i, ok, kept)
+		}
 	}
-	// The newest keys are the ones kept.
-	if _, ok := a.suppressed[fmt.Sprintf("192.168.1.66|203.0.113.9|sni-dns-mismatch|r%d.random-sni.example vs cdn.attacker.example", n-1)]; !ok {
-		t.Error("the newest suppression was evicted instead of the oldest")
-	}
+}
+
+// quietLogs discards log output until the test ends — a test that makes
+// tens of thousands of findings would otherwise print a line for each —
+// and then restores the default logger and the log package's output it
+// writes through.
+func quietLogs(t *testing.T) {
+	t.Helper()
+	prev, out, flags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(out)
+		log.SetFlags(flags)
+	})
 }
 
 // TestSuppressionExpiresAndIsSweptPeriodically: within the window a finding

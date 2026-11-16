@@ -21,14 +21,34 @@ type agentEnv struct {
 	arp *drivers.ARPIsolateDriver
 }
 
+// The clock is the test's: a confirmation deadline, the agent grace and a
+// TTL pass when the test moves it (passDeadline, clk.Advance). On the wall
+// clock, with a 300ms deadline, a confirmation the test sends a moment late
+// on a loaded machine lost to the deadline.
 func newAgentEnv(t *testing.T) *agentEnv {
 	t.Helper()
-	en := &env{t: t, clk: &clock{real: true}, path: filepath.Join(t.TempDir(), "ks.db"),
+	en := &env{t: t, clk: &clock{t: time.Now().UTC().Truncate(time.Millisecond)}, path: filepath.Join(t.TempDir(), "ks.db"),
 		drv: &scripted{}, cfg: Config{ConfirmTimeout: 300 * time.Millisecond, AgentGrace: 50 * time.Millisecond}}
 	ae := &agentEnv{env: en}
 	en.open()
 	ae.attach()
 	return ae
+}
+
+// passDeadline moves the clock past the confirmation deadline of id's
+// operation until the engine has resolved it. The engine sets the deadline
+// from its own goroutine after queuing the command, so a single move could
+// come before the deadline is set and leave it in the future.
+func (ae *agentEnv) passDeadline(id string) {
+	ae.t.Helper()
+	give := time.Now().Add(time.Minute)
+	for ae.e.Busy(id) {
+		if time.Now().After(give) {
+			ae.t.Fatalf("%s never gave up waiting for the agent", id)
+		}
+		ae.clk.Advance(ae.e.cfg.ConfirmTimeout + time.Second)
+		ae.e.Wait(context.Background(), id, 300*time.Millisecond)
+	}
 }
 
 // attach wires the agent driver to the current store (after open or a
@@ -40,6 +60,7 @@ func (ae *agentEnv) attach() {
 	}
 	ae.arp = drivers.NewARPIsolateDriver(ae.s, &guard, nil)
 	ae.e = New(ae.s, map[string]drivers.Driver{events.ActionDNSSinkhole: ae.drv, events.ActionARPIsolate: ae.arp}, ae.cfg)
+	ae.e.now = ae.clk.Now
 }
 
 func (ae *agentEnv) poll(results []drivers.AgentResult, active ...drivers.AgentIsolation) []drivers.AgentCommand {
@@ -55,7 +76,7 @@ func (ae *agentEnv) poll(results []drivers.AgentResult, active ...drivers.AgentI
 func (ae *agentEnv) waitCommands(n int, active ...drivers.AgentIsolation) []drivers.AgentCommand {
 	ae.t.Helper()
 	var got []drivers.AgentCommand
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for len(got) < n && time.Now().Before(deadline) {
 		got = append(got, ae.poll(nil, active...)...)
 		time.Sleep(5 * time.Millisecond)
@@ -144,6 +165,7 @@ func TestIsolationRefusedOrUnconfirmedIsApplyFailed(t *testing.T) {
 	// is carried out late.
 	silent := ae.approveIsolation("b.example")
 	sent := ae.waitCommands(1)
+	ae.passDeadline(silent.ID)
 	ae.idle()
 	if got := ae.get(silent.ID); got.State != events.StateApplyFailed || !strings.Contains(got.FailureReason, "did not confirm") {
 		t.Fatalf("unconfirmed: %s %q", got.State, got.FailureReason)
@@ -163,7 +185,8 @@ func TestIsolationNeverFetchedIsWithdrawn(t *testing.T) {
 	ae := newAgentEnv(t)
 	ae.poll(nil)
 	r := ae.approveIsolation("a.example")
-	ae.idle() // the deadline passes with nobody polling
+	ae.passDeadline(r.ID) // the deadline passes with nobody polling
+	ae.idle()
 	got := ae.get(r.ID)
 	if got.State != events.StateApplyFailed {
 		t.Fatalf("state %s", got.State)
@@ -190,7 +213,7 @@ func TestReleaseRefusedIsRevertFailed(t *testing.T) {
 		t.Fatalf("a refused release: %s", got.State)
 	}
 	// The agent's list says it is gone after all: the release took effect.
-	time.Sleep(60 * time.Millisecond)
+	ae.clk.Advance(60 * time.Millisecond)
 	ae.poll(nil)
 	if got := ae.get(r.ID); got.State != events.StateReverted || got.RevertedBy != actions.ActorReconcile {
 		t.Fatalf("reconciled: %s by %s", got.State, got.RevertedBy)
@@ -221,7 +244,7 @@ func TestAgentReconciliation(t *testing.T) {
 	// The agent no longer lists ours (it restarted and restored the ARP
 	// entry): the isolation is still wanted, so it is issued again for the
 	// rest of its TTL — once, not on every poll.
-	time.Sleep(60 * time.Millisecond)
+	ae.clk.Advance(60 * time.Millisecond)
 	again := ae.poll(nil)
 	if len(again) != 1 || again[0].Type != drivers.CommandIsolate || again[0].MAC != device.MAC ||
 		again[0].TTLSeconds < 55 || again[0].TTLSeconds > 61 || again[0].ActionID != r.ID {
@@ -237,7 +260,7 @@ func TestAgentReconciliation(t *testing.T) {
 
 	// The agent drops it again and now refuses to restore it (isolation was
 	// switched off): it is not in force, and the action says so.
-	time.Sleep(60 * time.Millisecond)
+	ae.clk.Advance(60 * time.Millisecond)
 	third := ae.poll(nil)
 	if len(third) != 1 {
 		t.Fatalf("second re-issue: %+v", third)
@@ -266,7 +289,7 @@ func TestIsolationNearItsTTLIsNotReissued(t *testing.T) {
 	iso := ae.waitCommands(1)
 	ae.poll([]drivers.AgentResult{{ID: iso[0].ID, OK: true}}, device)
 	ae.idle()
-	time.Sleep(2100 * time.Millisecond) // past the grace, inside it of expiry
+	ae.clk.Advance(2100 * time.Millisecond) // past the grace, inside it of expiry
 	if cmds := ae.poll(nil); len(cmds) != 0 {
 		t.Fatalf("an isolation at its TTL was issued again: %+v", cmds)
 	}

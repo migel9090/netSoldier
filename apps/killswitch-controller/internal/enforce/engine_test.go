@@ -21,6 +21,8 @@ type scripted struct {
 	mu         sync.Mutex
 	applyErrs  []error
 	revertErrs []error
+	// revertGate, when set, holds every revert until it is closed.
+	revertGate chan struct{}
 	applies    atomic.Int32
 	reverts    atomic.Int32
 	delay      time.Duration
@@ -49,8 +51,15 @@ func (d *scripted) Apply(ctx context.Context, _ *events.EnforcementAction) error
 	return d.next(&d.applyErrs)
 }
 
-func (d *scripted) Revert(context.Context, *events.EnforcementAction) error {
+func (d *scripted) Revert(ctx context.Context, _ *events.EnforcementAction) error {
 	d.reverts.Add(1)
+	if d.revertGate != nil {
+		select {
+		case <-d.revertGate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return d.next(&d.revertErrs)
 }
 
@@ -121,7 +130,7 @@ func (en *env) restart() {
 
 func (en *env) idle() {
 	en.t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for time.Now().Before(deadline) {
 		en.e.mu.Lock()
 		n := len(en.e.inflight)
@@ -353,6 +362,53 @@ func TestFailedRevertIsRetriedAndNeverReportedReverted(t *testing.T) {
 	}
 	if en.drv.reverts.Load() != before {
 		t.Error("the driver ran for an already reverted action")
+	}
+}
+
+// TestRevertIsRecordedBeforeRevertReturns: the intent was written by the
+// background goroutine, so the HTTP answer to a revert still under way (a
+// 202) could be read before it and show an active action with nothing in
+// flight.
+func TestRevertIsRecordedBeforeRevertReturns(t *testing.T) {
+	en := newEnv(t, Config{}, nil)
+	r := en.active("evil.example")
+	gate := make(chan struct{})
+	en.drv.revertGate = gate // set before any revert runs
+
+	if _, err := en.e.Revert(context.Background(), r.ID, "alice", "false positive"); err != nil {
+		t.Fatal(err)
+	}
+	got := en.get(r.ID)
+	if got.Op != actions.OpRevert || got.OpActor != "alice" || got.Action().InFlight != events.OperationRevert {
+		t.Fatalf("right after Revert: op %q by %q, in_flight %q; want the revert recorded",
+			got.Op, got.OpActor, got.Action().InFlight)
+	}
+	close(gate)
+	en.idle()
+	if got := en.get(r.ID); got.State != events.StateReverted || got.RevertedBy != "alice" || got.Op != actions.OpNone {
+		t.Fatalf("after the driver answered: %s by %s, op %q", got.State, got.RevertedBy, got.Op)
+	}
+}
+
+// TestRevertThatCannotBeRecordedStartsNothing: with the intent recorded on
+// the request, a revert the store refuses is answered with the conflict
+// and the action as it is, and no driver call runs. (In the background it
+// was only logged, and the caller was answered as if it had started.)
+func TestRevertThatCannotBeRecordedStartsNothing(t *testing.T) {
+	en := newEnv(t, Config{}, nil)
+	r := en.active("evil.example")
+	// Another operation outstanding in the store (left by a previous run)
+	// that this process is not running: the revert cannot start.
+	if _, err := en.s.BeginOp(r.ID, actions.OpApply, "alice", "", en.clk.Now().Add(time.Hour), events.StateActive); err != nil {
+		t.Fatal(err)
+	}
+	_, err := en.e.Revert(context.Background(), r.ID, "bob", "x")
+	var c *actions.ConflictError
+	if !errors.As(err, &c) || c.Current.ID != r.ID {
+		t.Fatalf("revert with another operation outstanding: %v, want a conflict naming the action", err)
+	}
+	if en.drv.reverts.Load() != 0 || en.e.Busy(r.ID) {
+		t.Fatal("a revert that could not be recorded must not run")
 	}
 }
 

@@ -18,7 +18,7 @@ func TestPostSendsBearerAndParsesCommands(t *testing.T) {
 		_, _ = w.Write([]byte(`{"commands":[{"id":"c-1","type":"arp_probe","target":"192.168.1.0/24"}]}`))
 	}))
 	defer srv.Close()
-	c := New("inv", srv.URL, "secret", time.Second)
+	c := New("inv", srv.URL, "secret", time.Minute)
 	code, cmds, err := c.Post(context.Background(), proto.Batch{Agent: "n"})
 	if err != nil || code != 200 {
 		t.Fatalf("Post: %d %v", code, err)
@@ -47,7 +47,7 @@ func TestPostBoundsResponse(t *testing.T) {
 		w.Write([]byte("]}"))
 	}))
 	defer srv.Close()
-	c := New("inv", srv.URL, "t", time.Second)
+	c := New("inv", srv.URL, "t", time.Minute)
 	code, cmds, err := c.Post(context.Background(), proto.Batch{})
 	if code != 200 || err == nil || cmds != nil {
 		t.Fatalf("oversize response should return 200 with an error and no commands: %d %v %+v", code, err, cmds)

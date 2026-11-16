@@ -73,6 +73,33 @@ func (a *stubAgent) poll() int {
 	return status
 }
 
+// fetch polls until the agent is handed a new command of type typ for mac,
+// and returns it. The engine queues a command from its own goroutine after
+// answering the request that caused it, so a single poll right after that
+// request can come too early.
+func (a *stubAgent) fetch(typ, mac string) drivers.AgentCommand {
+	a.t.Helper()
+	a.mu.Lock()
+	from := len(a.seen)
+	a.mu.Unlock()
+	deadline := time.Now().Add(time.Minute)
+	for {
+		a.poll()
+		a.mu.Lock()
+		for _, c := range a.seen[from:] {
+			if c.Type == typ && c.MAC == mac {
+				a.mu.Unlock()
+				return c
+			}
+		}
+		a.mu.Unlock()
+		if time.Now().After(deadline) {
+			a.t.Fatalf("no %s for %s was handed to the agent", typ, mac)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // run polls every few milliseconds until the test ends.
 func (a *stubAgent) run() {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -89,11 +116,14 @@ func (a *stubAgent) run() {
 
 func agentHarness(t *testing.T) *harness {
 	t.Helper()
-	return agentHarnessWith(t, 2*time.Second, 0)
+	return agentHarnessWith(t, time.Minute, 0)
 }
 
 // agentHarnessWith sets how long an isolation waits for the agent's
-// confirmation and how long a request waits for an outcome.
+// confirmation and how long a request waits for an outcome (0: the
+// harness default). A confirmation the agent is meant to give must have a
+// minute, not a moment: the agent's poll loop runs on the same busy
+// machine.
 func agentHarnessWith(t *testing.T, confirm, wait time.Duration) *harness {
 	t.Helper()
 	return newHarness(t, harnessOpts{
@@ -125,8 +155,8 @@ func TestARPIsolationThroughTheAgent(t *testing.T) {
 		!strings.Contains(got.Error, "no netagent") {
 		t.Fatalf("without an agent: %d %+v", status, got)
 	}
+	agent.poll() // seen: isolation is offered from now on
 	agent.run()
-	time.Sleep(30 * time.Millisecond)
 	var pol map[string]any
 	h.get("/policy", &pol)
 	if !strings.Contains(strings.Join(toStrings(pol["available_action_types"]), ","), events.ActionARPIsolate) {
@@ -160,8 +190,12 @@ func TestARPIsolationThroughTheAgent(t *testing.T) {
 // nobody was lifting, and an isolation waiting for the agent like any
 // approved action. in_flight says which operation is outstanding, on every
 // read, and is gone once it is answered.
+//
+// Nothing here races a clock: an operation waiting for the agent cannot
+// finish before the test polls as the agent, so the short response wait
+// always runs out first.
 func TestInFlightNamesTheOutstandingOperation(t *testing.T) {
-	h := agentHarnessWith(t, 10*time.Second, 50*time.Millisecond)
+	h := agentHarnessWith(t, time.Minute, 50*time.Millisecond)
 	agent := newStubAgent(h)
 	agent.poll() // seen: isolation is available
 	a := h.createPending("02:00:00:00:00:34", "192.168.1.34", "x.example")
@@ -183,7 +217,7 @@ func TestInFlightNamesTheOutstandingOperation(t *testing.T) {
 	}
 	inFlight(events.OperationApply)
 
-	agent.poll() // fetches the isolation
+	agent.fetch(drivers.CommandIsolate, "02:00:00:00:00:34")
 	agent.poll() // reports it done
 	if st := h.action(a.ID).State; st != events.StateActive {
 		t.Fatalf("after the agent confirmed: %s", st)
@@ -199,8 +233,8 @@ func TestInFlightNamesTheOutstandingOperation(t *testing.T) {
 		t.Errorf("/actions/active must show the release under way: %+v", l)
 	}
 
-	agent.poll()
-	agent.poll()
+	agent.fetch(drivers.CommandRelease, "02:00:00:00:00:34")
+	agent.poll() // reports it done
 	h.idle(a.ID)
 	if st := h.action(a.ID).State; st != events.StateReverted {
 		t.Fatalf("after the agent confirmed the release: %s", st)
@@ -217,12 +251,13 @@ func TestInFlightNamesTheOutstandingOperation(t *testing.T) {
 // refused, or stayed silent past the deadline), and the revert's outcome
 // names the operator who asked for it although the agent confirmed it. The
 // synchronous counterpart is TestAuditTrailIsCompleteAndAttributable.
+//
+// The isolation that goes unconfirmed runs in a controller of its own with
+// a short confirmation deadline, and nothing polls it; the ones the agent
+// answers get a deadline they cannot miss. One controller for all three
+// made the confirmed isolation race the deadline meant for the silent one.
 func TestIsolationAuditNamesApproverAndConfirmer(t *testing.T) {
-	h := agentHarnessWith(t, 300*time.Millisecond, 5*time.Second)
-	agent := newStubAgent(h)
-	agent.poll() // seen, but not polling: the first isolation goes unconfirmed
-
-	trail := func(id string) string {
+	trail := func(h *harness, id string) string {
 		t.Helper()
 		var entries []actions.AuditEntry
 		if status := h.get("/audit?action_id="+id, &entries); status != http.StatusOK {
@@ -235,7 +270,7 @@ func TestIsolationAuditNamesApproverAndConfirmer(t *testing.T) {
 		}
 		return strings.Join(steps, " ")
 	}
-	isolate := func(mac, ip string) string {
+	isolate := func(h *harness, mac, ip string) string {
 		t.Helper()
 		a := h.createPending(mac, ip, "x.example")
 		if status, _ := h.approve(a.ID, map[string]string{"action_type": events.ActionARPIsolate}); status != http.StatusOK {
@@ -244,24 +279,33 @@ func TestIsolationAuditNamesApproverAndConfirmer(t *testing.T) {
 		return a.ID
 	}
 
-	silent := isolate("02:00:00:00:00:35", "192.168.1.35")
+	quiet := agentHarnessWith(t, 300*time.Millisecond, 0)
+	newStubAgent(quiet).poll() // seen, but not polling: the isolation goes unconfirmed
+	silent := isolate(quiet, "02:00:00:00:00:35", "192.168.1.35")
+
+	h := agentHarness(t)
+	agent := newStubAgent(h)
+	agent.poll()
 	agent.run()
-	confirmed := isolate("02:00:00:00:00:36", "192.168.1.36")
+	confirmed := isolate(h, "02:00:00:00:00:36", "192.168.1.36")
 	if status, _ := h.revert(confirmed, "bob"); status != http.StatusOK {
 		t.Fatalf("revert: %d", status)
 	}
 	agent.mu.Lock()
 	agent.refuse[drivers.CommandIsolate] = "refused: target is the gateway"
 	agent.mu.Unlock()
-	refused := isolate("02:00:00:00:00:37", "192.168.1.37")
+	refused := isolate(h, "02:00:00:00:00:37", "192.168.1.37")
 
-	for id, want := range map[string]string{
-		silent:    ">pending:auto-policy pending>approved:alice approved>apply_failed:netagent",
-		confirmed: ">pending:auto-policy pending>approved:alice approved>active:netagent active>reverted:bob",
-		refused:   ">pending:auto-policy pending>approved:alice approved>apply_failed:netagent",
+	for _, c := range []struct {
+		h        *harness
+		id, want string
+	}{
+		{quiet, silent, ">pending:auto-policy pending>approved:alice approved>apply_failed:netagent"},
+		{h, confirmed, ">pending:auto-policy pending>approved:alice approved>active:netagent active>reverted:bob"},
+		{h, refused, ">pending:auto-policy pending>approved:alice approved>apply_failed:netagent"},
 	} {
-		if got := trail(id); got != want {
-			t.Errorf("%s:\n got %s\nwant %s", id, got, want)
+		if got := trail(c.h, c.id); got != c.want {
+			t.Errorf("%s:\n got %s\nwant %s", c.id, got, c.want)
 		}
 	}
 	if a := h.action(confirmed); a.ApprovedBy != testActor || a.RevertedBy != "bob" {
@@ -273,8 +317,8 @@ func TestARPIsolationRefusedByTheAgent(t *testing.T) {
 	h := agentHarness(t)
 	agent := newStubAgent(h)
 	agent.refuse[drivers.CommandIsolate] = "refused: ip_forward=1 on this host"
+	agent.poll() // seen: isolation is offered from now on
 	agent.run()
-	time.Sleep(30 * time.Millisecond)
 
 	a := h.createPending("02:00:00:00:00:32", "192.168.1.32", "x.example")
 	status, got := h.approve(a.ID, map[string]string{"action_type": events.ActionARPIsolate})

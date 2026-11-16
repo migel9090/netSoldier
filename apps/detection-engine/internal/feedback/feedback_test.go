@@ -893,7 +893,7 @@ func TestForwarderCopiesInOrderAndRetries(t *testing.T) {
 	go func() { defer close(done); f2.Run(ctx) }()
 	s2 := NewWithOptions(st.Feedback(), Options{Notify: f2.Notify})
 	mustRecord(t, s2, fp("third.example", "", ioc))
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for {
 		if n, _ := st.Feedback().Unforwarded(); n == 0 {
 			break

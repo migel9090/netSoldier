@@ -132,7 +132,7 @@ func TestRunLoopReconcilesAndReaps(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { en.e.Run(ctx); close(done) }()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for en.get(r.ID).State != events.StateReverted && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}

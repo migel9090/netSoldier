@@ -23,6 +23,7 @@ import (
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/feedback"
 	"github.com/migel9090/netSoldier/libs/events"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
@@ -171,7 +172,7 @@ func start(t *testing.T, env map[string]string) (addr string, stop func() error)
 	case err := <-errCh:
 		cancel()
 		t.Fatalf("run exited before listening: %v", err)
-	case <-time.After(10 * time.Second):
+	case <-time.After(time.Minute):
 		cancel()
 		t.Fatal("run did not start listening")
 	}
@@ -182,7 +183,7 @@ func start(t *testing.T, env map[string]string) (addr string, stop func() error)
 			cancel()
 			select {
 			case runErr = <-errCh:
-			case <-time.After(20 * time.Second):
+			case <-time.After(time.Minute):
 				t.Fatal("run did not shut down")
 			}
 		})
@@ -194,7 +195,7 @@ func start(t *testing.T, env map[string]string) (addr string, stop func() error)
 
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
@@ -322,10 +323,11 @@ func TestRunDoesNotRedetectAfterRestart(t *testing.T) {
 			}
 			db.Close()
 		}
-		// Metrics are per test binary, not per run: measure from here.
+		// Metrics are per test binary, not per run: measure from here —
+		// before the start, since its first poll can come before any scrape.
+		pages := localMetric(t, "detection_engine_querylog_pages_total")
+		replays := localMetric(t, "detection_engine_replayed_detections_total")
 		addr, stop := start(t, env)
-		pages := metric(t, addr, "detection_engine_querylog_pages_total")
-		replays := metric(t, addr, "detection_engine_replayed_detections_total")
 		waitFor(t, "a few polls", func() bool {
 			return metric(t, addr, "detection_engine_querylog_pages_total") >= pages+5
 		})
@@ -494,6 +496,9 @@ func TestRunVerdictSurvivesRestartWithoutClickHouse(t *testing.T) {
 	}}, entries...)
 	mu.Unlock()
 
+	// Counted from before the start: the new lookup can be detected, and
+	// suppressed, before the first scrape.
+	suppressed := localMetric(t, "detection_engine_alerts_suppressed_total")
 	addr, stop = start(t, env)
 	sup := getSuppressions(t, addr)
 	if len(sup) != 1 || sup[0]["matched_ioc"] != a.MatchedIoC || sup[0]["analyst"] != "analyst" {
@@ -504,7 +509,6 @@ func TestRunVerdictSurvivesRestartWithoutClickHouse(t *testing.T) {
 	if err != nil || !expires.Equal(recorded.Add(feedback.DefaultSuppressionTTL)) {
 		t.Errorf("expires_at %v, want the verdict's time + the TTL (%v)", sup[0]["expires_at"], err)
 	}
-	suppressed := metric(t, addr, "detection_engine_alerts_suppressed_total")
 	waitFor(t, "the new lookup to be detected", func() bool { return len(getAlerts(t, addr)) >= 2 })
 	if n := metric(t, addr, "detection_engine_alerts_suppressed_total"); n <= suppressed {
 		t.Fatalf("the detection after the restart was not suppressed (%v -> %v)", suppressed, n)
@@ -738,11 +742,20 @@ func TestTracingOnlyWithAnEndpoint(t *testing.T) {
 			}
 			_, span := otel.Tracer("test").Start(context.Background(), "probe")
 			span.End()
-			// The collector stub speaks no OTLP, so the export fails; what
-			// matters is that it was attempted at the configured address.
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_ = shutdown(ctx)
+			// The collector stub speaks no OTLP, so the export fails and is
+			// retried until the shutdown is cut short; what matters is that
+			// it was attempted at the configured address. The shutdown is
+			// cut short once the stub has seen a dial (or after a minute),
+			// not after a fixed two seconds a slow machine could spend
+			// before dialling at all.
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { _ = shutdown(ctx); close(done) }()
+			for deadline := time.Now().Add(time.Minute); tc.dials.Load() == 0 && time.Now().Before(deadline); {
+				time.Sleep(10 * time.Millisecond)
+			}
+			cancel()
+			<-done
 			if tc.dials.Load() == 0 {
 				t.Errorf("the exporter never dialled %s", tc.value)
 			}
@@ -758,7 +771,20 @@ func metric(t *testing.T, addr, series string) float64 {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	sc := bufio.NewScanner(resp.Body)
+	return sample(resp.Body, series)
+}
+
+// localMetric reads one sample from this process's registry, which is the
+// one run() registers with — for a baseline taken before run() starts.
+func localMetric(t *testing.T, series string) float64 {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	promhttp.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	return sample(rec.Body, series)
+}
+
+func sample(r io.Reader, series string) float64 {
+	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		if v, ok := strings.CutPrefix(sc.Text(), series+" "); ok {
 			f, _ := strconv.ParseFloat(v, 64)

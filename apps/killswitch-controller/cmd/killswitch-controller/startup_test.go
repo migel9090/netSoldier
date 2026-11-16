@@ -156,6 +156,26 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
+// startedLine is logged once main has said everything it says at start-up.
+const startedLine = "starting killswitch-controller"
+
+// startupLog waits until the subprocess has logged its whole start-up and
+// returns the output. A reply from the service does not mean its log has
+// reached this process yet — the output is copied through a pipe by a
+// goroutine of its own — so checking the log right after the first
+// successful request raced that copy.
+func startupLog(t *testing.T, out *lockedBuffer) string {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute)
+	for !strings.Contains(out.String(), startedLine) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the service never finished starting:\n%s", out)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return out.String()
+}
+
 func startMain(t *testing.T, env map[string]string) (*exec.Cmd, *lockedBuffer) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestMainSubprocess$")
@@ -218,7 +238,7 @@ func TestServiceRefusesToStart(t *testing.T) {
 				if !errors.As(err, &exit) || exit.ExitCode() != 1 {
 					t.Fatalf("exit = %v, want status 1\n%s", err, out)
 				}
-			case <-time.After(20 * time.Second):
+			case <-time.After(time.Minute):
 				_ = cmd.Process.Kill()
 				t.Fatalf("the service started:\n%s", out)
 			}
@@ -243,7 +263,7 @@ func TestPendingOnlyStartIsVisibleInMetrics(t *testing.T) {
 	})
 
 	var metrics string
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for time.Now().Before(deadline) {
 		resp, err := http.Get("http://" + addr + "/metrics")
 		if err == nil {
@@ -263,15 +283,15 @@ func TestPendingOnlyStartIsVisibleInMetrics(t *testing.T) {
 			t.Errorf("/metrics should contain %q", want)
 		}
 	}
-	if !strings.Contains(out.String(), "auto-block DISABLED") {
-		t.Errorf("start-up should say auto-block is disabled:\n%s", out)
+	if log := startupLog(t, out); !strings.Contains(log, "auto-block DISABLED") {
+		t.Errorf("start-up should say auto-block is disabled:\n%s", log)
 	}
 }
 
 // scrapeMetrics waits for the service at addr and returns its /metrics.
 func scrapeMetrics(t *testing.T, addr string, out *lockedBuffer) string {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for time.Now().Before(deadline) {
 		resp, err := http.Get("http://" + addr + "/metrics")
 		if err == nil {
@@ -314,11 +334,12 @@ func TestAutoBlockIsOffUntilSwitchedOn(t *testing.T) {
 					t.Errorf("/metrics should contain %q", want)
 				}
 			}
-			if !strings.Contains(out.String(), tc.log) {
-				t.Errorf("start-up log should contain %q:\n%s", tc.log, out)
+			log := startupLog(t, out)
+			if !strings.Contains(log, tc.log) {
+				t.Errorf("start-up log should contain %q:\n%s", tc.log, log)
 			}
-			if strings.Contains(out.String(), "allowlist is EMPTY") {
-				t.Errorf("the allowlist is not empty:\n%s", out)
+			if strings.Contains(log, "allowlist is EMPTY") {
+				t.Errorf("the allowlist is not empty:\n%s", log)
 			}
 		})
 	}

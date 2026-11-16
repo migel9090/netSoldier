@@ -230,15 +230,8 @@ func TestFloodDoesNotMaskCriticalDetectionE2E(t *testing.T) {
 	}
 	detBin := goBuild(t, repoRoot(t), "apps/detection-engine")
 
-	var mu sync.Mutex
-	var exportedAt time.Time
 	tiMux := http.NewServeMux()
 	tiMux.HandleFunc("GET /export/json", func(w http.ResponseWriter, _ *http.Request) {
-		mu.Lock()
-		if exportedAt.IsZero() {
-			exportedAt = time.Now()
-		}
-		mu.Unlock()
 		fmt.Fprint(w, `[{"Type":"domain","Value":"c2.real-threat.example","Source":"threatfox","Confidence":100,"Threat":"AsyncRAT"},
 			{"Type":"domain","Value":"old-urlhaus-host.example","Source":"urlhaus","Confidence":0}]`)
 	})
@@ -246,11 +239,8 @@ func TestFloodDoesNotMaskCriticalDetectionE2E(t *testing.T) {
 	tiSrv := &http.Server{Handler: tiMux}
 	go tiSrv.Serve(tiLn)
 	t.Cleanup(func() { tiSrv.Close() })
-	ready := func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return !exportedAt.IsZero() && time.Since(exportedAt) > 1500*time.Millisecond
-	}
+	addr := freeAddr(t)
+	ready := func() bool { return indicatorsLoaded(addr) }
 
 	// Newest first, as AdGuard serves it: the junk, then the C2 lookup.
 	base := time.Now().Add(time.Hour)
@@ -270,7 +260,6 @@ func TestFloodDoesNotMaskCriticalDetectionE2E(t *testing.T) {
 	rx.down.Store(true)
 	inv := startInventoryByIP(t, "192.168.1.66", "aa:bb:cc:00:00:66", "kids-tablet")
 
-	addr := freeAddr(t)
 	stop := startProc(t, detBin, map[string]string{
 		"LISTEN_ADDR":                 addr,
 		"ADGUARD_URL":                 ag.url,
@@ -291,14 +280,19 @@ func TestFloodDoesNotMaskCriticalDetectionE2E(t *testing.T) {
 	t.Cleanup(stop)
 	waitHealthy(t, "http://"+addr+"/healthz")
 
-	eventually(t, "all 251 detections to be recorded", 40*time.Second, func() bool {
+	eventually(t, "all 251 detections to be recorded", time.Minute, func() bool {
 		return len(listAlerts(t, addr)) == 251
 	})
 	rx.down.Store(false) // the killswitch is back
-	eventually(t, "the critical and the aggregated detection to arrive", 60*time.Second, func() bool {
+	eventually(t, "the critical and the aggregated detection to arrive", time.Minute, func() bool {
 		return len(rx.events()) >= 2
 	})
-	time.Sleep(2 * time.Second) // anything else that was going to arrive
+	// Anything else that was going to arrive is in the outbox until it has:
+	// wait for the outbox to be empty rather than for a while.
+	eventually(t, "the outbox to be empty", time.Minute, func() bool {
+		n, ok := scrapeMetric(addr, "detection_engine_outbox_backlog")
+		return ok && n == 0
+	})
 
 	got := rx.events()
 	counts := map[string]int{}

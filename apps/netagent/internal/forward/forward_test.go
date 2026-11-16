@@ -94,7 +94,7 @@ func TestForwarderDeliversFramesAndHeartbeat(t *testing.T) {
 	defer cancel()
 
 	// One batch with the frame, then heartbeats with the capture status.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for time.Now().Before(deadline) {
 		if b := stub.seen(); len(b) >= 1 && len(b[0].Frames) == 1 {
 			if b[0].Agent != "soc-node-1" || !b[0].Status.Capture["arp"] {
@@ -154,7 +154,7 @@ func TestNonProbeCommandIsRefused(t *testing.T) {
 
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return

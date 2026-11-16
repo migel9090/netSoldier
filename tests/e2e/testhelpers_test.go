@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -297,6 +298,38 @@ func listActions(t *testing.T, ksAddr, state string) []events.EnforcementAction 
 	var out []events.EnforcementAction
 	httpGetJSON(t, "http://"+ksAddr+"/actions/"+state, &out)
 	return out
+}
+
+// scrapeMetric reads one unlabelled sample from a service's /metrics. ok is
+// false while the service cannot be reached or does not export the series.
+// It takes no *testing.T: stubs call it from their handlers.
+func scrapeMetric(addr, series string) (float64, bool) {
+	resp, err := http.Get("http://" + addr + "/metrics")
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, false
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if v, ok := strings.CutPrefix(line, series+" "); ok {
+			f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+			return f, err == nil
+		}
+	}
+	return 0, false
+}
+
+// indicatorsLoaded reports whether the detection-engine at addr has loaded
+// a feed set from threat-intel-sync. A stub querylog that holds its entries
+// back until then must ask the engine, not guess how long the load takes:
+// served too early, the entries are read before there is anything to
+// match them against, and never read again.
+func indicatorsLoaded(addr string) bool {
+	n, ok := scrapeMetric(addr, "detection_engine_ioc_sync_indicators")
+	return ok && n > 0
 }
 
 // bytesReader is a tiny alias so request bodies read clearly in tests.

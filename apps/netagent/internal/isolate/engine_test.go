@@ -73,7 +73,7 @@ func isoCmd(id, mac, ip string, ttl int64) proto.Command {
 
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return

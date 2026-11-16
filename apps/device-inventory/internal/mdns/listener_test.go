@@ -32,6 +32,9 @@ func aRecord(ip net.IP) []byte {
 	return append([]byte{0, 1, 0x80, 1, 0, 0, 0, 120, 0, 4}, ip.To4()...)
 }
 
+// within fails the test if f has not returned after d. It guards against
+// loops that never end, so d is a bound on termination, not on speed: a
+// minute, which a correct parse on the slowest runner never comes near.
 func within(t *testing.T, d time.Duration, f func()) {
 	t.Helper()
 	done := make(chan struct{})
@@ -48,7 +51,7 @@ func within(t *testing.T, d time.Duration, f func()) {
 func TestSelfPointerTerminates(t *testing.T) {
 	pkt := append(hdr(0, 1), 0xC0, 0x0C)
 	pkt = append(pkt, make([]byte, 16)...)
-	within(t, time.Second, func() {
+	within(t, time.Minute, func() {
 		if h := extractHostname(pkt, src); h != "" {
 			t.Errorf("got %q", h)
 		}
@@ -63,7 +66,7 @@ func TestPointerLoopIsBounded(t *testing.T) {
 	pkt = append(pkt, make([]byte, 16)...)
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	within(t, time.Second, func() {
+	within(t, time.Minute, func() {
 		for i := 0; i < 1000; i++ {
 			extractHostname(pkt, src)
 		}

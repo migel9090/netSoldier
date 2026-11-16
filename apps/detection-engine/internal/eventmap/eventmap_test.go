@@ -159,7 +159,7 @@ func TestEveryProducerEmitsValidV2Events(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { engine.Run(ctx); close(done) }()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for {
 		mu.Lock()
 		n := len(alerts)

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -262,21 +263,31 @@ func TestKillswitchCrashKeepsTheBlockE2E(t *testing.T) {
 	ks.crash(t)
 
 	ks = startKS(t, env)
-	active := listActions(t, ks.addr, "active")
-	if len(active) != 1 || active[0].ID != a.ID || active[0].ExpiresAt == nil || !active[0].ExpiresAt.Equal(*a.ExpiresAt) {
-		t.Fatalf("after the crash the block must still be known, with its expiry: %+v", active)
+	// What is asserted holds however long the restart took: the TTL keeps
+	// running meanwhile, and a slow restart may find the block already due.
+	// The rule is read before the action, so a rule found missing next to
+	// an action that is active with nothing in flight was removed by the
+	// start-up reconciliation, not by the TTL revert (which records its
+	// intent before it touches AdGuard).
+	rulePresent := ag.has("||crash-c2.example^")
+	known := ks.action(t, a.ID)
+	if known.ExpiresAt == nil || !known.ExpiresAt.Equal(*a.ExpiresAt) ||
+		(!events.IsEnforcedState(known.State) && known.State != events.StateReverted) {
+		t.Fatalf("after the crash the block must still be known, with its expiry: %+v", known)
 	}
-	if !ag.has("||crash-c2.example^") {
+	if !rulePresent && known.State == events.StateActive && known.InFlight == "" {
 		t.Fatal("start-up reconciliation removed a rule that is still wanted")
 	}
 	// It lasts until expires_at and is reverted then.
-	final := ks.waitState(t, a.ID, events.StateReverted, 15*time.Second, func(cur events.EnforcementAction) {
+	final := ks.waitState(t, a.ID, events.StateReverted, time.Minute, func(cur events.EnforcementAction) {
 		if cur.State != events.StateActive && time.Now().Before(a.ExpiresAt.Add(-500*time.Millisecond)) {
 			t.Fatalf("ended before its TTL: %s", cur.State)
 		}
 	})
-	if final.RevertedBy != "ttl" || ag.has("||crash-c2.example^") {
-		t.Fatalf("after its TTL: reverted_by=%q rule present=%v", final.RevertedBy, ag.has("||crash-c2.example^"))
+	if final.RevertedBy != "ttl" || final.RevertedAt == nil || final.RevertedAt.Before(*a.ExpiresAt) ||
+		ag.has("||crash-c2.example^") {
+		t.Fatalf("after its TTL: reverted_by=%q at %v (expires %v), rule present=%v",
+			final.RevertedBy, final.RevertedAt, a.ExpiresAt, ag.has("||crash-c2.example^"))
 	}
 }
 
@@ -297,7 +308,10 @@ func TestKillswitchRevertDuringAdGuardOutageE2E(t *testing.T) {
 		t.Fatalf("setup: %+v", a)
 	}
 
-	ag.inject(func(a *chaosAdGuard) { a.failSets = 3 })
+	// AdGuard stays down until the test has seen the failure: a fixed
+	// number of failed writes let the reaper's retries finish the revert
+	// before a slow test got to look.
+	ag.inject(func(a *chaosAdGuard) { a.failSets = math.MaxInt32 })
 	status, got := ks.operate(t, a.ID, "revert", "alice", map[string]string{"reason": "false positive"})
 	if status != http.StatusBadGateway || got.State != events.StateRevertFailed {
 		t.Fatalf("revert during the outage: %d %+v", status, got)
@@ -305,8 +319,9 @@ func TestKillswitchRevertDuringAdGuardOutageE2E(t *testing.T) {
 	if failed := listActions(t, ks.addr, "failed"); len(failed) != 1 || failed[0].ID != a.ID {
 		t.Fatalf("/actions/failed: %+v", failed)
 	}
+	ag.inject(func(a *chaosAdGuard) { a.failSets = 0 }) // AdGuard is back
 	// Never reported reverted while the rule exists; retried until it is gone.
-	final := ks.waitState(t, a.ID, events.StateReverted, 20*time.Second, func(cur events.EnforcementAction) {
+	final := ks.waitState(t, a.ID, events.StateReverted, time.Minute, func(cur events.EnforcementAction) {
 		if cur.State == events.StateReverted && ag.has("||outage-c2.example^") {
 			t.Fatal("reported reverted while the rule is still in AdGuard")
 		}
@@ -343,7 +358,7 @@ func TestKillswitchConcurrentApproveE2E(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	ks.waitState(t, a.ID, events.StateActive, 10*time.Second, nil)
+	ks.waitState(t, a.ID, events.StateActive, time.Minute, nil)
 	if _, writes := ag.snapshot(); writes != 1 {
 		t.Fatalf("AdGuard was written %d times for one approval (answers %v)", writes, results)
 	}
@@ -372,11 +387,19 @@ func TestKillswitchLateApprovalLastsItsTTLE2E(t *testing.T) {
 	if d := got.ExpiresAt.Sub(*got.ActivatedAt); d != 3*time.Second {
 		t.Fatalf("expires_at - activated_at = %s, want the full TTL", d)
 	}
-	time.Sleep(2 * time.Second)
-	if cur := ks.action(t, a.ID); cur.State != events.StateActive || !ag.has("||late.example^") {
-		t.Fatalf("ended before its TTL: %s", cur.State)
+	if !ag.has("||late.example^") {
+		t.Fatal("approved active, but the rule is not in AdGuard")
 	}
-	ks.waitState(t, a.ID, events.StateReverted, 10*time.Second, nil)
+	// It lasts its TTL: judged by when it ended, not by looking once after
+	// a sleep that a slow machine can stretch past the TTL.
+	final := ks.waitState(t, a.ID, events.StateReverted, time.Minute, func(cur events.EnforcementAction) {
+		if cur.State != events.StateActive && time.Now().Before(got.ExpiresAt.Add(-500*time.Millisecond)) {
+			t.Fatalf("ended before its TTL: %s", cur.State)
+		}
+	})
+	if final.RevertedBy != "ttl" || final.RevertedAt == nil || final.RevertedAt.Before(*got.ExpiresAt) {
+		t.Fatalf("reverted by %q at %v, want ttl at or after %v", final.RevertedBy, final.RevertedAt, got.ExpiresAt)
+	}
 }
 
 // TestKillswitchSharedRuleE2E: two actions on one domain; reverting one
@@ -440,40 +463,27 @@ func TestKillswitchAuditTrailE2E(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping e2e in short mode")
 	}
-	ag := startChaosAdGuard(t)
-	ks := startKS(t, ksEnv(freeAddr(t), ag.url, ksDBPath(t), map[string]string{"POLICY_DEFAULT_TTL": "2"}))
+	// The operators' lifecycle runs where the TTL is an hour, so the manual
+	// revert cannot lose a race to the reaper on a slow machine; the TTL
+	// revert runs in a second instance where it is two seconds. Each has an
+	// AdGuard of its own: both write the whole rule list, so a shared one
+	// could lose one instance's rule to the other's write.
+	ks := startKS(t, ksEnv(freeAddr(t), startChaosAdGuard(t).url, ksDBPath(t), map[string]string{"POLICY_DEFAULT_TTL": "3600"}))
+	short := startKS(t, ksEnv(freeAddr(t), startChaosAdGuard(t).url, ksDBPath(t), map[string]string{"POLICY_DEFAULT_TTL": "2"}))
 
 	manual := ks.evaluate(t, clientEvent("audit-manual.example", "192.168.1.68", 75, events.SeverityMedium))
 	rejected := ks.evaluate(t, clientEvent("audit-reject.example", "192.168.1.68", 75, events.SeverityMedium))
-	auto := ks.evaluate(t, clientEvent("audit-auto.example", "192.168.1.68", 97, events.SeverityCritical))
+	auto := short.evaluate(t, clientEvent("audit-auto.example", "192.168.1.68", 97, events.SeverityCritical))
 
 	ks.operate(t, manual.ID, "approve", "alice", map[string]string{"approved_by": "mallory"})
 	ks.operate(t, manual.ID, "revert", "bob", map[string]string{"reason": "false positive"})
 	ks.operate(t, rejected.ID, "reject", "carol", map[string]string{"reason": "known printer"})
-	ks.waitState(t, auto.ID, events.StateReverted, 10*time.Second, nil)
+	short.waitState(t, auto.ID, events.StateReverted, time.Minute, nil)
 
-	var entries []struct {
-		Seq           int64     `json:"seq"`
-		Timestamp     time.Time `json:"timestamp"`
-		ActionID      string    `json:"action_id"`
-		FromState     string    `json:"from_state"`
-		ToState       string    `json:"to_state"`
-		Actor         string    `json:"actor"`
-		Reason        string    `json:"reason"`
-		DetectionID   string    `json:"detection_id"`
-		TargetIP      string    `json:"target_ip"`
-		ActionType    string    `json:"action_type"`
-		BlockedDomain string    `json:"blocked_domain"`
-		PolicyRule    string    `json:"policy_rule"`
-	}
-	httpGetJSON(t, "http://"+ks.addr+"/audit?limit=100", &entries)
 	trail := map[string][]string{}
-	for i := len(entries) - 1; i >= 0; i-- {
-		e := entries[i]
-		trail[e.ActionID] = append(trail[e.ActionID], e.FromState+">"+e.ToState+":"+e.Actor)
-		if e.DetectionID == "" || e.TargetIP != "192.168.1.68" || e.BlockedDomain == "" || e.PolicyRule == "" ||
-			e.ActionType != events.ActionDNSSinkhole || e.Timestamp.IsZero() {
-			t.Errorf("incomplete audit entry: %+v", e)
+	for _, k := range []*ksInstance{ks, short} {
+		for id, steps := range k.auditTrail(t) {
+			trail[id] = steps
 		}
 	}
 	want := map[string]string{
@@ -489,4 +499,35 @@ func TestKillswitchAuditTrailE2E(t *testing.T) {
 	if strings.Contains(fmt.Sprint(trail), "mallory") {
 		t.Error("an identity from a request body reached the audit log")
 	}
+}
+
+// auditTrail reads GET /audit back as each action's transitions, oldest
+// first, and checks every entry is complete.
+func (k *ksInstance) auditTrail(t *testing.T) map[string][]string {
+	t.Helper()
+	var entries []struct {
+		Seq           int64     `json:"seq"`
+		Timestamp     time.Time `json:"timestamp"`
+		ActionID      string    `json:"action_id"`
+		FromState     string    `json:"from_state"`
+		ToState       string    `json:"to_state"`
+		Actor         string    `json:"actor"`
+		Reason        string    `json:"reason"`
+		DetectionID   string    `json:"detection_id"`
+		TargetIP      string    `json:"target_ip"`
+		ActionType    string    `json:"action_type"`
+		BlockedDomain string    `json:"blocked_domain"`
+		PolicyRule    string    `json:"policy_rule"`
+	}
+	httpGetJSON(t, "http://"+k.addr+"/audit?limit=100", &entries)
+	trail := map[string][]string{}
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		trail[e.ActionID] = append(trail[e.ActionID], e.FromState+">"+e.ToState+":"+e.Actor)
+		if e.DetectionID == "" || e.TargetIP != "192.168.1.68" || e.BlockedDomain == "" || e.PolicyRule == "" ||
+			e.ActionType != events.ActionDNSSinkhole || e.Timestamp.IsZero() {
+			t.Errorf("incomplete audit entry: %+v", e)
+		}
+	}
+	return trail
 }

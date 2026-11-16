@@ -374,7 +374,7 @@ func floodScenario(t *testing.T, receiverDown bool) ([]events.DetectionEvent, in
 	engineDone := make(chan struct{})
 	go func() { defer close(engineDone); engine.Run(ctx) }()
 
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	recorded := 0
 	for time.Now().Before(deadline) {
 		all, _ := alerts.Recent(store.MaxListLimit)

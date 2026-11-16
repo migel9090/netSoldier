@@ -216,7 +216,7 @@ func runInsideNamespace(t *testing.T) {
 		ksCmd{ID: "i-self", Type: "arp_isolate", MAC: "02:00:00:00:aa:cc", IP: agentIP, TTL: 600},
 	)
 	for _, id := range []string{"i-bcast", "i-mcast", "i-gw", "i-off", "i-self"} {
-		r := ks.awaitResult(t, id, 5*time.Second)
+		r := ks.awaitResult(t, id, time.Minute)
 		if r.OK || !strings.HasPrefix(r.Error, "refused:") {
 			t.Errorf("command %s: want a refusal, got %+v", id, r)
 		} else {

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -67,21 +69,58 @@ func TestAuditPaginationNeverEnds(t *testing.T) {
 
 // TestPaginationHonoursDeadline: the caller's overall deadline (the sync
 // loop's SOURCE_TIMEOUT) ends pagination with what was fetched.
+//
+// The deadline passes while the second page is outstanding, because the
+// server says so — not 200ms into the test, which a loaded runner could
+// reach before the first page was in.
 func TestPaginationHonoursDeadline(t *testing.T) {
+	ctx := newExpiringContext()
+	var pages atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(30 * time.Millisecond)
+		_, _ = io.Copy(io.Discard, r.Body) // to the end: then the caller giving up ends r.Context()
+		if pages.Add(1) > 1 {
+			ctx.expire()
+			select {
+			case <-r.Context().Done():
+			case <-time.After(time.Minute):
+			}
+			return
+		}
 		w.Write([]byte(`{"response":{"Attribute":[{"type":"domain","value":"a.example"},{"type":"domain","value":"b.example"}]}}`))
 	}))
 	defer srv.Close()
 	c := NewClient(srv.URL, "k")
 	c.SetLimits(0, 1000, 2)
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
 	all, err := c.FetchAllAttributes(ctx, SearchRequest{})
-	if !errors.Is(err, context.DeadlineExceeded) || len(all) == 0 {
-		t.Errorf("attributes=%d err=%v", len(all), err)
+	if !errors.Is(err, context.DeadlineExceeded) || len(all) != 2 || pages.Load() != 2 {
+		t.Errorf("pages=%d attributes=%d err=%v, want the first page and the deadline", pages.Load(), len(all), err)
 	}
 }
+
+// expiringContext is a context whose deadline passes when the test says
+// so: from expire on, it is done with context.DeadlineExceeded.
+type expiringContext struct {
+	context.Context
+	done chan struct{}
+	once sync.Once
+}
+
+func newExpiringContext() *expiringContext {
+	return &expiringContext{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (c *expiringContext) Done() <-chan struct{} { return c.done }
+
+func (c *expiringContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (c *expiringContext) expire() { c.once.Do(func() { close(c.done) }) }
 
 func TestPageBodyCapAndStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

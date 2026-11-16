@@ -58,6 +58,17 @@ func (inv *inventory) set(ip, mac, hostname string) {
 	inv.byIP[ip] = map[string]any{"mac": mac, "ip": ip, "hostname": hostname, "labels": []string{}}
 }
 
+// newResolver is New with a lookup deadline a loaded machine cannot miss.
+// These tests are about what the inventory answers; at the production two
+// seconds, a stub answer delayed by a busy runner read as an unreachable
+// inventory.
+func newResolver(base, apiKey string, ttl time.Duration) *Resolver {
+	r := New(base, apiKey, ttl)
+	r.timeout = time.Minute
+	r.http = &http.Client{Timeout: time.Minute}
+	return r
+}
+
 func failures(reason string) float64 {
 	return testutil.ToFloat64(lookupFailures.WithLabelValues(reason))
 }
@@ -66,7 +77,7 @@ func TestResolvesMACAndNameWithBearer(t *testing.T) {
 	inv := newInventory(t, "dev-key")
 	inv.set("192.168.1.77", "AA-BB-CC-DD-EE-FF", "kids-tablet")
 	inv.set("2001:db8::77", "02:00:00:00:00:77", "v6-phone")
-	r := New(inv.srv.URL, "dev-key", 0)
+	r := newResolver(inv.srv.URL, "dev-key", 0)
 
 	if mac, name := r.Resolve("192.168.1.77"); mac != "aa:bb:cc:dd:ee:ff" || name != "kids-tablet" {
 		t.Errorf("Resolve = %q, %q; want the canonical MAC and the name", mac, name)
@@ -82,7 +93,7 @@ func TestResolvesMACAndNameWithBearer(t *testing.T) {
 func TestBurstCostsOneLookup(t *testing.T) {
 	inv := newInventory(t, "k")
 	inv.set("192.168.1.77", "aa:bb:cc:dd:ee:ff", "tablet")
-	r := New(inv.srv.URL, "k", time.Minute)
+	r := newResolver(inv.srv.URL, "k", time.Minute)
 	now := time.Now()
 	r.now = func() time.Time { return now }
 
@@ -102,7 +113,7 @@ func TestBurstCostsOneLookup(t *testing.T) {
 
 func TestUnknownAddressIsCountedAndCached(t *testing.T) {
 	inv := newInventory(t, "k")
-	r := New(inv.srv.URL, "k", time.Minute)
+	r := newResolver(inv.srv.URL, "k", time.Minute)
 	before := failures(reasonNotFound)
 	for i := 0; i < 3; i++ {
 		if mac, name := r.Resolve("192.168.1.200"); mac != "" || name != "" {
@@ -124,7 +135,7 @@ func TestUnreachableInventoryIsCountedNotRetriedPerDetection(t *testing.T) {
 	inv := newInventory(t, "k")
 	inv.set("192.168.1.77", "aa:bb:cc:dd:ee:ff", "tablet")
 	inv.down.Store(true)
-	r := New(inv.srv.URL, "k", time.Minute)
+	r := newResolver(inv.srv.URL, "k", time.Minute)
 	now := time.Now()
 	r.now = func() time.Time { return now }
 
@@ -152,7 +163,7 @@ func TestNothingListening(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	url := srv.URL
 	srv.Close()
-	r := New(url, "", 0)
+	r := newResolver(url, "", 0)
 	before := failures(reasonUnreachable)
 	if mac, _ := r.Resolve("192.168.1.5"); mac != "" {
 		t.Fatal("resolved with nothing listening")
@@ -165,7 +176,7 @@ func TestNothingListening(t *testing.T) {
 func TestRefusedKeyIsReportedAsUnauthorized(t *testing.T) {
 	inv := newInventory(t, "right-key")
 	inv.set("192.168.1.77", "aa:bb:cc:dd:ee:ff", "tablet")
-	r := New(inv.srv.URL, "wrong-key", 0)
+	r := newResolver(inv.srv.URL, "wrong-key", 0)
 	before := failures(reasonUnauthorized)
 	r.Resolve("192.168.1.77")
 	r.Resolve("192.168.1.78")
@@ -187,7 +198,7 @@ func TestUnusableAnswersCarryNoMAC(t *testing.T) {
 	inv.set("192.168.1.3", "00:00:00:00:00:00", "zero")
 	inv.set("192.168.1.4", "not-a-mac", "garbage")
 	inv.set("192.168.1.5", "aa:bb:cc:dd:ee:ff:00:11", "eui64")
-	r := New(inv.srv.URL, "k", 0)
+	r := newResolver(inv.srv.URL, "k", 0)
 	before := failures(reasonInvalid)
 	for _, ip := range []string{"192.168.1.1", "192.168.1.2", "192.168.1.3", "192.168.1.4", "192.168.1.5", "bogus"} {
 		if mac, _ := r.Resolve(ip); mac != "" {
@@ -202,7 +213,7 @@ func TestUnusableAnswersCarryNoMAC(t *testing.T) {
 func TestNameIsPrintableAndBounded(t *testing.T) {
 	inv := newInventory(t, "k")
 	inv.set("192.168.1.9", "aa:bb:cc:dd:ee:09", "  evil\x1b[31mname\n"+strings.Repeat("ł", 200))
-	r := New(inv.srv.URL, "k", 0)
+	r := newResolver(inv.srv.URL, "k", 0)
 	_, name := r.Resolve("192.168.1.9")
 	if strings.ContainsAny(name, "\x1b\n") {
 		t.Errorf("control characters kept: %q", name)
@@ -214,7 +225,7 @@ func TestNameIsPrintableAndBounded(t *testing.T) {
 
 func TestCacheIsBounded(t *testing.T) {
 	inv := newInventory(t, "k")
-	r := New(inv.srv.URL, "k", time.Hour)
+	r := newResolver(inv.srv.URL, "k", time.Hour)
 	for i := 0; i < maxCached+100; i++ {
 		ip := fmt.Sprintf("10.%d.%d.%d", i>>16, (i>>8)&255, i&255)
 		r.Resolve(ip)

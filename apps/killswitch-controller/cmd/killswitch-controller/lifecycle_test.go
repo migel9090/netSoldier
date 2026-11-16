@@ -31,7 +31,8 @@ func hasRule(ag *miniAdGuard, rule string) bool {
 // driver — the block was permanent and the operator was told it was lifted.
 func TestRevertFailureStaysEnforced(t *testing.T) {
 	ag := newMiniAdGuard(t)
-	h := sinkHarness(t, ag, harnessOpts{engine: enforce.Config{RetryBase: 10 * time.Millisecond}})
+	clock := newTestClock()
+	h := sinkHarness(t, ag, harnessOpts{clock: clock, engine: enforce.Config{RetryBase: 10 * time.Second}})
 	got := h.evaluate(criticalIoCEvent())
 	if got.Action == nil || got.Action.State != events.StateActive || !hasRule(ag, "||evil.com^") {
 		t.Fatalf("setup: %+v", got)
@@ -56,8 +57,9 @@ func TestRevertFailureStaysEnforced(t *testing.T) {
 	if !hasRule(ag, "||evil.com^") {
 		t.Fatal("setup: the rule must still be there")
 	}
-	// AdGuard is back: the reaper retries on its own and finishes the job.
-	time.Sleep(50 * time.Millisecond)
+	// AdGuard is back: once the backoff has run out (past RetryMax, short of
+	// the TTL) the reaper retries on its own and finishes the job.
+	clock.Advance(15 * time.Minute)
 	h.engine.Reap(context.Background())
 	h.idle(id)
 	final := h.action(id)
@@ -74,11 +76,12 @@ func TestApprovedAfterItsCreationTTLLastsTheFullTTL(t *testing.T) {
 	pol.Allowlist.AddIP("192.168.1.1")
 	pol.DefaultTTL = 1
 	drv := &recordingDriver{}
-	h := newHarness(t, harnessOpts{pol: pol, driver: drv})
+	clock := newTestClock()
+	h := newHarness(t, harnessOpts{pol: pol, driver: drv, clock: clock})
 	got := h.evaluate(withDomainTarget(testEvent(60, events.SeverityMedium), "late.example"))
 	id := got.Action.ID
 
-	time.Sleep(1200 * time.Millisecond) // past the TTL, counted from creation
+	clock.Advance(1200 * time.Millisecond) // past the TTL, counted from creation
 	status, a := h.approve(id, nil)
 	if status != 200 || a.State != events.StateActive {
 		t.Fatalf("approve: %d %+v", status, a)
@@ -91,7 +94,7 @@ func TestApprovedAfterItsCreationTTLLastsTheFullTTL(t *testing.T) {
 	if st := h.action(id).State; st != events.StateActive || drv.reverted.Load() != 0 {
 		t.Fatalf("reverted at once although approved just now: %s", st)
 	}
-	time.Sleep(1100 * time.Millisecond)
+	clock.Advance(1100 * time.Millisecond)
 	h.engine.Reap(context.Background())
 	h.idle(id)
 	if st := h.action(id); st.State != events.StateReverted || st.RevertedBy != actions.ActorTTL {
@@ -104,43 +107,56 @@ func TestApprovedAfterItsCreationTTLLastsTheFullTTL(t *testing.T) {
 // the rule, the action became failed and the rule stayed for good.
 func TestCallerGivingUpDoesNotOrphanTheBlock(t *testing.T) {
 	ag := newMiniAdGuard(t)
-	ag.set(func(f *miniAdGuard) { f.setDelay = 800 * time.Millisecond })
+	ag.holdWrites()
 	h := sinkHarness(t, ag, harnessOpts{})
 
 	body, _ := json.Marshal(criticalIoCEvent())
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, h.srv.URL+"/evaluate", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testIngestToken)
 	req.Header.Set(events.SignatureHeader, events.SignPayload(testWebhookSecret, body))
-	if _, err := http.DefaultClient.Do(req); err == nil {
-		t.Fatal("setup: the caller should have timed out")
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	var active []events.EnforcementAction
-	for time.Now().Before(deadline) {
-		if active = h.list("active"); len(active) == 1 {
-			break
+	answered := make(chan error, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			resp.Body.Close()
 		}
-		time.Sleep(20 * time.Millisecond)
+		answered <- err
+	}()
+	// AdGuard has accepted the rule and has not answered yet; the caller
+	// gives up now.
+	ag.awaitWrite(t)
+	cancel()
+	if err := <-answered; err == nil {
+		t.Fatal("setup: the caller should have given up before an answer")
 	}
-	if len(active) != 1 || active[0].State != events.StateActive || !hasRule(ag, "||evil.com^") {
-		t.Fatalf("the apply must finish on its own deadline: %+v", active)
+	ag.releaseWrites()
+
+	inForce, err := h.store.InForce(events.ActionDNSSinkhole)
+	if err != nil || len(inForce) != 1 {
+		t.Fatalf("one action should be in force: %+v %v", inForce, err)
+	}
+	h.idle(inForce[0].ID)
+	if a := h.action(inForce[0].ID); a.State != events.StateActive || !hasRule(ag, "||evil.com^") {
+		t.Fatalf("the apply must finish on its own deadline: %s, rule present=%v", a.State, hasRule(ag, "||evil.com^"))
 	}
 }
 
 // TestDriverTimeoutIsUndone: an apply that outlives its own deadline may
 // have taken effect; it is undone, and the action says nothing is enforced.
 //
-// Here AdGuard stores each write at once but answers late: the apply times
-// out after the rule landed, and so does the undo after the rule was
-// removed. Neither answer can be trusted, so the action counts as still
-// enforced (revert_failed) until the reaper's retry confirms it is not.
+// Here AdGuard stores each write at once and does not answer until the
+// caller gives up: the apply times out after the rule landed, and so does
+// the undo after the rule was removed. Neither answer can be trusted, so
+// the action counts as still enforced (revert_failed) until the reaper's
+// retry confirms it is not.
 func TestDriverTimeoutIsUndone(t *testing.T) {
 	ag := newMiniAdGuard(t)
-	ag.set(func(f *miniAdGuard) { f.setDelay = 400 * time.Millisecond })
-	h := sinkHarness(t, ag, harnessOpts{engine: enforce.Config{DriverTimeout: 150 * time.Millisecond,
-		RetryBase: 10 * time.Millisecond}})
+	ag.holdWrites()
+	clock := newTestClock()
+	h := sinkHarness(t, ag, harnessOpts{clock: clock, engine: enforce.Config{DriverTimeout: 150 * time.Millisecond,
+		RetryBase: 10 * time.Second}})
 	id := h.evaluate(criticalIoCEvent()).Action.ID
 	h.idle(id)
 	a := h.action(id)
@@ -150,8 +166,8 @@ func TestDriverTimeoutIsUndone(t *testing.T) {
 	if hasRule(ag, "||evil.com^") {
 		t.Fatal("setup: the undo should have removed the rule before timing out")
 	}
-	ag.set(func(f *miniAdGuard) { f.setDelay = 0 })
-	time.Sleep(20 * time.Millisecond)
+	ag.releaseWrites()
+	clock.Advance(time.Minute) // past the retry's backoff
 	h.engine.Reap(context.Background())
 	h.idle(id)
 	if a := h.action(id); a.State != events.StateApplyFailed || hasRule(ag, "||evil.com^") {
@@ -213,45 +229,32 @@ func (d *flakyDriver) applies() int {
 	return d.n
 }
 
-// TestSlowDriverAnswers202: an approve whose driver is slower than the
-// response wait answers with the action as it stands, and finishes anyway.
+// TestSlowDriverAnswers202: an approve whose driver has not answered within
+// the response wait answers with the action as it stands, and finishes
+// anyway.
 func TestSlowDriverAnswers202(t *testing.T) {
-	h := newHarness(t, harnessOpts{driver: &slowDriver{delay: 300 * time.Millisecond}, wait: 50 * time.Millisecond})
+	drv := newHeldDriver(t)
+	h := newHarness(t, harnessOpts{driver: drv, wait: 50 * time.Millisecond})
 	a := h.createPending("02:00:00:00:00:22", "192.168.1.22", "x.example")
-	status, got := h.approve(a.ID, nil)
-	if status != http.StatusAccepted || got.State != events.StateApproved {
-		t.Fatalf("approve: %d %s", status, got.State)
+
+	approved := h.operateAsync(func() (int, actionReply) { return h.approve(a.ID, nil) })
+	apply := drv.next(t, "apply") // reached the driver, and stays unanswered…
+	r := approved()               // …past the response wait
+	if r.status != http.StatusAccepted || r.action.State != events.StateApproved {
+		t.Fatalf("approve: %d %s", r.status, r.action.State)
 	}
+	apply.answer <- nil
 	h.idle(a.ID)
 	if st := h.action(a.ID).State; st != events.StateActive {
 		t.Fatalf("after the driver answered: %s", st)
 	}
 }
 
-// revertScript is a driver whose reverts fail fast, or answer slowly, as the
-// test says.
-type revertScript struct {
-	recordingDriver
-	mu    sync.Mutex
-	fail  bool
-	delay time.Duration
-}
+// failingReverts is a driver that applies and cannot revert.
+type failingReverts struct{ recordingDriver }
 
-func (d *revertScript) set(fail bool, delay time.Duration) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.fail, d.delay = fail, delay
-}
-
-func (d *revertScript) Revert(ctx context.Context, a *events.EnforcementAction) error {
-	d.mu.Lock()
-	fail, delay := d.fail, d.delay
-	d.mu.Unlock()
-	time.Sleep(delay)
-	if fail {
-		return errors.New("adguard 502")
-	}
-	return d.recordingDriver.Revert(ctx, a)
+func (d *failingReverts) Revert(context.Context, *events.EnforcementAction) error {
+	return errors.New("adguard 502")
 }
 
 // TestSlowRetryOfAFailedRevertAnswers202: retrying the revert of a
@@ -259,37 +262,59 @@ func (d *revertScript) Revert(ctx context.Context, a *events.EnforcementAction) 
 // answered 502 with the previous attempt's failure, because the answer
 // looked at the state (still revert_failed while the retry runs) before
 // asking whether the retry had finished. Still running is 202.
+//
+// The driver is held, not slow: the retry's answer is given while its
+// driver call is provably unanswered, and the earlier failure is set up
+// without going through a response wait at all.
 func TestSlowRetryOfAFailedRevertAnswers202(t *testing.T) {
-	drv := &revertScript{}
+	drv := newHeldDriver(t)
 	h := newHarness(t, harnessOpts{driver: drv, wait: 50 * time.Millisecond})
-	got := h.evaluate(criticalIoCEvent())
-	if got.Action == nil || got.Action.State != events.StateActive {
+	evaluated := async(t, func() evalResponse { return h.evaluate(criticalIoCEvent()) })
+	drv.next(t, "apply").answer <- nil
+	got := evaluated()
+	if got.Action == nil {
 		t.Fatalf("setup: %+v", got)
 	}
 	id := got.Action.ID
-
-	drv.set(true, 0)
-	if status, a := h.revert(id, "bob"); status != http.StatusBadGateway || a.State != events.StateRevertFailed {
-		t.Fatalf("setup: a fast failing revert: %d %s", status, a.State)
+	h.idle(id)
+	if st := h.action(id).State; st != events.StateActive {
+		t.Fatalf("setup: the auto-block is %s", st)
 	}
 
-	drv.set(false, 400*time.Millisecond)
-	status, a := h.revert(id, "bob")
-	if status != http.StatusAccepted {
-		t.Fatalf("a retry still running after the wait answered %d (%q), want 202", status, a.Error)
+	// The first revert fails: revert_failed, still enforced.
+	if _, err := h.engine.Revert(context.Background(), id, "bob", "test revert"); err != nil {
+		t.Fatal(err)
 	}
-	if a.State != events.StateRevertFailed || a.Error != "" {
-		t.Errorf("in progress: state %s error %q, want the action as it stands and no error", a.State, a.Error)
+	drv.next(t, "revert").answer <- errors.New("adguard 502")
+	h.idle(id)
+	if st := h.action(id).State; st != events.StateRevertFailed {
+		t.Fatalf("setup: a failed revert left %s", st)
 	}
+
+	// The retry reaches the driver and is answered while it is held.
+	retried := h.operateAsync(func() (int, actionReply) { return h.revert(id, "bob") })
+	retry := drv.next(t, "revert")
+	r := retried()
+	if r.status != http.StatusAccepted {
+		t.Fatalf("a retry still running after the wait answered %d (%q), want 202", r.status, r.action.Error)
+	}
+	if r.action.State != events.StateRevertFailed || r.action.Error != "" || r.action.InFlight != events.OperationRevert {
+		t.Errorf("in progress: state %s error %q in_flight %q, want the action as it stands, no error, the revert in flight",
+			r.action.State, r.action.Error, r.action.InFlight)
+	}
+	retry.answer <- nil
 	h.idle(id)
 	if final := h.action(id); final.State != events.StateReverted || final.RevertedBy != "bob" {
 		t.Fatalf("after the retry: %s by %s", final.State, final.RevertedBy)
 	}
 
-	// A retry that fails within the wait is still a 502.
-	h2 := newHarness(t, harnessOpts{driver: &revertScript{fail: true}, wait: time.Second})
+	// A retry whose driver answers within the wait, with a failure, is
+	// still a 502.
+	h2 := newHarness(t, harnessOpts{driver: &failingReverts{}})
 	id2 := h2.evaluate(criticalIoCEvent()).Action.ID
-	h2.revert(id2, "bob")
+	if status, a := h2.revert(id2, "bob"); status != http.StatusBadGateway || a.State != events.StateRevertFailed {
+		t.Fatalf("setup: the first failed revert: %d %s", status, a.State)
+	}
 	if status, a := h2.revert(id2, "bob"); status != http.StatusBadGateway || a.State != events.StateRevertFailed {
 		t.Fatalf("a retry that failed in time: %d %s", status, a.State)
 	}
@@ -352,7 +377,8 @@ func TestAuditTrailIsCompleteAndAttributable(t *testing.T) {
 	pol := policy.DefaultPolicy()
 	pol.Allowlist.AddIP("192.168.1.1")
 	pol.DefaultTTL = 1
-	h := newHarness(t, harnessOpts{pol: pol})
+	clock := newTestClock()
+	h := newHarness(t, harnessOpts{pol: pol, clock: clock})
 
 	ev := withDomainTarget(testEvent(60, events.SeverityMedium), "audited.example")
 	p := h.evaluate(ev).Action
@@ -371,7 +397,7 @@ func TestAuditTrailIsCompleteAndAttributable(t *testing.T) {
 	h.operate("/actions/"+p.ID+"/revert", "bob", map[string]string{"reason": "false positive", "reverted_by": "mallory"})
 	h.operate("/actions/"+rej.ID+"/reject", "carol", map[string]string{"reason": "noise"})
 	h.operate("/actions/"+ttl.ID+"/approve", "dave", nil)
-	time.Sleep(1100 * time.Millisecond)
+	clock.Advance(1100 * time.Millisecond)
 	h.engine.Reap(context.Background())
 	h.idle(ttl.ID)
 

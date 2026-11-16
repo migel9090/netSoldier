@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -108,8 +110,15 @@ type harnessOpts struct {
 	creds      *credentials // default: the three test tokens
 	insecure   bool         // no signature verification
 	store      actions.Options
-	engine     enforce.Config
-	wait       time.Duration // responseWait (default 5s)
+	engine     enforce.Config // DriverTimeout default: a minute
+	// wait is responseWait. The default, a minute, is long enough that a
+	// request whose driver answers is always answered with the outcome; a
+	// test that wants the "still under way" answer holds its driver (see
+	// heldDriver) rather than racing a short wait.
+	wait time.Duration
+	// clock, when set, is the store's and the engine's clock: a test moves
+	// it past a TTL or a backoff instead of sleeping through it.
+	clock *testClock
 }
 
 func newHarness(t *testing.T, o harnessOpts) *harness {
@@ -124,6 +133,13 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 	creds := credentials{operator: testOperatorToken, ingest: testIngestToken, agent: testAgentToken}
 	if o.creds != nil {
 		creds = *o.creds
+	}
+	if o.clock != nil {
+		o.store.Now, o.engine.Now = o.clock.Now, o.clock.Now
+	}
+	if o.engine.DriverTimeout == 0 {
+		// A driver call the test holds must not run out on a slow machine.
+		o.engine.DriverTimeout = time.Minute
 	}
 	store, err := actions.Open(filepath.Join(t.TempDir(), "ks.db"), o.store)
 	if err != nil {
@@ -145,7 +161,7 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 	s := &server{pol: o.pol, engine: eng, store: store,
 		ledger: newEvaluationLedger(store, ledgerRetention(0)), responseWait: o.wait}
 	if s.responseWait == 0 {
-		s.responseWait = 5 * time.Second
+		s.responseWait = time.Minute
 	}
 	var verifier *events.SignatureVerifier
 	if !o.insecure {
@@ -298,7 +314,136 @@ func jsonReader(b []byte) io.Reader { return bytes.NewReader(b) }
 
 func (h *harness) idle(id string) {
 	h.t.Helper()
-	if !h.engine.Wait(context.Background(), id, 10*time.Second) {
+	if !h.engine.Wait(context.Background(), id, time.Minute) {
 		h.t.Fatalf("%s did not settle", id)
 	}
+}
+
+// testClock is a clock the test moves.
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newTestClock() *testClock {
+	return &testClock{t: time.Now().UTC().Truncate(time.Millisecond)}
+}
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *testClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// heldDriver is a driver whose calls the test answers. Every Apply and
+// Revert is handed to the test (next) and blocks until the test answers
+// it, so "the driver has not answered yet" is a state the test puts the
+// service in, not a race between a sleep in a driver and a wait in a
+// handler.
+type heldDriver struct {
+	recordingDriver
+	calls chan *heldCall
+	quit  chan struct{}
+}
+
+// heldCall is one driver call waiting for the test's answer.
+type heldCall struct {
+	op     string // "apply" or "revert"
+	answer chan error
+}
+
+func newHeldDriver(t *testing.T) *heldDriver {
+	d := &heldDriver{calls: make(chan *heldCall), quit: make(chan struct{})}
+	t.Cleanup(func() { close(d.quit) })
+	return d
+}
+
+func (d *heldDriver) Apply(ctx context.Context, a *events.EnforcementAction) error {
+	if err := d.hold(ctx, "apply"); err != nil {
+		return err
+	}
+	return d.recordingDriver.Apply(ctx, a)
+}
+
+func (d *heldDriver) Revert(ctx context.Context, a *events.EnforcementAction) error {
+	if err := d.hold(ctx, "revert"); err != nil {
+		return err
+	}
+	return d.recordingDriver.Revert(ctx, a)
+}
+
+func (d *heldDriver) Name() string { return "held" }
+
+func (d *heldDriver) hold(ctx context.Context, op string) error {
+	c := &heldCall{op: op, answer: make(chan error, 1)}
+	select {
+	case d.calls <- c:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-d.quit:
+		return errors.New("the test is over")
+	}
+	select {
+	case err := <-c.answer:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-d.quit:
+		return errors.New("the test is over")
+	}
+}
+
+// next returns the driver's next call, which must be op. It stays blocked
+// until the test answers it.
+func (d *heldDriver) next(t *testing.T, op string) *heldCall {
+	t.Helper()
+	select {
+	case c := <-d.calls:
+		if c.op != op {
+			t.Fatalf("the driver was asked to %s, want %s", c.op, op)
+		}
+		return c
+	case <-time.After(time.Minute):
+		t.Fatalf("no %s reached the driver", op)
+		return nil
+	}
+}
+
+// reply is an answered operator request.
+type reply struct {
+	status int
+	action actionReply
+}
+
+// async runs do — a request that waits for the driver the test is playing
+// — in its own goroutine, and returns the function that waits for its
+// result.
+func async[T any](t *testing.T, do func() T) func() T {
+	ch := make(chan T, 1)
+	go func() { ch <- do() }()
+	return func() T {
+		t.Helper()
+		select {
+		case v := <-ch:
+			return v
+		case <-time.After(time.Minute):
+			t.Fatal("the request was never answered")
+			var zero T
+			return zero
+		}
+	}
+}
+
+// operateAsync is async for an operator request.
+func (h *harness) operateAsync(do func() (int, actionReply)) func() reply {
+	return async(h.t, func() reply {
+		status, a := do()
+		return reply{status, a}
+	})
 }

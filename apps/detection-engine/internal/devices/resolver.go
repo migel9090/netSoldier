@@ -91,6 +91,9 @@ type Resolver struct {
 	ttl    time.Duration
 	http   *http.Client
 	now    func() time.Time
+	// timeout bounds one lookup: requestTimeout, or longer in tests whose
+	// stub inventory must not count as unreachable on a loaded machine.
+	timeout time.Duration
 
 	mu        sync.Mutex
 	cache     map[string]cached
@@ -105,12 +108,13 @@ func New(baseURL, apiKey string, ttl time.Duration) *Resolver {
 		ttl = DefaultTTL
 	}
 	return &Resolver{
-		base:   strings.TrimRight(baseURL, "/"),
-		apiKey: apiKey,
-		ttl:    ttl,
-		http:   &http.Client{Timeout: requestTimeout},
-		now:    time.Now,
-		cache:  make(map[string]cached),
+		base:    strings.TrimRight(baseURL, "/"),
+		apiKey:  apiKey,
+		ttl:     ttl,
+		http:    &http.Client{Timeout: requestTimeout},
+		now:     time.Now,
+		timeout: requestTimeout,
+		cache:   make(map[string]cached),
 	}
 }
 
@@ -163,7 +167,7 @@ func (r *Resolver) Resolve(ip string) (mac, name string) {
 
 // lookup asks the inventory once. reason is "" on success.
 func (r *Resolver) lookup(ip string) (Device, string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		r.base+"/devices/by-ip/"+url.PathEscape(ip), nil)

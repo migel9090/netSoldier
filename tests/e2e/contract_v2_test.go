@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -153,15 +152,8 @@ func TestTypedTargetEndToEnd(t *testing.T) {
 	ksBin := goBuild(t, root, "apps/killswitch-controller")
 
 	// Threat intel: one domain and one address, both critical.
-	var mu sync.Mutex
-	var exportedAt time.Time
 	tiMux := http.NewServeMux()
 	tiMux.HandleFunc("GET /export/json", func(w http.ResponseWriter, _ *http.Request) {
-		mu.Lock()
-		if exportedAt.IsZero() {
-			exportedAt = time.Now()
-		}
-		mu.Unlock()
 		fmt.Fprint(w, `[{"Type":"domain","Value":"evil-ioc.example","Source":"threatfox","Confidence":95,"Threat":"c2"},
 			{"Type":"ip","Value":"203.0.113.7","Source":"feodo","Confidence":95,"Threat":"c2"}]`)
 	})
@@ -170,13 +162,11 @@ func TestTypedTargetEndToEnd(t *testing.T) {
 	go tiSrv.Serve(tiLn)
 	t.Cleanup(func() { tiSrv.Close() })
 
-	// The querylog stays empty until the engine has loaded the indicators,
-	// or the entries would be consumed before there was anything to match.
-	ready := func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return !exportedAt.IsZero() && time.Since(exportedAt) > 1500*time.Millisecond
-	}
+	// The querylog stays empty until the engine says it has loaded the
+	// indicators, or the entries would be consumed before there was
+	// anything to match.
+	detAddr := freeAddr(t)
+	ready := func() bool { return indicatorsLoaded(detAddr) }
 	entryTime := time.Now().Add(time.Hour)
 	ag := startMockAdGuardWith(t, ready,
 		map[string]any{
@@ -192,7 +182,7 @@ func TestTypedTargetEndToEnd(t *testing.T) {
 
 	ksAddr := startKillswitch(t, ksBin, ag.url, nil)
 	stopDet := startProc(t, detBin, map[string]string{
-		"LISTEN_ADDR":                 freeAddr(t),
+		"LISTEN_ADDR":                 detAddr,
 		"ADGUARD_URL":                 ag.url,
 		"ADGUARD_USER":                "admin",
 		"ADGUARD_PASSWORD":            "test",
@@ -208,7 +198,7 @@ func TestTypedTargetEndToEnd(t *testing.T) {
 	t.Cleanup(stopDet)
 
 	var active, pending []events.EnforcementAction
-	deadline := time.Now().Add(40 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for time.Now().Before(deadline) {
 		active, pending = listActions(t, ksAddr, "active"), listActions(t, ksAddr, "pending")
 		if len(active) >= 1 && len(pending) >= 1 {
