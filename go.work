@@ -4,6 +4,7 @@ use (
 	./apps/detection-engine
 	./apps/device-inventory
 	./apps/killswitch-controller
+	./apps/netagent
 	./apps/threat-intel-sync
 	./libs/events
 	./libs/indicator

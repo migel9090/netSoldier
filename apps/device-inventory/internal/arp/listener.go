@@ -1,17 +1,15 @@
+// Package arp parses Ethernet/ARP frames into sightings. The frames are
+// captured by netagent and handed to device-inventory over HTTP (ADR-0004):
+// this package opens no socket and holds no capability, so a parser bug here
+// cannot reach the network.
 package arp
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
-	"errors"
-	"log/slog"
 	"net"
-	"time"
 
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/capture"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/metrics"
 )
 
 const (
@@ -19,68 +17,6 @@ const (
 	ethHdrLen = 14
 	arpLen    = 28 // hardware type (2) + proto type (2) + hw len (1) + proto len (1) + op (2) + SHA (6) + SPA (4) + THA (6) + TPA (4)
 )
-
-// Listener passively captures ARP traffic on one interface to learn which
-// MAC uses which IPv4 address. Requires CAP_NET_RAW.
-type Listener struct {
-	iface    string
-	ch       chan<- discovery.Sighting
-	mismatch discovery.LogLimiter
-}
-
-// NewListener returns a listener for iface ("" = default-route interface).
-func NewListener(iface string, ch chan<- discovery.Sighting) *Listener {
-	return &Listener{iface: iface, ch: ch, mismatch: discovery.LogLimiter{Interval: 10 * time.Second}}
-}
-
-// Run reads until ctx is done or the socket fails.
-func (l *Listener) Run(ctx context.Context, up func()) error {
-	ifi, err := capture.ResolveInterface(l.iface)
-	if err != nil {
-		return err
-	}
-	conn, err := capture.OpenPacket(ifi, ethPARP, nil)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	up()
-
-	buf := make([]byte, 128)
-	for ctx.Err() == nil {
-		n, err := conn.Read(buf)
-		if errors.Is(err, capture.ErrTimeout) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		metrics.FramesReceived.WithLabelValues("arp").Inc()
-		s, err := ParseFrame(buf[:n])
-		if err != nil {
-			l.reject(buf[:n], err)
-			continue
-		}
-		select {
-		case l.ch <- s:
-		case <-ctx.Done():
-		}
-	}
-	return nil
-}
-
-func (l *Listener) reject(frame []byte, err error) {
-	metrics.FramesRejected.WithLabelValues("arp", discovery.RejectReason(err)).Inc()
-	if !errors.Is(err, discovery.ErrLinkMismatch) {
-		return
-	}
-	if ok, suppressed := l.mismatch.Allow(time.Now()); ok {
-		slog.Warn("arp claim does not match its link-layer source; ignored",
-			"eth_src", net.HardwareAddr(frame[6:12]).String(),
-			"arp_sha", net.HardwareAddr(frame[ethHdrLen+8:ethHdrLen+14]).String(),
-			"suppressed_since_last", suppressed)
-	}
-}
 
 // ParseFrame validates an Ethernet/ARP frame and returns the sender's claim.
 // The sender hardware address must be the frame's Ethernet source: an ARP

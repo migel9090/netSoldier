@@ -84,6 +84,24 @@ func normalize(o discovery.Sighting) (discovery.Sighting, bool) {
 	return o, true
 }
 
+// maxClockSkew bounds how far a capture timestamp may sit from the store's
+// own clock before the store distrusts it and uses its own. The agent is
+// trusted, but a wrong agent clock must not be able to stamp bindings far in
+// the future (which would make them look permanently live) or far in the past.
+const maxClockSkew = 5 * time.Minute
+
+// captureTime returns at when it is set and within maxClockSkew of wall,
+// otherwise wall.
+func captureTime(at, wall time.Time) time.Time {
+	if at.IsZero() {
+		return wall
+	}
+	if d := at.Sub(wall); d < -maxClockSkew || d > maxClockSkew {
+		return wall
+	}
+	return at
+}
+
 func signature(o discovery.Sighting) string {
 	return string(o.Source) + "\x00" + o.IP + "\x00" + o.Name + "\x00" + o.Fingerprint + "\x00" + o.VendorClass
 }
@@ -95,8 +113,13 @@ func (s *Store) Observe(o discovery.Sighting) (Result, error) {
 	if !ok {
 		return Result{Outcome: Invalid}, nil
 	}
+	// wall is the store's own clock: it paces rate-limiting and coalescing,
+	// which are about how fast we are ingesting, so they must not be driven
+	// by a per-frame timestamp. now is when the frame was captured (the
+	// agent's clock) when that is known and sane, so the recorded times
+	// reflect capture rather than ingestion; otherwise it is the store clock.
 	wall := s.opts.Now()
-	now := wall.UTC().Truncate(time.Second)
+	now := captureTime(o.CapturedAt, wall).UTC().Truncate(time.Second)
 
 	key := o.MAC
 	if key == "" {

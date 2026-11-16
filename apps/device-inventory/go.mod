@@ -4,7 +4,6 @@ go 1.27.4
 
 require (
 	github.com/prometheus/client_golang v1.24.1
-	golang.org/x/sys v0.50.0
 	modernc.org/sqlite v1.51.0
 )
 
@@ -24,6 +23,7 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/stretchr/testify v1.12.1 // indirect
 	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/tools v0.52.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 	modernc.org/libc v1.76.0 // indirect

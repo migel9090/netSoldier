@@ -102,3 +102,34 @@ func FuzzSSDP(f *testing.F) {
 		}
 	})
 }
+
+// ssdpFrame wraps an SSDP payload in Ethernet/IPv4/UDP to UDP 1900 from s.
+func ssdpFrame(s net.IP, payload []byte) []byte {
+	ihl, ulen := 20, 8+len(payload)
+	f := make([]byte, 14+ihl+8+len(payload))
+	f[12], f[13] = 0x08, 0x00
+	ip := f[14:]
+	ip[0] = 0x45
+	total := ihl + ulen
+	ip[2], ip[3] = byte(total>>8), byte(total)
+	ip[9] = 17
+	copy(ip[12:16], s.To4())
+	udp := ip[ihl:]
+	udp[2], udp[3] = 0x07, 0x6c // 1900
+	udp[4], udp[5] = byte(ulen>>8), byte(ulen)
+	copy(udp[8:], payload)
+	return f
+}
+
+// FuzzParseFrame feeds arbitrary bytes through the whole-frame path (header
+// stripping plus the SSDP parser) that now faces attacker-controlled frames.
+func FuzzParseFrame(f *testing.F) {
+	f.Add(ssdpFrame(src, notify("Linux/5.15 UPnP/1.0 MiniDLNA/1.3", "http://192.168.77.9:8200/rootDesc.xml")))
+	f.Add([]byte{0x08, 0x00})
+	f.Fuzz(func(t *testing.T, b []byte) {
+		s, err := ParseFrame(b)
+		if err == nil && (s.IP == "" || len(s.Name) > discovery.MaxNameLen) {
+			t.Fatalf("bad sighting from frame: %+v", s)
+		}
+	})
+}

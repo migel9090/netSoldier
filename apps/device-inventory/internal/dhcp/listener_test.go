@@ -6,8 +6,6 @@ import (
 	"net"
 	"testing"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
 )
 
@@ -187,94 +185,6 @@ func TestParseFrameTrimsEthernetPadding(t *testing.T) {
 	f := append(frame(router, 67, request(router, nil, "pad", "")), make([]byte, 40)...)
 	if s, err := ParseFrame(f); err != nil || s.Name != "pad" {
 		t.Errorf("padded frame: %+v %v", s, err)
-	}
-}
-
-// runBPF interprets the classic-BPF subset serverPortFilter uses, with the
-// kernel's rule that an out-of-bounds load drops the packet.
-func runBPF(t *testing.T, prog []unix.SockFilter, pkt []byte) uint32 {
-	t.Helper()
-	var a, x uint32
-	load := func(off uint32, size int) (uint32, bool) {
-		if int(off)+size > len(pkt) {
-			return 0, false
-		}
-		if size == 1 {
-			return uint32(pkt[off]), true
-		}
-		return uint32(binary.BigEndian.Uint16(pkt[off:])), true
-	}
-	for pc := 0; pc < len(prog); pc++ {
-		ins := prog[pc]
-		var ok = true
-		switch ins.Code {
-		case unix.BPF_LD | unix.BPF_H | unix.BPF_ABS:
-			a, ok = load(ins.K, 2)
-		case unix.BPF_LD | unix.BPF_B | unix.BPF_ABS:
-			a, ok = load(ins.K, 1)
-		case unix.BPF_LD | unix.BPF_H | unix.BPF_IND:
-			a, ok = load(x+ins.K, 2)
-		case unix.BPF_LDX | unix.BPF_B | unix.BPF_MSH:
-			var b uint32
-			b, ok = load(ins.K, 1)
-			x = 4 * (b & 0xf)
-		case unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K:
-			if a == ins.K {
-				pc += int(ins.Jt)
-			} else {
-				pc += int(ins.Jf)
-			}
-		case unix.BPF_JMP | unix.BPF_JSET | unix.BPF_K:
-			if a&ins.K != 0 {
-				pc += int(ins.Jt)
-			} else {
-				pc += int(ins.Jf)
-			}
-		case unix.BPF_RET | unix.BPF_K:
-			return ins.K
-		default:
-			t.Fatalf("instruction %d: opcode %#x not interpreted", pc, ins.Code)
-		}
-		if !ok {
-			return 0
-		}
-	}
-	t.Fatal("program fell off the end")
-	return 0
-}
-
-func TestServerPortFilter(t *testing.T) {
-	dhcpFrame := frame(router, 67, request(router, nil, "", ""))
-	withOptions := func() []byte { // IHL 6: one word of IP options
-		f := frame(router, 67, request(router, nil, "", ""))
-		g := append([]byte{}, f[:34]...)
-		g = append(g, 1, 1, 1, 0)
-		g = append(g, f[34:]...)
-		g[14] = 0x46
-		return g
-	}()
-	tcp := frame(router, 67, nil)
-	tcp[14+9] = 6
-	frag := frame(router, 67, nil)
-	frag[14+7] = 0x10
-	arp := make([]byte, 60)
-	binary.BigEndian.PutUint16(arp[12:14], 0x0806)
-
-	for name, c := range map[string]struct {
-		pkt    []byte
-		accept bool
-	}{
-		"dhcp to 67":      {dhcpFrame, true},
-		"ip options":      {withOptions, true},
-		"udp to 68":       {frame(router, 68, nil), false},
-		"tcp to 67":       {tcp, false},
-		"later fragment":  {frag, false},
-		"arp":             {arp, false},
-		"truncated frame": {dhcpFrame[:20], false},
-	} {
-		if got := runBPF(t, serverPortFilter, c.pkt) != 0; got != c.accept {
-			t.Errorf("%s: accepted=%v, want %v", name, got, c.accept)
-		}
 	}
 }
 
