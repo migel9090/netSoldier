@@ -153,7 +153,7 @@ func (d *SwitchPortDriver) call(ctx context.Context, sr SwitchRequest) error {
 
 	resp, err := d.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("request: %w", err)
+		return fmt.Errorf("request: %w", requestError(err, endpointOf(d.webhookURL)))
 	}
 	defer resp.Body.Close()
 
@@ -165,5 +165,5 @@ func (d *SwitchPortDriver) call(ctx context.Context, sr SwitchRequest) error {
 	// A transport error above is different — the request may have been
 	// carried out — and is returned as is.
 	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	return NotApplied(fmt.Errorf("webhook %d: %s", resp.StatusCode, errBody))
+	return NotApplied(fmt.Errorf("webhook %d: %s", resp.StatusCode, scrub(errBody, urlSecrets(d.webhookURL)...)))
 }

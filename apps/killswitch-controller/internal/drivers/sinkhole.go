@@ -3,6 +3,7 @@ package drivers
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -367,13 +369,13 @@ func (d *SinkholeDriver) getRules(ctx context.Context) ([]string, error) {
 
 	resp, err := d.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, requestError(err, endpointOf(d.baseURL))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("adguard %d: %s", resp.StatusCode, bytes.TrimSpace(body))
+		return nil, fmt.Errorf("adguard %d: %s", resp.StatusCode, d.scrub(body))
 	}
 
 	var status map[string]json.RawMessage
@@ -409,13 +411,28 @@ func (d *SinkholeDriver) setRules(ctx context.Context, rules []string) error {
 
 	resp, err := d.http.Do(req)
 	if err != nil {
-		return err
+		return requestError(err, endpointOf(d.baseURL))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("adguard %d: %s", resp.StatusCode, bytes.TrimSpace(errBody))
+		return fmt.Errorf("adguard %d: %s", resp.StatusCode, d.scrub(errBody))
 	}
 	return nil
+}
+
+// scrub is AdGuard's answer without the credential the request carried:
+// AdGuard, or a proxy in front of it, may answer with what it was sent.
+func (d *SinkholeDriver) scrub(body []byte) string {
+	secrets := []string{d.password}
+	if d.password != "" {
+		secrets = append(secrets, base64.StdEncoding.EncodeToString([]byte(d.user+":"+d.password)))
+	}
+	if u, err := url.Parse(d.baseURL); err == nil {
+		if p, ok := u.User.Password(); ok {
+			secrets = append(secrets, p)
+		}
+	}
+	return scrub(body, secrets...)
 }
