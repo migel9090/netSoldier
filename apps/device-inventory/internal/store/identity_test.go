@@ -461,6 +461,49 @@ func TestConflictTableIsCapped(t *testing.T) {
 	}
 }
 
+// GET /devices/{mac} reported conflict_count as the length of the list it
+// attaches, which stops at maxConflictsShown, while GET /devices counted
+// every recent conflict: one device, two numbers. The count is the total on
+// every read; only the attached list is capped.
+func TestConflictCountIsTheTotalOnEveryRead(t *testing.T) {
+	s, c := newTestStore(t, func(o *Options) { o.PerSourceBurst = 1e6; o.PerSourceRate = 1e6 })
+	router := "00:11:24:aa:bb:01"
+	confirm(t, s, c, router, "192.168.1.1")
+	const claims = maxConflictsShown + 5
+	for i := 0; i < claims; i++ {
+		observe(t, s, arpSeen(router, fmt.Sprintf("10.1.0.%d", i+1)))
+	}
+
+	d := mustGet(t, s, router)
+	if len(d.Conflicts) != maxConflictsShown {
+		t.Errorf("GetDevice attaches %d conflicts, want the cap of %d", len(d.Conflicts), maxConflictsShown)
+	}
+	if d.ConflictCount != claims {
+		t.Errorf("GetDevice conflict_count = %d, want the total %d", d.ConflictCount, claims)
+	}
+	byIP, err := s.GetByIP("192.168.1.1")
+	if err != nil || byIP == nil {
+		t.Fatalf("GetByIP: %+v %v", byIP, err)
+	}
+	if byIP.ConflictCount != claims {
+		t.Errorf("GetByIP conflict_count = %d, want the total %d", byIP.ConflictCount, claims)
+	}
+	page, err := s.List(10, 0)
+	if err != nil || len(page) != 1 {
+		t.Fatalf("List: %+v %v", page, err)
+	}
+	if page[0].ConflictCount != d.ConflictCount {
+		t.Errorf("List says %d conflicts, GetDevice %d: the two endpoints disagree",
+			page[0].ConflictCount, d.ConflictCount)
+	}
+
+	// Outside the window a conflict counts nowhere.
+	c.advance(25 * time.Hour)
+	if d := mustGet(t, s, router); d.ConflictCount != 0 || len(d.Conflicts) != 0 {
+		t.Errorf("after the window: count %d, %d attached", d.ConflictCount, len(d.Conflicts))
+	}
+}
+
 // One address, one holder, whatever the order of claims.
 func TestOneHolderPerAddressInvariant(t *testing.T) {
 	s, c := newTestStore(t, func(o *Options) { o.PerSourceBurst = 1e6; o.PerSourceRate = 1e6 })
