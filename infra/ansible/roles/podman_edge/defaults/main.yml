@@ -1,4 +1,32 @@
 ---
-podman_ghcr_user: migel9090
-podman_ghcr_token: ""
-podman_registry: ghcr.io/migel9090
+# podman_edge: the netSoldier lite profile (Podman + Quadlets) on one host.
+#
+# The role installs the packages, copies deploy/podman/ to the host, writes
+# /etc/netsoldier/netsoldier.conf from podman_edge_settings and runs the
+# same deploy/podman/netsoldier-lite script a user without Ansible runs.
+# Secrets are generated on the host by that script and never leave it.
+
+# present: install or update; absent: netsoldier-lite uninstall (removes
+# units, containers, networks, volumes, secrets, images and files).
+podman_edge_state: present
+
+# The netsoldier.conf settings (keys and meaning:
+# deploy/podman/netsoldier.conf.example). The first five are required.
+podman_edge_settings: {}
+#   LAN_INTERFACE: eth0
+#   HOST_IP: 192.0.2.10
+#   GATEWAY_IP: 192.0.2.1
+#   GATEWAY_MAC: "02:00:00:00:00:01"
+#   LAN_NETWORKS: 192.0.2.0/24
+
+# Optional: lines for /etc/netsoldier/local-indicators.txt (site-local
+# known-bad domains). Left alone when empty.
+podman_edge_local_indicators: []
+
+# Where the role copies deploy/podman/ to (the installer's own home).
+podman_edge_share_dir: /usr/local/share/netsoldier-lite
+
+# Optional registry login for private images (written to
+# /etc/containers/auth.json only when a token is set).
+podman_edge_ghcr_user: migel9090
+podman_edge_ghcr_token: ""

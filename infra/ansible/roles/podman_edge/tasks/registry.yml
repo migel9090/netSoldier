@@ -11,10 +11,11 @@
       {
         "auths": {
           "ghcr.io": {
-            "auth": "{{ (podman_ghcr_user + ':' + podman_ghcr_token) | b64encode }}"
+            "auth": "{{ (podman_edge_ghcr_user + ':' + podman_edge_ghcr_token) | b64encode }}"
           }
         }
       }
     dest: /etc/containers/auth.json
     mode: "0600"
-  when: podman_ghcr_token | default('') | length > 0
+  when: podman_edge_ghcr_token | default('') | length > 0
+  no_log: true
