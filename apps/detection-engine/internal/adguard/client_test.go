@@ -15,8 +15,8 @@ func TestQueryLogPageParameters(t *testing.T) {
 		gotUser, _, _ = r.BasicAuth()
 		// "oldest" claims more than was returned; it must not be used.
 		_, _ = w.Write([]byte(`{"data":[
-			{"question":{"host":"b.example","type":"A"},"client":"192.168.1.5","time":"2026-11-16T12:00:02.5Z"},
-			{"question":{"host":"a.example","type":"A"},"client":"192.168.1.5","time":"2026-11-16T12:00:01.25Z"}
+			{"question":{"name":"b.example","type":"A"},"client":"192.168.1.5","time":"2026-11-16T12:00:02.5Z"},
+			{"question":{"name":"a.example","type":"A"},"client":"192.168.1.5","time":"2026-11-16T12:00:01.25Z"}
 		],"oldest":"2026-11-16T11:00:00Z"}`))
 	}))
 	defer srv.Close()
@@ -63,7 +63,7 @@ func TestQueryLogRealAdGuardEntry(t *testing.T) {
 		t.Fatalf("got %d entries", len(page.Entries))
 	}
 	e := page.Entries[0]
-	if e.Question.Host != "example.com" || e.Question.Type != "A" || e.Client != "192.168.77.114" {
+	if e.Question.Name != "example.com" || e.Question.Type != "A" || e.Client != "192.168.77.114" {
 		t.Errorf("question %+v client %q: the queried name was not read", e.Question, e.Client)
 	}
 	if len(e.Answer) != 2 || e.Answer[0].Value != "172.66.147.243" || e.Answer[0].TTL != 230 {

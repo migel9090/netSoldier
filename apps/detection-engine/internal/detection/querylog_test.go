@@ -36,7 +36,7 @@ func (f *agQueryLog) add(host, client string, ts time.Time, answers ...string) {
 		ans = append(ans, map[string]any{"value": a, "type": "A", "ttl": 60})
 	}
 	f.entries = append(f.entries, map[string]any{
-		"question": map[string]string{"host": host, "type": "A"},
+		"question": map[string]string{"name": host, "type": "A"},
 		"client":   client, "time": ts.UTC().Format(time.RFC3339Nano), "answer": ans,
 	})
 }
@@ -282,7 +282,7 @@ func TestQueryLogServerIgnoringOlderThanIsAGap(t *testing.T) {
 	entries := make([]map[string]any, 10)
 	now := time.Now()
 	for i := range entries {
-		entries[i] = map[string]any{"question": map[string]string{"host": fmt.Sprintf("n%d.example", i), "type": "A"},
+		entries[i] = map[string]any{"question": map[string]string{"name": fmt.Sprintf("n%d.example", i), "type": "A"},
 			"client": "192.168.1.5", "time": now.Add(-time.Duration(i) * time.Millisecond)}
 	}
 	requests := 0

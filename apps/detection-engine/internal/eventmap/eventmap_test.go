@@ -148,8 +148,8 @@ func TestEveryProducerEmitsValidV2Events(t *testing.T) {
 	entryTime := time.Now().Add(time.Hour)
 	ag := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{
-			{"question": map[string]string{"host": "a.evil-ioc.com", "type": "A"}, "client": "192.168.1.66", "time": entryTime},
-			{"question": map[string]string{"host": "cdn.legit.example", "type": "A"}, "client": "192.168.1.66",
+			{"question": map[string]string{"name": "a.evil-ioc.com", "type": "A"}, "client": "192.168.1.66", "time": entryTime},
+			{"question": map[string]string{"name": "cdn.legit.example", "type": "A"}, "client": "192.168.1.66",
 				"time": entryTime.Add(-time.Second), "answer": []map[string]any{{"value": "203.0.113.7", "type": "A", "ttl": 60}}},
 		}})
 	}))

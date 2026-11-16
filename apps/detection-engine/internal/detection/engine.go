@@ -457,7 +457,7 @@ func (e *Engine) poll(ctx context.Context) {
 // check matches one querylog entry against the indicators.
 func (e *Engine) check(entry adguard.QueryLogEntry, key string) {
 	queriesChecked.Inc()
-	domain := strings.ToLower(strings.TrimSuffix(entry.Question.Host, "."))
+	domain := strings.ToLower(strings.TrimSuffix(entry.Question.Name, "."))
 
 	if e.OnDNSAnswer != nil {
 		for _, ans := range entry.Answer {
@@ -484,7 +484,7 @@ func (e *Engine) check(entry adguard.QueryLogEntry, key string) {
 // nanosecond precision, so the time plus who asked what is unique.
 func entryKey(entry adguard.QueryLogEntry) string {
 	return entry.Time.UTC().Format(time.RFC3339Nano) + "|" + entry.Client + "|" +
-		entry.Question.Host + "|" + entry.Question.Type
+		entry.Question.Name + "|" + entry.Question.Type
 }
 
 // forget drops seen entries that have left the overlap window, and caps the

@@ -12,10 +12,10 @@ import (
 
 type QueryLogEntry struct {
 	Question struct {
-		// Host is the queried name. AdGuard Home sends it as "name" (the
-		// A-label spelling); QueryLog copies it here. "host" is only read
-		// for older test doubles that still send it.
-		Host string `json:"host"`
+		// Name is the queried name, as AdGuard Home sends it (the A-label
+		// spelling). A "host" key, which only this project's old test
+		// doubles ever sent, is not read: an entry without "name" has no
+		// name to match.
 		Name string `json:"name"`
 		Type string `json:"type"`
 	} `json:"question"`
@@ -92,14 +92,6 @@ func (c *Client) QueryLog(ctx context.Context, olderThan time.Time, limit int) (
 	// response's own "oldest" is not used: it is missing from some releases
 	// and stubs, and a value older than what was returned would skip entries.
 	page := QueryLogPage{Entries: result.Data}
-	for i := range result.Data {
-		// AdGuard Home's querylog names the question "name"; reading only
-		// "host" left every queried name empty, so no DNS detection could
-		// ever match.
-		if q := &result.Data[i].Question; q.Name != "" {
-			q.Host = q.Name
-		}
-	}
 	for _, e := range result.Data {
 		if page.Oldest.IsZero() || e.Time.Before(page.Oldest) {
 			page.Oldest = e.Time

@@ -264,7 +264,7 @@ func (f *fakeQueryLog) add(host, client string, ts time.Time) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.entries = append(f.entries, map[string]any{
-		"question": map[string]string{"host": host, "type": "A"}, "client": client, "time": ts,
+		"question": map[string]string{"name": host, "type": "A"}, "client": client, "time": ts,
 	})
 }
 

@@ -48,7 +48,7 @@ type querylog struct {
 
 func startQuerylog(t *testing.T, client string) *querylog {
 	entries := []map[string]any{{
-		"question": map[string]string{"host": "evil.example.com", "type": "A"},
+		"question": map[string]string{"name": "evil.example.com", "type": "A"},
 		"client":   client, "time": time.Now().Add(time.Minute),
 	}}
 	q := &querylog{}
@@ -290,7 +290,7 @@ func TestRunDoesNotRedetectAfterRestart(t *testing.T) {
 	logged := time.Now().Add(-2 * time.Second)
 	var mu sync.Mutex
 	entries := []map[string]any{{
-		"question": map[string]string{"host": "evil.example.com", "type": "A"},
+		"question": map[string]string{"name": "evil.example.com", "type": "A"},
 		"client":   "192.168.1.42", "time": logged,
 	}}
 	ag := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -350,7 +350,7 @@ func TestRunDoesNotRedetectAfterRestart(t *testing.T) {
 	// outbox): detected by the next start.
 	mu.Lock()
 	entries = append([]map[string]any{{
-		"question": map[string]string{"host": "evil.example.com", "type": "A"},
+		"question": map[string]string{"name": "evil.example.com", "type": "A"},
 		"client":   "192.168.1.43", "time": time.Now().Add(-time.Second),
 	}}, entries...)
 	mu.Unlock()
@@ -463,7 +463,7 @@ func getSuppressions(t *testing.T, addr string) []map[string]any {
 func TestRunVerdictSurvivesRestartWithoutClickHouse(t *testing.T) {
 	var mu sync.Mutex
 	entries := []map[string]any{{
-		"question": map[string]string{"host": "evil.example.com", "type": "A"},
+		"question": map[string]string{"name": "evil.example.com", "type": "A"},
 		"client":   "192.168.1.42", "time": time.Now().Add(-time.Second),
 	}}
 	ag := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -491,7 +491,7 @@ func TestRunVerdictSurvivesRestartWithoutClickHouse(t *testing.T) {
 	// The device looks the name up again while nothing is running.
 	mu.Lock()
 	entries = append([]map[string]any{{
-		"question": map[string]string{"host": "evil.example.com", "type": "A"},
+		"question": map[string]string{"name": "evil.example.com", "type": "A"},
 		"client":   "192.168.1.42", "time": time.Now(),
 	}}, entries...)
 	mu.Unlock()

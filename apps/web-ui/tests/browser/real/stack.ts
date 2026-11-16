@@ -195,7 +195,8 @@ function dhcpRequest(mac: string, ip: string, hostname: string): Buffer {
 }
 
 interface QueryLogEntry {
-  question: { host: string; type: string }
+  /** AdGuard Home names the queried name `name`; the engine reads nothing else. */
+  question: { name: string; type: string }
   client: string
   time: string
   reason: string
@@ -454,7 +455,7 @@ export async function startRealStack(repoRoot: string, logDir: string): Promise<
       if (req.method === 'POST' && url.pathname === '/querylog') {
         const { host, client } = JSON.parse(body) as { host: string; client: string }
         querylog.push({
-          question: { host, type: 'A' },
+          question: { name: host, type: 'A' },
           client,
           time: new Date().toISOString(),
           reason: 'NotFilteredNotFound',

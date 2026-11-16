@@ -36,7 +36,7 @@ func (f *fakeQueryLog) add(host, client string, ts time.Time, answers ...string)
 		ans = append(ans, map[string]any{"value": a, "type": typ, "ttl": 60})
 	}
 	f.entries = append(f.entries, map[string]any{
-		"question": map[string]string{"host": host, "type": "A"},
+		"question": map[string]string{"name": host, "type": "A"},
 		"client":   client, "time": ts, "answer": ans,
 	})
 }
@@ -65,6 +65,25 @@ func newTestEngine(t *testing.T, f *fakeQueryLog, iocs []iocmatch.IoC) (*Engine,
 }
 
 var idRe = regexp.MustCompile(events.DetectionIDPattern)
+
+// TestLegacyHostFieldIsNotRead: AdGuard Home names the question "name".
+// The client also read "host", which only this project's test doubles ever
+// sent; an entry with nothing but "host" is not a lookup of that name.
+func TestLegacyHostFieldIsNotRead(t *testing.T) {
+	f := &fakeQueryLog{}
+	e, got := newTestEngine(t, f, []iocmatch.IoC{{Value: "evil-ioc.com", Type: "domain", Source: "threatfox", Confidence: 95}})
+	f.mu.Lock()
+	f.entries = append(f.entries, map[string]any{
+		"question": map[string]string{"host": "evil-ioc.com", "type": "A"},
+		"client":   "192.168.1.66", "time": time.Now().Add(time.Second),
+	})
+	f.mu.Unlock()
+	f.add("evil-ioc.com", "192.168.1.67", time.Now().Add(2*time.Second))
+	e.poll(context.Background())
+	if len(*got) != 1 || (*got)[0].ClientIP != "192.168.1.67" {
+		t.Fatalf("alerts %+v: want one, for the entry that names its question", *got)
+	}
+}
 
 // TestDomainMatchCarriesTypedTarget: the queried FQDN stays in Domain as
 // context, and the target is the feed's indicator.
