@@ -53,6 +53,10 @@ const trustOrder = `ORDER BY (d.labels NOT IN ('[]', '')) DESC,
 	(d.ip != '' AND d.ip_confirmations > 0 AND d.ip_confirmed_at >= ?) DESC,
 	d.last_seen DESC, d.mac ASC`
 
+// conflictCount is the number of recent conflicts a device (d) is involved
+// in. GET /devices and GET /devices/{mac} both report it, so a device has one
+// conflict count whichever endpoint is asked; only the attached list is
+// capped.
 const conflictCount = `(SELECT count(*) FROM conflicts c
 	WHERE (c.mac = d.mac OR (c.claimant = d.mac AND c.claimant != '')) AND c.last_seen >= ?)`
 
@@ -130,7 +134,13 @@ func (s *Store) getWithConflicts(where string, arg any, currentOnly bool) (*Devi
 	if d.Conflicts, err = s.conflictsFor(d.MAC, now); err != nil {
 		return nil, err
 	}
-	d.ConflictCount = len(d.Conflicts)
+	// The real total, not len(d.Conflicts): that list stops at
+	// maxConflictsShown, and a device under a flood of claims would
+	// otherwise show 10 here and the true number in the list view.
+	if err := s.db.QueryRow(`SELECT `+conflictCount+` FROM devices d WHERE d.mac = ?`,
+		formatTime(now.Add(-s.opts.ConflictWindow)), d.MAC).Scan(&d.ConflictCount); err != nil {
+		return nil, err
+	}
 	return d, nil
 }
 
