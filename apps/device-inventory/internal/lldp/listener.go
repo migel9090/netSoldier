@@ -1,14 +1,17 @@
+// Package lldp parses LLDP frames into sightings, offering the system name
+// for the frame's source MAC. netagent captures the frames (ADR-0004); this
+// package opens no socket.
+//
+// LLDP contributes a name only. The chassis ID and management address are
+// claims inside the payload: switches commonly send LLDP from per-port MACs
+// while managing themselves from another MAC and VLAN, so binding the
+// management address to the frame source would be wrong as often as right.
 package lldp
 
 import (
-	"context"
 	"encoding/binary"
-	"errors"
-	"net"
 
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/capture"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/metrics"
 )
 
 const (
@@ -17,66 +20,6 @@ const (
 	tlvEnd     = 0
 	tlvSysName = 5
 )
-
-// The LLDP destination groups (IEEE 802.1AB). NICs drop them unless joined.
-var (
-	nearestBridge  = net.HardwareAddr{0x01, 0x80, 0xc2, 0x00, 0x00, 0x0e}
-	nonTPMRBridge  = net.HardwareAddr{0x01, 0x80, 0xc2, 0x00, 0x00, 0x03}
-	customerBridge = net.HardwareAddr{0x01, 0x80, 0xc2, 0x00, 0x00, 0x00}
-)
-
-// Listener passively captures LLDP frames on one interface and offers the
-// system name for the frame's source MAC. Requires CAP_NET_RAW.
-//
-// LLDP contributes a name only. The chassis ID and management address are
-// claims inside the payload: switches commonly send LLDP from per-port MACs
-// while managing themselves from another MAC and VLAN, so binding the
-// management address to the frame source would be wrong as often as right.
-type Listener struct {
-	iface string
-	ch    chan<- discovery.Sighting
-}
-
-// NewListener returns a listener for iface ("" = default-route interface).
-func NewListener(iface string, ch chan<- discovery.Sighting) *Listener {
-	return &Listener{iface: iface, ch: ch}
-}
-
-// Run reads until ctx is done or the socket fails.
-func (l *Listener) Run(ctx context.Context, up func()) error {
-	ifi, err := capture.ResolveInterface(l.iface)
-	if err != nil {
-		return err
-	}
-	conn, err := capture.OpenPacket(ifi, ethPLLDP, nil, nearestBridge, nonTPMRBridge, customerBridge)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	up()
-
-	buf := make([]byte, 1518)
-	for ctx.Err() == nil {
-		n, err := conn.Read(buf)
-		if errors.Is(err, capture.ErrTimeout) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		metrics.FramesReceived.WithLabelValues("lldp").Inc()
-		s, err := ParseFrame(buf[:n])
-		if err != nil {
-			metrics.FramesRejected.WithLabelValues("lldp", discovery.RejectReason(err)).Inc()
-			continue
-		}
-		select {
-		case l.ch <- s:
-		case <-ctx.Done():
-		}
-	}
-	return nil
-}
 
 // ParseFrame returns the system name an LLDP frame announces for its own
 // Ethernet source.

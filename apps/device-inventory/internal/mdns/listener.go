@@ -1,74 +1,29 @@
+// Package mdns parses mDNS responses into sightings, offering the responder's
+// own .local name for the device holding the source address. netagent
+// captures the frames (ADR-0004); this package opens no socket.
 package mdns
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
 	"net"
 	"strings"
-	"time"
 
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/capture"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/metrics"
 )
-
-var group = net.IPv4(224, 0, 0, 251)
 
 const port = 5353
 
-// Listener passively captures mDNS responses on one interface and offers the
-// responder's own .local name for the device holding the source address.
-type Listener struct {
-	iface string
-	ch    chan<- discovery.Sighting
-}
-
-// NewListener returns a listener for iface ("" = default-route interface).
-func NewListener(iface string, ch chan<- discovery.Sighting) *Listener {
-	return &Listener{iface: iface, ch: ch}
-}
-
-// Run reads until ctx is done or the socket fails.
-func (l *Listener) Run(ctx context.Context, up func()) error {
-	ifi, err := capture.ResolveInterface(l.iface)
-	if err != nil {
-		return err
+// ParseFrame unwraps an Ethernet/IPv4/UDP frame carrying mDNS (UDP 5353) and
+// returns the sighting ParseDatagram derives from its payload. The agent
+// captures whole frames; this is where device-inventory strips the link, IP
+// and UDP headers, inside its sandbox and facing attacker-controlled bytes.
+func ParseFrame(frame []byte) (discovery.Sighting, error) {
+	payload, src, ok := discovery.UDPPayload(frame, port)
+	if !ok {
+		return discovery.Sighting{}, discovery.ErrIgnored
 	}
-	conn, err := capture.ListenMulticast(ctx, ifi, group, port)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	up()
-
-	watch := capture.NewInterfaceWatch(ifi, 5*time.Second)
-	buf := make([]byte, 9000)
-	for ctx.Err() == nil {
-		if err := watch.Check(); err != nil {
-			return err
-		}
-		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
-		n, src, err := conn.ReadFromUDP(buf)
-		if err != nil {
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
-				continue
-			}
-			return err
-		}
-		metrics.FramesReceived.WithLabelValues("mdns").Inc()
-		s, err := ParseDatagram(buf[:n], src.IP)
-		if err != nil {
-			metrics.FramesRejected.WithLabelValues("mdns", discovery.RejectReason(err)).Inc()
-			continue
-		}
-		select {
-		case l.ch <- s:
-		case <-ctx.Done():
-		}
-	}
-	return nil
+	return ParseDatagram(payload, src)
 }
 
 // ParseDatagram turns an mDNS payload received from src into a sighting: the

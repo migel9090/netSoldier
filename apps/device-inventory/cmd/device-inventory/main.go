@@ -15,30 +15,27 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/agent"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/api"
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/arp"
 	ch "github.com/migel9090/netSoldier/apps/device-inventory/internal/clickhouse"
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/dhcp"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/lldp"
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/mdns"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/metrics"
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/ssdp"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/store"
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/supervise"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// allListeners is the default for DISCOVERY_LISTENERS.
-var allListeners = []string{"dhcp", "arp", "lldp", "mdns", "ssdp"}
+// allProtocols is the default set of captures device-inventory expects the
+// agent to be running (for readiness).
+var allProtocols = []string{"dhcp", "arp", "lldp", "mdns", "ssdp"}
 
 type config struct {
 	listenAddr       string
 	dbPath           string
 	apiKey           string
 	allowUnauth      bool
-	iface            string
-	listeners        []string
+	netagentToken    string
+	expectCapture    []string
+	heartbeatTimeout time.Duration
 	arpScanSubnet    string
 	arpScanInterval  time.Duration
 	retention        time.Duration
@@ -51,7 +48,8 @@ type config struct {
 
 // loadConfig reads the environment. It fails closed: without DEVICE_API_KEY
 // the service only starts when DEVICE_API_ALLOW_UNAUTHENTICATED=true says so
-// explicitly.
+// explicitly. device-inventory no longer captures: it ingests frames from
+// netagent (ADR-0004), so it opens no raw socket and needs no capability.
 func loadConfig(getenv func(string) string) (config, error) {
 	or := func(key, def string) string {
 		if v := getenv(key); v != "" {
@@ -63,7 +61,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		listenAddr:       or("LISTEN_ADDR", ":8081"),
 		dbPath:           or("DB_PATH", "/data/devices.db"),
 		apiKey:           getenv("DEVICE_API_KEY"),
-		iface:            getenv("DISCOVERY_INTERFACE"),
+		netagentToken:    getenv("NETAGENT_TOKEN"),
 		arpScanSubnet:    getenv("ARP_SCAN_SUBNET"),
 		clickhouseURL:    getenv("CLICKHOUSE_URL"),
 		clickhouseDB:     or("CLICKHOUSE_DATABASE", "netsoldier"),
@@ -84,21 +82,34 @@ func loadConfig(getenv func(string) string) (config, error) {
 			"(set DEVICE_API_ALLOW_UNAUTHENTICATED=true to do so deliberately)"))
 	}
 
+	// NETAGENT_EXPECT_CAPTURE names the protocols the agent is expected to
+	// capture (for readiness). DISCOVERY_LISTENERS is still accepted as the
+	// old name; "none" means no agent is required (readiness ignores the
+	// heartbeat), which is what the e2e suite relies on.
 	seen := map[string]bool{}
-	listeners := or("DISCOVERY_LISTENERS", strings.Join(allListeners, ","))
-	if strings.TrimSpace(listeners) == "none" { // API only (tests; frames from elsewhere later)
-		listeners = ""
+	raw := getenv("NETAGENT_EXPECT_CAPTURE")
+	if raw == "" {
+		raw = getenv("DISCOVERY_LISTENERS")
 	}
-	for _, name := range strings.Split(listeners, ",") {
-		name = strings.TrimSpace(name)
-		switch {
-		case name == "" || seen[name]:
-		case !contains(allListeners, name):
-			errs = append(errs, fmt.Errorf("DISCOVERY_LISTENERS: unknown listener %q (known: %s)", name, strings.Join(allListeners, ",")))
-		default:
-			seen[name] = true
-			c.listeners = append(c.listeners, name)
+	if raw == "" {
+		raw = strings.Join(allProtocols, ",")
+	}
+	if strings.TrimSpace(raw) != "none" {
+		for _, name := range strings.Split(raw, ",") {
+			name = strings.TrimSpace(name)
+			switch {
+			case name == "" || seen[name]:
+			case !contains(allProtocols, name):
+				errs = append(errs, fmt.Errorf("NETAGENT_EXPECT_CAPTURE: unknown protocol %q (known: %s)", name, strings.Join(allProtocols, ",")))
+			default:
+				seen[name] = true
+				c.expectCapture = append(c.expectCapture, name)
+			}
 		}
+	}
+	if len(c.expectCapture) > 0 && c.netagentToken == "" {
+		errs = append(errs, errors.New("NETAGENT_EXPECT_CAPTURE names captures but NETAGENT_TOKEN is not set; "+
+			"the agent could not authenticate to post frames (set it to none to run without an agent)"))
 	}
 
 	dur := func(key string, def time.Duration) time.Duration {
@@ -113,6 +124,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 		return d
 	}
+	c.heartbeatTimeout = dur("NETAGENT_HEARTBEAT_TIMEOUT", 15*time.Second)
 	c.arpScanInterval = dur("ARP_SCAN_INTERVAL", 5*time.Minute)
 	c.retention = dur("DEVICE_RETENTION", 30*24*time.Hour)
 	c.store.BindingTTL = dur("BINDING_TTL", time.Hour)
@@ -122,6 +134,15 @@ func loadConfig(getenv func(string) string) (config, error) {
 			errs = append(errs, fmt.Errorf("DEVICE_MAX_ROWS=%q: want a positive integer", v))
 		}
 		c.store.MaxDevices = n
+	}
+	if c.arpScanSubnet != "" {
+		if err := agent.ValidateProbeSubnet(c.arpScanSubnet); err != nil {
+			errs = append(errs, fmt.Errorf("ARP_SCAN_SUBNET=%q: %w", c.arpScanSubnet, err))
+		}
+		if c.netagentToken == "" {
+			errs = append(errs, errors.New("ARP_SCAN_SUBNET is set but NETAGENT_TOKEN is not; "+
+				"device-inventory cannot deliver arp_probe commands without the agent endpoint"))
+		}
 	}
 	return c, errors.Join(errs...)
 }
@@ -177,33 +198,44 @@ func main() {
 
 	go runDevicePrune(ctx, db, cfg.retention)
 
-	sightings := make(chan discovery.Sighting, 256)
-	status := supervise.NewStatus()
-	startListeners(ctx, cfg, status, sightings)
-	go processSightings(ctx, db, writer, sightings)
+	// Ingestion path: netagent posts captured frames, device-inventory parses
+	// them here and updates the store. No socket, no capability.
+	hb := agent.NewHeartbeat(cfg.heartbeatTimeout, cfg.expectCapture)
+	cmds := agent.NewCommandQueue()
+	ingest := agent.NewIngestor(cfg.netagentToken, func(s discovery.Sighting) { handleSighting(db, writer, s) }, hb, cmds)
+
+	if cfg.arpScanSubnet != "" {
+		if err := cmds.RunProbeScheduler(ctx, cfg.arpScanSubnet, cfg.arpScanInterval); err != nil {
+			slog.Error("arp probe scheduler failed to start", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	handler := api.NewHandler(db, chClient)
 	handler.OnLabels = writer.device
 	mux := http.NewServeMux()
 	handler.Register(mux)
 	mux.Handle("GET /topology", api.NewTopologyHandler(db, chClient))
+	if cfg.netagentToken != "" {
+		ingest.Register(mux) // POST /agent/v1/frames, authenticated with NETAGENT_TOKEN
+	}
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("GET /readyz", readyzHandler(status))
+	mux.HandleFunc("GET /readyz", readyzHandler(hb, len(cfg.expectCapture) > 0))
 	mux.Handle("GET /metrics", promhttp.Handler())
 
 	srv := &http.Server{
 		Addr:              cfg.listenAddr,
 		Handler:           authMiddleware(cfg.apiKey, mux),
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       5 * time.Second,
+		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
 
 	go func() {
-		slog.Info("starting device-inventory", "addr", cfg.listenAddr, "listeners", strings.Join(status.Names(), ","),
-			"interface", cfg.iface)
+		slog.Info("starting device-inventory", "addr", cfg.listenAddr, "expect_capture", strings.Join(cfg.expectCapture, ","),
+			"agent_ingest", cfg.netagentToken != "")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("server failed", "error", err)
 			os.Exit(1)
@@ -230,56 +262,30 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// readyzHandler reports 200 only while every enabled listener is up, with
-// each listener's state in the body either way.
-func readyzHandler(status *supervise.Status) http.HandlerFunc {
+// readyzHandler reports readiness from the agent's heartbeat (contract 8.1).
+// When no captures are expected (NETAGENT_EXPECT_CAPTURE=none) there is no
+// agent to wait for, so the service is ready as soon as it serves.
+func readyzHandler(hb *agent.Heartbeat, requireAgent bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
-		ready, listeners := status.Ready()
+		st := hb.Status()
+		ready := st.Ready || !requireAgent
 		code, word := http.StatusOK, "ready"
 		if !ready {
 			code, word = http.StatusServiceUnavailable, "not ready"
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(code)
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": word, "listeners": listeners})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": word, "agent": st})
 	}
 }
 
-func startListeners(ctx context.Context, cfg config, status *supervise.Status, out chan<- discovery.Sighting) {
-	run := func(name string, fn supervise.RunFunc) {
-		status.Register(name)
-		go supervise.Run(ctx, status, name, fn)
-	}
-	for _, name := range cfg.listeners {
-		switch name {
-		case "dhcp":
-			run(name, dhcp.NewListener(cfg.iface, out).Run)
-		case "arp":
-			run(name, arp.NewListener(cfg.iface, out).Run)
-		case "lldp":
-			run(name, lldp.NewListener(cfg.iface, out).Run)
-		case "mdns":
-			run(name, mdns.NewListener(cfg.iface, out).Run)
-		case "ssdp":
-			run(name, ssdp.NewListener(cfg.iface, out).Run)
-		}
-	}
-	if cfg.arpScanSubnet != "" {
-		run("arp-scan", func(ctx context.Context, up func()) error {
-			scanner, err := arp.NewScanner(cfg.arpScanSubnet, cfg.arpScanInterval)
-			if err != nil {
-				return err
-			}
-			return scanner.Run(ctx, up)
-		})
-	}
-}
-
-// authMiddleware requires the bearer token on everything except the probe
-// and metrics endpoints, reads included. An empty key means the operator
+// authMiddleware requires the bearer token on everything except the probe,
+// metrics and agent-ingest endpoints, reads included. The ingest endpoint
+// authenticates itself with the separate agent token (a leaked read key must
+// not be usable to inject frames). An empty key means the operator
 // explicitly allowed unauthenticated access (loadConfig enforces that).
 func authMiddleware(apiKey string, next http.Handler) http.Handler {
-	open := map[string]bool{"/healthz": true, "/readyz": true, "/metrics": true}
+	open := map[string]bool{"/healthz": true, "/readyz": true, "/metrics": true, "/agent/v1/frames": true}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if apiKey == "" || open[r.URL.Path] {
 			next.ServeHTTP(w, r)

@@ -1,0 +1,8 @@
+module github.com/migel9090/netSoldier/apps/netagent
+
+go 1.27.4
+
+require (
+	golang.org/x/net v0.62.0
+	golang.org/x/sys v0.50.0
+)

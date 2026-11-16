@@ -4,6 +4,8 @@
 // through before it is trusted with a row in the inventory.
 package discovery
 
+import "time"
+
 // Source names the protocol (or, later, the system) a piece of evidence came
 // from. It is stored next to every field it set, so a stronger source can
 // replace what a weaker one said and nothing else can.
@@ -70,4 +72,12 @@ type Sighting struct {
 	Vendor     string
 	OS         string
 	DeviceType string
+
+	// CapturedAt is when netagent captured the frame (its clock); zero when
+	// unknown. Interface is the capture interface it named. Both come from
+	// the agent, which is trusted, not from the frame's own bytes. The store
+	// records the sighting at CapturedAt when it is set, so last_seen and the
+	// ClickHouse event reflect capture time rather than ingestion time.
+	CapturedAt time.Time
+	Interface  string
 }

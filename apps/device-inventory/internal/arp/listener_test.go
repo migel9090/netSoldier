@@ -1,12 +1,10 @@
 package arp
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
 	"net"
 	"testing"
-	"time"
 
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
 )
@@ -100,59 +98,4 @@ func FuzzParseFrame(f *testing.F) {
 			t.Fatalf("claim %s accepted from %s", s.MAC, net.HardwareAddr(b[6:12]))
 		}
 	})
-}
-
-type fakeSender struct {
-	frames [][]byte
-	err    error
-}
-
-func (f *fakeSender) Send(frame []byte) error {
-	f.frames = append(f.frames, frame)
-	return f.err
-}
-
-func TestScannerBuildsRequests(t *testing.T) {
-	_, subnet, _ := net.ParseCIDR("192.168.77.0/30")
-	s := &Scanner{
-		subnet:  subnet,
-		iface:   &net.Interface{Index: 3, Name: "veth0", HardwareAddr: net.HardwareAddr{2, 0, 0, 0, 0, 2}},
-		localIP: net.IPv4(192, 168, 77, 2),
-	}
-	fs := &fakeSender{}
-	if err := s.sweep(context.Background(), fs); err != nil {
-		t.Fatal(err)
-	}
-	if len(fs.frames) != 2 { // .1 and .2; network and broadcast excluded
-		t.Fatalf("sent %d requests, want 2", len(fs.frames))
-	}
-	got, err := ParseFrame(fs.frames[0])
-	if err != nil || got.MAC != "02:00:00:00:00:02" || got.IP != "192.168.77.2" {
-		t.Errorf("request does not parse as our own claim: %+v %v", got, err)
-	}
-	if target := net.IP(fs.frames[1][38:42]); !target.Equal(net.IPv4(192, 168, 77, 2)) {
-		t.Errorf("second target %s", target)
-	}
-
-	if err := s.sweep(context.Background(), &fakeSender{err: errors.New("ENETDOWN")}); err == nil {
-		t.Error("a sweep where every send failed must be an error (so the supervisor restarts)")
-	}
-}
-
-func TestNewScannerValidates(t *testing.T) {
-	for _, cidr := range []string{"10.0.0.0/8", "garbage", "fd00::/64"} {
-		if _, err := NewScanner(cidr, time.Minute); err == nil {
-			t.Errorf("%s accepted", cidr)
-		}
-	}
-	if _, err := NewScanner("192.0.2.0/24", 0); err == nil {
-		t.Error("zero interval accepted")
-	}
-	if _, err := NewScanner("192.0.2.0/24", time.Minute); err == nil {
-		t.Error("a subnet no interface is on should fail")
-	}
-	_, subnet, _ := net.ParseCIDR("10.1.0.0/16")
-	if n := len(subnetIPs(subnet)); n != 65534 {
-		t.Errorf("/16 enumerates %d hosts", n)
-	}
 }

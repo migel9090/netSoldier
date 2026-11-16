@@ -1,21 +1,17 @@
+// Package dhcp parses DHCP client messages out of captured Ethernet frames
+// into sightings. netagent captures the frames and hands them to
+// device-inventory over HTTP (ADR-0004); this package opens no socket and
+// holds no capability.
 package dhcp
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"strings"
-	"time"
 
-	"golang.org/x/sys/unix"
-
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/capture"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/metrics"
 )
 
 const (
@@ -41,92 +37,6 @@ const (
 	ethHdrLen  = 14
 	serverPort = 67
 )
-
-// serverPortFilter is classic BPF for "ip and udp dst port 67 and not a
-// fragment", the equivalent of tcpdump's `udp dst port 67` for IPv4. Without
-// it the AF_PACKET socket would copy every IPv4 frame on the interface to
-// user space.
-var serverPortFilter = []unix.SockFilter{
-	{Code: unix.BPF_LD | unix.BPF_H | unix.BPF_ABS, K: 12},                        // 0: A = EtherType
-	{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 8, K: ethPIPv4},   // 1
-	{Code: unix.BPF_LD | unix.BPF_B | unix.BPF_ABS, K: 23},                        // 2: A = IP protocol
-	{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 6, K: 17},         // 3: UDP
-	{Code: unix.BPF_LD | unix.BPF_H | unix.BPF_ABS, K: 20},                        // 4: A = flags + fragment offset
-	{Code: unix.BPF_JMP | unix.BPF_JSET | unix.BPF_K, Jt: 4, Jf: 0, K: 0x1fff},    // 5: non-first fragment
-	{Code: unix.BPF_LDX | unix.BPF_B | unix.BPF_MSH, K: 14},                       // 6: X = IP header length
-	{Code: unix.BPF_LD | unix.BPF_H | unix.BPF_IND, K: 16},                        // 7: A = UDP destination port
-	{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 1, K: serverPort}, // 8
-	{Code: unix.BPF_RET | unix.BPF_K, K: 0x40000},                                 // 9: accept
-	{Code: unix.BPF_RET | unix.BPF_K, K: 0},                                       // 10: drop
-}
-
-// Listener passively captures DHCP client messages on one interface.
-//
-// It reads Ethernet frames rather than binding UDP port 67: only the frame
-// shows who actually sent a message, so the client hardware address it
-// claims can be checked against the Ethernet source, and a raw socket does
-// not compete with a DHCP server running on the same host. Requires
-// CAP_NET_RAW.
-type Listener struct {
-	iface    string
-	ch       chan<- discovery.Sighting
-	mismatch discovery.LogLimiter
-}
-
-// NewListener returns a listener for iface ("" = default-route interface).
-func NewListener(iface string, ch chan<- discovery.Sighting) *Listener {
-	return &Listener{iface: iface, ch: ch, mismatch: discovery.LogLimiter{Interval: 10 * time.Second}}
-}
-
-// Run reads until ctx is done or the socket fails.
-func (l *Listener) Run(ctx context.Context, up func()) error {
-	ifi, err := capture.ResolveInterface(l.iface)
-	if err != nil {
-		return err
-	}
-	conn, err := capture.OpenPacket(ifi, ethPIPv4, serverPortFilter)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	up()
-
-	buf := make([]byte, 1600)
-	for ctx.Err() == nil {
-		n, err := conn.Read(buf)
-		if errors.Is(err, capture.ErrTimeout) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		metrics.FramesReceived.WithLabelValues("dhcp").Inc()
-		s, err := ParseFrame(buf[:n])
-		if err != nil {
-			l.reject(buf[:n], err)
-			continue
-		}
-		metrics.DHCPPackets.Inc()
-		select {
-		case l.ch <- s:
-		case <-ctx.Done():
-		}
-	}
-	return nil
-}
-
-func (l *Listener) reject(frame []byte, err error) {
-	metrics.FramesRejected.WithLabelValues("dhcp", discovery.RejectReason(err)).Inc()
-	if !errors.Is(err, discovery.ErrLinkMismatch) {
-		slog.Debug("dhcp frame skipped", "error", err)
-		return
-	}
-	if ok, suppressed := l.mismatch.Allow(time.Now()); ok {
-		slog.Warn("dhcp chaddr does not match its link-layer source; ignored",
-			"eth_src", net.HardwareAddr(frame[6:12]).String(), "error", err,
-			"suppressed_since_last", suppressed)
-	}
-}
 
 // ParseFrame unwraps Ethernet, IPv4 and UDP and returns the client's claim.
 // The chaddr must be the Ethernet source; relayed messages (giaddr set) come

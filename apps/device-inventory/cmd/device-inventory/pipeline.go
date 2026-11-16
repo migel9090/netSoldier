@@ -13,22 +13,11 @@ import (
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/store"
 )
 
-// processSightings is the single consumer of every listener's output.
-func processSightings(ctx context.Context, db *store.Store, w *chWriter, in <-chan discovery.Sighting) {
-	for {
-		select {
-		case s := <-in:
-			handleSighting(db, w, s)
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
 // handleSighting enriches a sighting with what is derived locally (OUI
 // vendor, DHCP profile), hands it to the store, and turns the result into
-// logs, metrics and ClickHouse rows. It touches no socket, so it does not
-// care where the frame was captured.
+// logs, metrics and ClickHouse rows. The frame was captured by netagent and
+// carries its capture time and interface; this code runs in the sandbox and
+// touches no socket.
 func handleSighting(db *store.Store, w *chWriter, s discovery.Sighting) {
 	if s.MAC != "" {
 		s.Vendor = oui.Lookup(s.MAC)
@@ -50,7 +39,14 @@ func handleSighting(db *store.Store, w *chWriter, s discovery.Sighting) {
 		}
 		return
 	}
-	metrics.LastDeviceEvent.SetToCurrentTime()
+	// The event's timestamp is the agent's capture time when known, so the
+	// ClickHouse row and the freshness metric reflect when the frame was seen
+	// on the wire, not when it was ingested.
+	evTime := s.CapturedAt
+	if evTime.IsZero() {
+		evTime = w.now()
+	}
+	metrics.LastDeviceEvent.Set(float64(evTime.Unix()))
 
 	d := res.Device
 	if res.Evicted != "" {
@@ -89,11 +85,11 @@ func handleSighting(db *store.Store, w *chWriter, s discovery.Sighting) {
 		} else {
 			slog.Debug("conflict repeated", attrs...)
 		}
-		w.event(c.MAC, c.IP, "", "", c.Source, "conflict")
+		w.event(evTime, c.MAC, c.IP, "", "", c.Source, "conflict")
 	}
-	slog.Debug("sighting applied", "source", s.Source, "mac", d.MAC, "ip", d.IP, "event", event)
+	slog.Debug("sighting applied", "source", s.Source, "mac", d.MAC, "ip", d.IP, "event", event, "interface", s.Interface)
 
-	w.event(d.MAC, d.IP, d.Hostname, d.Vendor, string(s.Source), event)
+	w.event(evTime, d.MAC, d.IP, d.Hostname, d.Vendor, string(s.Source), event)
 	if res.Changed {
 		w.device(d)
 	}
@@ -134,14 +130,14 @@ func (w *chWriter) enqueue(table string, row any) {
 	}
 }
 
-// event queues a device_events row. Timestamps carry milliseconds: the
-// column is DateTime64(3) from migration 023 on.
-func (w *chWriter) event(mac, ip, hostname, vendor, protocol, eventType string) {
+// event queues a device_events row at ts (the capture time). Timestamps
+// carry milliseconds: the column is DateTime64(3) from migration 023 on.
+func (w *chWriter) event(ts time.Time, mac, ip, hostname, vendor, protocol, eventType string) {
 	if w == nil || w.client == nil {
 		return
 	}
 	w.enqueue("device_events", ch.DeviceEvent{
-		Timestamp: w.now().UTC().Format(ch.MillisLayout),
+		Timestamp: ts.UTC().Format(ch.MillisLayout),
 		MAC:       mac,
 		IP:        ip,
 		Hostname:  hostname,

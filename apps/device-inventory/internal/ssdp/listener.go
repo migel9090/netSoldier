@@ -1,77 +1,31 @@
+// Package ssdp parses SSDP NOTIFY announcements into sightings, offering the
+// UPnP product token as a (weak) name for the device holding the source
+// address. netagent captures the frames (ADR-0004); this package opens no
+// socket.
 package ssdp
 
 import (
 	"bufio"
 	"bytes"
-	"context"
-	"errors"
 	"net"
 	"net/url"
 	"strings"
-	"time"
 
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/capture"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/metrics"
 )
-
-var group = net.IPv4(239, 255, 255, 250)
 
 const port = 1900
 
-// Listener passively captures SSDP NOTIFY announcements on one interface and
-// offers the UPnP product token as a (weak) name for the device holding the
-// datagram's source address.
-type Listener struct {
-	iface string
-	ch    chan<- discovery.Sighting
-}
-
-// NewListener returns a listener for iface ("" = default-route interface).
-func NewListener(iface string, ch chan<- discovery.Sighting) *Listener {
-	return &Listener{iface: iface, ch: ch}
-}
-
-// Run reads until ctx is done or the socket fails.
-func (l *Listener) Run(ctx context.Context, up func()) error {
-	ifi, err := capture.ResolveInterface(l.iface)
-	if err != nil {
-		return err
+// ParseFrame unwraps an Ethernet/IPv4/UDP frame carrying SSDP (UDP 1900) and
+// returns the sighting ParseDatagram derives from its payload. The agent
+// captures whole frames; this is where device-inventory strips the link, IP
+// and UDP headers, inside its sandbox and facing attacker-controlled bytes.
+func ParseFrame(frame []byte) (discovery.Sighting, error) {
+	payload, src, ok := discovery.UDPPayload(frame, port)
+	if !ok {
+		return discovery.Sighting{}, discovery.ErrIgnored
 	}
-	conn, err := capture.ListenMulticast(ctx, ifi, group, port)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	up()
-
-	watch := capture.NewInterfaceWatch(ifi, 5*time.Second)
-	buf := make([]byte, 4096)
-	for ctx.Err() == nil {
-		if err := watch.Check(); err != nil {
-			return err
-		}
-		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
-		n, src, err := conn.ReadFromUDP(buf)
-		if err != nil {
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
-				continue
-			}
-			return err
-		}
-		metrics.FramesReceived.WithLabelValues("ssdp").Inc()
-		s, err := ParseDatagram(buf[:n], src.IP)
-		if err != nil {
-			metrics.FramesRejected.WithLabelValues("ssdp", discovery.RejectReason(err)).Inc()
-			continue
-		}
-		select {
-		case l.ch <- s:
-		case <-ctx.Done():
-		}
-	}
-	return nil
+	return ParseDatagram(payload, src)
 }
 
 // ParseDatagram turns an ssdp:alive NOTIFY received from src into a sighting

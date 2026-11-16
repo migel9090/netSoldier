@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/migel9090/netSoldier/apps/device-inventory/internal/agent"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/api"
 	ch "github.com/migel9090/netSoldier/apps/device-inventory/internal/clickhouse"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/discovery"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/metrics"
 	"github.com/migel9090/netSoldier/apps/device-inventory/internal/store"
-	"github.com/migel9090/netSoldier/apps/device-inventory/internal/supervise"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
@@ -37,36 +37,48 @@ func TestConfigFailsClosedWithoutAPIKey(t *testing.T) {
 	if _, err := loadConfig(env("DEVICE_API_ALLOW_UNAUTHENTICATED", "yes")); err == nil {
 		t.Error("a non-boolean opt-out must not count as true")
 	}
-	c, err := loadConfig(env("DEVICE_API_ALLOW_UNAUTHENTICATED", "true"))
+	// NETAGENT_EXPECT_CAPTURE=none isolates the API-key path from the agent
+	// token requirement, which this case is not about.
+	c, err := loadConfig(env("DEVICE_API_ALLOW_UNAUTHENTICATED", "true", "NETAGENT_EXPECT_CAPTURE", "none"))
 	if err != nil || !c.allowUnauth || c.apiKey != "" {
 		t.Errorf("explicit opt-out: %+v %v", c, err)
 	}
-	c, err = loadConfig(env("DEVICE_API_KEY", "k"))
-	if err != nil || strings.Join(c.listeners, ",") != "dhcp,arp,lldp,mdns,ssdp" || c.listenAddr != ":8081" {
+	// The default set of expected captures needs a NETAGENT_TOKEN so the
+	// agent can authenticate; with both, the defaults parse.
+	c, err = loadConfig(env("DEVICE_API_KEY", "k", "NETAGENT_TOKEN", "n"))
+	if err != nil || strings.Join(c.expectCapture, ",") != "dhcp,arp,lldp,mdns,ssdp" || c.listenAddr != ":8081" {
 		t.Errorf("defaults: %+v %v", c, err)
+	}
+	// Expecting captures without a NETAGENT_TOKEN is a start-up error.
+	if _, err := loadConfig(env("DEVICE_API_KEY", "k")); err == nil {
+		t.Error("default captures without NETAGENT_TOKEN should fail closed")
 	}
 }
 
 func TestConfigValidation(t *testing.T) {
-	c, err := loadConfig(env("DEVICE_API_KEY", "k", "DISCOVERY_LISTENERS", "arp, dhcp,arp", "BINDING_TTL", "10m",
-		"DEVICE_MAX_ROWS", "300", "DISCOVERY_INTERFACE", "eth1"))
+	c, err := loadConfig(env("DEVICE_API_KEY", "k", "NETAGENT_TOKEN", "n",
+		"NETAGENT_EXPECT_CAPTURE", "arp, dhcp,arp", "BINDING_TTL", "10m", "DEVICE_MAX_ROWS", "300"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(c.listeners, ",") != "arp,dhcp" || c.store.BindingTTL != 10*time.Minute ||
-		c.store.MaxDevices != 300 || c.iface != "eth1" {
+	if strings.Join(c.expectCapture, ",") != "arp,dhcp" || c.store.BindingTTL != 10*time.Minute ||
+		c.store.MaxDevices != 300 {
 		t.Errorf("parsed %+v", c)
 	}
-	if c, err := loadConfig(env("DEVICE_API_KEY", "k", "DISCOVERY_LISTENERS", "none")); err != nil || len(c.listeners) != 0 {
-		t.Errorf("none: %+v %v", c.listeners, err)
+	// "none" means no agent is required and needs no token (the e2e suite
+	// relies on this); the old DISCOVERY_LISTENERS name still works.
+	if c, err := loadConfig(env("DEVICE_API_KEY", "k", "DISCOVERY_LISTENERS", "none")); err != nil || len(c.expectCapture) != 0 {
+		t.Errorf("none: %+v %v", c.expectCapture, err)
 	}
 	for _, bad := range [][]string{
-		{"DISCOVERY_LISTENERS", "arp,wifi"},
+		{"NETAGENT_EXPECT_CAPTURE", "arp,wifi"},
 		{"BINDING_TTL", "-1s"},
 		{"DEVICE_MAX_ROWS", "lots"},
 		{"ARP_SCAN_INTERVAL", "soon"},
+		{"ARP_SCAN_SUBNET", "10.0.0.0/8"}, // wider than /16
+		{"NETAGENT_HEARTBEAT_TIMEOUT", "nope"},
 	} {
-		if _, err := loadConfig(env("DEVICE_API_KEY", "k", bad[0], bad[1])); err == nil {
+		if _, err := loadConfig(env("DEVICE_API_KEY", "k", "NETAGENT_TOKEN", "n", bad[0], bad[1])); err == nil {
 			t.Errorf("%s=%s accepted", bad[0], bad[1])
 		}
 	}
@@ -81,9 +93,8 @@ func TestAuthMiddlewareProtectsReads(t *testing.T) {
 	mux := http.NewServeMux()
 	api.NewHandler(db, nil).Register(mux)
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	st := supervise.NewStatus()
-	st.Register("arp") // configured, never came up
-	mux.HandleFunc("GET /readyz", readyzHandler(st))
+	hb := agent.NewHeartbeat(15*time.Second, []string{"arp"}) // expected, never heard from
+	mux.HandleFunc("GET /readyz", readyzHandler(hb, true))
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {})
 	srv := httptest.NewServer(authMiddleware("secret", mux))
 	defer srv.Close()
@@ -132,44 +143,38 @@ func TestAuthMiddlewareProtectsReads(t *testing.T) {
 	resp.Body.Close()
 }
 
-// DI-4 (code half) / DI-11: readiness follows the listeners, liveness does not.
-func TestReadyzReflectsListeners(t *testing.T) {
-	st := supervise.NewStatus()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	st.Register("arp")
-	upNow := make(chan struct{})
-	go supervise.Run(ctx, st, "arp", func(ctx context.Context, up func()) error {
-		<-upNow
-		up()
-		<-ctx.Done()
-		return nil
-	})
-
-	get := func() (int, map[string]any) {
+// DI-4 (code half) / contract 8.1: readiness follows the agent's heartbeat,
+// liveness does not. Not ready until a fresh heartbeat shows every expected
+// capture up; ready once one arrives; and with no captures expected
+// (NETAGENT_EXPECT_CAPTURE=none) ready regardless.
+func TestReadyzReflectsHeartbeat(t *testing.T) {
+	hb := agent.NewHeartbeat(15*time.Second, []string{"arp", "dhcp"})
+	get := func(requireAgent bool) (int, map[string]any) {
 		rec := httptest.NewRecorder()
-		readyzHandler(st)(rec, httptest.NewRequest("GET", "/readyz", nil))
+		readyzHandler(hb, requireAgent)(rec, httptest.NewRequest("GET", "/readyz", nil))
 		var body map[string]any
 		_ = json.Unmarshal(rec.Body.Bytes(), &body)
 		return rec.Code, body
 	}
-	if code, body := get(); code != 503 || body["status"] != "not ready" {
-		t.Errorf("before up: %d %v", code, body)
+	if code, body := get(true); code != 503 || body["status"] != "not ready" {
+		t.Errorf("before any heartbeat: %d %v", code, body)
 	}
-	close(upNow)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		code, body := get()
-		if code == 200 {
-			if l := body["listeners"].(map[string]any)["arp"].(map[string]any); l["up"] != true {
-				t.Errorf("body %v", body)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("never ready")
-		}
-		time.Sleep(time.Millisecond)
+	// A heartbeat with only arp up is still not ready.
+	hb.Observe("soc-node-1", "eth0", map[string]bool{"arp": true}, 0)
+	if code, _ := get(true); code != 503 {
+		t.Errorf("partial capture should not be ready: %d", code)
+	}
+	// Both up: ready.
+	hb.Observe("soc-node-1", "eth0", map[string]bool{"arp": true, "dhcp": true}, 0)
+	if code, body := get(true); code != 200 || body["status"] != "ready" {
+		t.Errorf("both captures up should be ready: %d %v", code, body)
+	}
+	// With no agent required, an empty-heartbeat tracker is ready at once.
+	none := agent.NewHeartbeat(15*time.Second, nil)
+	rec := httptest.NewRecorder()
+	readyzHandler(none, false)(rec, httptest.NewRequest("GET", "/readyz", nil))
+	if rec.Code != 200 {
+		t.Errorf("no-agent mode should be ready immediately: %d", rec.Code)
 	}
 }
 
@@ -261,9 +266,10 @@ func TestClickHouseWriteFailureIsCountedNotFatal(t *testing.T) {
 	dropped := testutil.ToFloat64(metrics.EventsDropped)
 	failed := testutil.ToFloat64(metrics.ClickHouseErrors.WithLabelValues("insert", "device_events"))
 	w := newCHWriter(ch.NewClient(srv.URL, "netsoldier", "writer", "pw"), 2)
-	w.event("aa:bb:cc:dd:ee:01", "", "", "", "arp", "seen")
-	w.event("aa:bb:cc:dd:ee:02", "", "", "", "arp", "seen")
-	w.event("aa:bb:cc:dd:ee:03", "", "", "", "arp", "seen") // queue full: dropped and counted
+	ts := time.Now()
+	w.event(ts, "aa:bb:cc:dd:ee:01", "", "", "", "arp", "seen")
+	w.event(ts, "aa:bb:cc:dd:ee:02", "", "", "", "arp", "seen")
+	w.event(ts, "aa:bb:cc:dd:ee:03", "", "", "", "arp", "seen") // queue full: dropped and counted
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	w.Run(ctx) // drains, flushes, logs the failure, returns
@@ -274,6 +280,6 @@ func TestClickHouseWriteFailureIsCountedNotFatal(t *testing.T) {
 		t.Errorf("clickhouse_errors_total{insert,device_events} grew by %v, want 1", f)
 	}
 	var nilWriter *chWriter
-	nilWriter.event("x", "", "", "", "", "")
+	nilWriter.event(time.Now(), "x", "", "", "", "", "")
 	newCHWriter(nil, 1).device(&store.Device{})
 }

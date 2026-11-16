@@ -32,22 +32,32 @@ var (
 		Help: "Stale unlabelled devices removed by retention.",
 	})
 
-	ListenerUp = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: ns, Name: "listener_up",
-		Help: "1 while the listener has its socket open and is reading, else 0.",
-	}, []string{"listener"})
-	ListenerRestarts = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: ns, Name: "listener_restarts_total",
-		Help: "Times a listener stopped (error or panic) and was restarted.",
-	}, []string{"listener"})
+	// CaptureUp and LastHeartbeat are derived from netagent's heartbeat
+	// (contract 8.1): device-inventory no longer runs listeners of its own.
+	CaptureUp = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: ns, Name: "capture_up",
+		Help: "1 while the agent reports this protocol's capture is running, else 0.",
+	}, []string{"proto"})
+	LastHeartbeat = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: ns, Name: "agent_last_heartbeat_timestamp_seconds",
+		Help: "Unix time of the most recent batch the agent posted.",
+	})
+	AgentFramesDropped = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: ns, Name: "agent_frames_dropped",
+		Help: "Frames the agent's bounded queue has dropped since it started (from the heartbeat).",
+	})
+	ProbesScheduled = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: ns, Name: "arp_probes_scheduled_total",
+		Help: "arp_probe commands device-inventory has queued for the agent.",
+	})
 	FramesReceived = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "frames_received_total",
-		Help: "Frames or datagrams a listener read, before parsing.",
-	}, []string{"listener"})
+		Help: "Frames the ingestion endpoint accepted from the agent, before parsing, by protocol.",
+	}, []string{"proto"})
 	FramesRejected = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "frames_rejected_total",
-		Help: "Frames a listener refused, by reason (link_mismatch, malformed, ignored).",
-	}, []string{"listener", "reason"})
+		Help: "Frames the parser refused, by protocol and reason (link_mismatch, malformed, ignored).",
+	}, []string{"proto", "reason"})
 
 	Sightings = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "sightings_total",
