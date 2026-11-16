@@ -85,7 +85,7 @@ const (
 const (
 	MaxIndicatorLen = 255 // a DNS name is at most 253
 	MaxAlertIDLen   = 64
-	MaxAnalystLen   = 64 // actor names are 1-64 printable ASCII (contract §7)
+	MaxAnalystLen   = events.MaxActorLen // actor names are 1-64 printable ASCII (contract §7)
 	MaxReasonLen    = 1024
 )
 
@@ -643,7 +643,9 @@ func verdictOf(r store.FeedbackRow) Verdict {
 const maxFeedbackBody = 64 << 10
 
 // feedbackRequest is what a caller may set. There is deliberately no
-// timestamp: when a verdict was made is this server's business.
+// timestamp — when a verdict was made is this server's business — and no
+// analyst: who made it is X-Netsoldier-Actor's (decodeRequest), and an
+// "analyst" in the body is ignored like any other unknown field.
 type feedbackRequest struct {
 	AlertID     string `json:"alert_id"`
 	MatchedIoC  string `json:"matched_ioc"`
@@ -651,26 +653,30 @@ type feedbackRequest struct {
 	SignalClass string `json:"signal_class"`
 	Verdict     string `json:"verdict"`
 	Reason      string `json:"reason"`
-	Analyst     string `json:"analyst"`
 }
 
-// decodeRequest reads a verdict request, attributing it to the
-// authenticated identity when the request carries one, so "who silenced
-// this detection" (or lifted it) is answerable.
+// decodeRequest reads a verdict or lift request and attributes it to the
+// operator X-Netsoldier-Actor names, so "who silenced this detection" (or
+// lifted it) is answerable. The header is the only channel, under the
+// rules the killswitch applies to it (events.ParseActor): a request without
+// it, with it twice, or with a name the services keep for themselves is
+// refused with 400. The analyst used to fall back to a field of the body,
+// which let any caller holding the API key name anyone.
 func decodeRequest(w http.ResponseWriter, r *http.Request) (Verdict, bool) {
+	analyst, err := events.ParseActor(r.Header.Values(events.ActorHeader))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return Verdict{}, false
+	}
 	var req feedbackRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxFeedbackBody)).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid body")
 		return Verdict{}, false
 	}
-	v := Verdict{
+	return Verdict{
 		AlertID: req.AlertID, MatchedIoC: req.MatchedIoC, ClientIP: req.ClientIP,
-		SignalClass: req.SignalClass, Verdict: req.Verdict, Reason: req.Reason, Analyst: req.Analyst,
-	}
-	if actor := r.Header.Get("X-Netsoldier-Actor"); actor != "" {
-		v.Analyst = actor
-	}
-	return v, true
+		SignalClass: req.SignalClass, Verdict: req.Verdict, Reason: req.Reason, Analyst: analyst,
+	}, true
 }
 
 // HandleFeedback records a verdict posted from the UI.

@@ -28,7 +28,7 @@ const responseWait = 9 * time.Second
 // actorHeader names who is acting. The web UI's proxy sets it from the
 // signed-in session and never forwards a client's value (contract §7);
 // identity fields in request bodies are ignored.
-const actorHeader = "X-Netsoldier-Actor"
+const actorHeader = events.ActorHeader
 
 // List bounds (contract §4).
 const (
@@ -293,25 +293,10 @@ func (s *server) handleGetAction(w http.ResponseWriter, r *http.Request) {
 // present exactly once, printable ASCII of 1–64 characters (what the web
 // UI accepts at sign-in), and not one of the names this service uses for
 // itself — an operator called "ttl" would make a manual revert look like
-// the reaper's.
+// the reaper's. The rules are the contract's (events.ParseActor), shared
+// with the detection-engine's verdicts.
 func actorFrom(r *http.Request) (string, error) {
-	vals := r.Header.Values(actorHeader)
-	if len(vals) != 1 {
-		return "", fmt.Errorf("exactly one %s header naming the operator is required", actorHeader)
-	}
-	a := vals[0]
-	if len(a) < 1 || len(a) > 64 {
-		return "", fmt.Errorf("%s must be 1-64 characters", actorHeader)
-	}
-	for i := 0; i < len(a); i++ {
-		if a[i] < 0x20 || a[i] > 0x7e {
-			return "", fmt.Errorf("%s must be printable ASCII", actorHeader)
-		}
-	}
-	if actions.IsSystemActor(a) {
-		return "", fmt.Errorf("%s %q is reserved for the controller itself", actorHeader, a)
-	}
-	return a, nil
+	return events.ParseActor(r.Header.Values(actorHeader))
 }
 
 // decodeBody decodes an optional JSON body; an empty body is fine.

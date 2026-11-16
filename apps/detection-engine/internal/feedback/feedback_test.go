@@ -355,6 +355,42 @@ func TestHandleFeedbackUsesAuthenticatedActor(t *testing.T) {
 	}
 }
 
+// TestAnalystComesOnlyFromTheActorHeader: without X-Netsoldier-Actor the
+// analyst was taken from the body, so a caller holding the API key could
+// file a verdict, or lift one, under anyone's name. The header is the only
+// channel now, under the rules the killswitch applies to it.
+func TestAnalystComesOnlyFromTheActorHeader(t *testing.T) {
+	s := New(nil)
+	body := `{"matched_ioc":"cdn.example","signal_class":"ioc","verdict":"false_positive","analyst":"alice"}`
+	if rec := post(s, body, ""); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "X-Netsoldier-Actor") {
+		t.Errorf("no header, an analyst in the body: %d %s", rec.Code, rec.Body)
+	}
+	for _, actor := range []string{"ttl", "Auto-Policy", "netagent", "reconcile", "system", strings.Repeat("x", 65), "tab\there"} {
+		if rec := post(s, body, actor); rec.Code != http.StatusBadRequest {
+			t.Errorf("actor %q: %d, want 400", actor, rec.Code)
+		}
+	}
+	twice := httptest.NewRequest(http.MethodPost, "/feedback", strings.NewReader(body))
+	twice.Header.Add("X-Netsoldier-Actor", "alice")
+	twice.Header.Add("X-Netsoldier-Actor", "bob")
+	rec := httptest.NewRecorder()
+	s.HandleFeedback(rec, twice)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("the header twice: %d, want 400", rec.Code)
+	}
+	if len(s.Active()) != 0 {
+		t.Fatalf("a refused verdict was recorded: %+v", s.Active())
+	}
+
+	if rec := post(s, body, "carol"); rec.Code != http.StatusAccepted || s.Active()[0].Analyst != "carol" {
+		t.Fatalf("with the header: %d %+v", rec.Code, s.Active())
+	}
+	lifted := `{"matched_ioc":"cdn.example","signal_class":"ioc","analyst":"alice"}`
+	if rec := lift(s, lifted, ""); rec.Code != http.StatusBadRequest || len(s.Active()) != 1 {
+		t.Errorf("a lift without the header: %d, %d suppressions left", rec.Code, len(s.Active()))
+	}
+}
+
 // TestAlertIDScopesTheVerdict: the web UI posts alert_id, matched_ioc and
 // client_ip. The class comes from the alert the analyst looked at.
 func TestAlertIDScopesTheVerdict(t *testing.T) {

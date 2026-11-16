@@ -23,23 +23,19 @@ import (
 const schemaVersion = 1
 
 // System actors. Every transition names who caused it; operators are named
-// by the X-Netsoldier-Actor header and may not use these names.
+// by the X-Netsoldier-Actor header and may not use these names. They are
+// the contract's (libs/events), where every service that takes the header
+// reserves the same ones.
 const (
-	ActorPolicy    = "auto-policy" // the policy: creations and automatic approvals
-	ActorTTL       = "ttl"         // the reaper: expiries, TTL reverts, retries
-	ActorReconcile = "reconcile"   // reconciliation with what is really in force
-	ActorAgent     = "netagent"    // a result reported by the netagent
-	ActorSystem    = "system"      // capacity eviction
+	ActorPolicy    = events.ActorPolicy    // the policy: creations and automatic approvals
+	ActorTTL       = events.ActorTTL       // the reaper: expiries, TTL reverts, retries
+	ActorReconcile = events.ActorReconcile // reconciliation with what is really in force
+	ActorAgent     = events.ActorAgent     // a result reported by the netagent
+	ActorSystem    = events.ActorSystem    // capacity eviction
 )
 
 // IsSystemActor reports whether name is reserved for the controller itself.
-func IsSystemActor(name string) bool {
-	switch strings.ToLower(name) {
-	case ActorPolicy, ActorTTL, ActorReconcile, ActorAgent, ActorSystem:
-		return true
-	}
-	return false
-}
+func IsSystemActor(name string) bool { return events.IsReservedActor(name) }
 
 // Driver operations an action can have outstanding. They are the wire's
 // in_flight values: Action serves Op as it is.
