@@ -269,6 +269,7 @@ func TestEnforcementSchemaMatchesStruct(t *testing.T) {
 	d.compareEnums(map[string][]string{
 		".action_type": actionTypes,
 		".state":       enforcementStates,
+		".in_flight":   operations,
 	})
 	d.report(t)
 	checkVersionPattern(t, root.Properties["schema_version"].Pattern, EnforcementSchemaVersion)

@@ -74,6 +74,20 @@ func TestEnforcementStateClasses(t *testing.T) {
 	}
 }
 
+// TestInFlightOperations: the outstanding-operation vocabulary is the two
+// driver calls, and it is optional on the wire — a 2.0 action served before
+// it existed must still decode.
+func TestInFlightOperations(t *testing.T) {
+	if len(operations) != 2 || operations[0] != OperationApply || operations[1] != OperationRevert {
+		t.Errorf("operations = %v, want [apply revert]", operations)
+	}
+	var a EnforcementAction
+	if err := json.Unmarshal([]byte(`{"schema_version":"2.0","id":"ACT-1","state":"active"}`), &a); err != nil ||
+		a.InFlight != "" {
+		t.Errorf("an action without in_flight: %+v %v", a, err)
+	}
+}
+
 func TestEnforcementActionTypeConstants(t *testing.T) {
 	seen := make(map[string]bool)
 	for _, at := range actionTypes {
@@ -119,6 +133,7 @@ func TestEnforcementActionJSONRoundtrip(t *testing.T) {
 		RevertedBy:       "ttl",
 		Reason:           "confidence >= 90",
 		FailureReason:    "adguard 502",
+		InFlight:         OperationRevert,
 	}
 
 	data, err := json.Marshal(original)
@@ -135,7 +150,7 @@ func TestEnforcementActionJSONRoundtrip(t *testing.T) {
 
 	var raw map[string]any
 	_ = json.Unmarshal(data, &raw)
-	for _, key := range []string{"detection_summary", "client_name", "activated_at", "reverted_by"} {
+	for _, key := range []string{"detection_summary", "client_name", "activated_at", "reverted_by", "in_flight"} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("v2 key %q missing from the wire", key)
 		}
@@ -158,7 +173,7 @@ func TestEnforcementActionOmitemptyFields(t *testing.T) {
 	omit := []string{
 		"target_ip", "blocked_domain", "ttl_seconds", "expires_at", "reverted_at",
 		"approved_by", "reason", "detection_summary", "client_name", "activated_at",
-		"rejected_by", "reverted_by", "failure_reason",
+		"rejected_by", "reverted_by", "failure_reason", "in_flight",
 	}
 	for _, key := range omit {
 		if _, ok := raw[key]; ok {

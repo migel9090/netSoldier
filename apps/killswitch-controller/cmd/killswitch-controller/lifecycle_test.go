@@ -228,6 +228,73 @@ func TestSlowDriverAnswers202(t *testing.T) {
 	}
 }
 
+// revertScript is a driver whose reverts fail fast, or answer slowly, as the
+// test says.
+type revertScript struct {
+	recordingDriver
+	mu    sync.Mutex
+	fail  bool
+	delay time.Duration
+}
+
+func (d *revertScript) set(fail bool, delay time.Duration) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.fail, d.delay = fail, delay
+}
+
+func (d *revertScript) Revert(ctx context.Context, a *events.EnforcementAction) error {
+	d.mu.Lock()
+	fail, delay := d.fail, d.delay
+	d.mu.Unlock()
+	time.Sleep(delay)
+	if fail {
+		return errors.New("adguard 502")
+	}
+	return d.recordingDriver.Revert(ctx, a)
+}
+
+// TestSlowRetryOfAFailedRevertAnswers202: retrying the revert of a
+// revert_failed action, with a driver slower than the response wait, was
+// answered 502 with the previous attempt's failure, because the answer
+// looked at the state (still revert_failed while the retry runs) before
+// asking whether the retry had finished. Still running is 202.
+func TestSlowRetryOfAFailedRevertAnswers202(t *testing.T) {
+	drv := &revertScript{}
+	h := newHarness(t, harnessOpts{driver: drv, wait: 50 * time.Millisecond})
+	got := h.evaluate(criticalIoCEvent())
+	if got.Action == nil || got.Action.State != events.StateActive {
+		t.Fatalf("setup: %+v", got)
+	}
+	id := got.Action.ID
+
+	drv.set(true, 0)
+	if status, a := h.revert(id, "bob"); status != http.StatusBadGateway || a.State != events.StateRevertFailed {
+		t.Fatalf("setup: a fast failing revert: %d %s", status, a.State)
+	}
+
+	drv.set(false, 400*time.Millisecond)
+	status, a := h.revert(id, "bob")
+	if status != http.StatusAccepted {
+		t.Fatalf("a retry still running after the wait answered %d (%q), want 202", status, a.Error)
+	}
+	if a.State != events.StateRevertFailed || a.Error != "" {
+		t.Errorf("in progress: state %s error %q, want the action as it stands and no error", a.State, a.Error)
+	}
+	h.idle(id)
+	if final := h.action(id); final.State != events.StateReverted || final.RevertedBy != "bob" {
+		t.Fatalf("after the retry: %s by %s", final.State, final.RevertedBy)
+	}
+
+	// A retry that fails within the wait is still a 502.
+	h2 := newHarness(t, harnessOpts{driver: &revertScript{fail: true}, wait: time.Second})
+	id2 := h2.evaluate(criticalIoCEvent()).Action.ID
+	h2.revert(id2, "bob")
+	if status, a := h2.revert(id2, "bob"); status != http.StatusBadGateway || a.State != events.StateRevertFailed {
+		t.Fatalf("a retry that failed in time: %d %s", status, a.State)
+	}
+}
+
 // TestPendingRepeatsFoldAndTheQueueIsCapped is probe C.
 func TestPendingRepeatsFoldAndTheQueueIsCapped(t *testing.T) {
 	h := newHarness(t, harnessOpts{store: actions.Options{MaxPending: 3}})

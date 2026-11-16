@@ -381,7 +381,10 @@ func (s *server) handleReject(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRevert lifts an enforcement and answers with the action: reverted
-// (200), or revert_failed — still enforced — with 502.
+// (200), revert_failed — still enforced — with 502, or, while the revert is
+// still under way (the driver has not answered within responseWait, or the
+// netagent has not confirmed the release yet), the action as it stands with
+// 202.
 func (s *server) handleRevert(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Reason string `json:"reason"`
@@ -402,6 +405,11 @@ func (s *server) handleRevert(w http.ResponseWriter, r *http.Request) {
 }
 
 // answer waits for the action's driver call and writes the action.
+//
+// "Still under way" is decided before the state is read: a retried revert
+// of a revert_failed action stays revert_failed until the retry answers, so
+// reading the state first reported the previous attempt's failure for a
+// retry that had not finished.
 func (s *server) answer(w http.ResponseWriter, r *http.Request, id string, revert bool) {
 	settled := s.engine.Wait(r.Context(), id, s.responseWait)
 	rec, err := s.store.Get(id)
@@ -410,11 +418,11 @@ func (s *server) answer(w http.ResponseWriter, r *http.Request, id string, rever
 		return
 	}
 	switch {
+	case !settled || rec.Op != actions.OpNone:
+		writeJSON(w, http.StatusAccepted, rec.Action())
 	case revert && rec.State == events.StateRevertFailed:
 		writeJSON(w, http.StatusBadGateway, actionResponse{rec.Action(),
 			"revert failed, the enforcement is STILL IN FORCE and is being retried: " + rec.FailureReason})
-	case !settled || rec.Op != actions.OpNone:
-		writeJSON(w, http.StatusAccepted, rec.Action())
 	default:
 		writeJSON(w, http.StatusOK, rec.Action())
 	}
