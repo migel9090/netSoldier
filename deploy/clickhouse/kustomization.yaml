@@ -50,3 +50,5 @@ configMapGenerator:
       - migrations/023_datetime64_timestamps.sql
       - migrations/024_feedback_signal_class.sql
       - migrations/025_zeek_conn_ingested_at.sql
+      - migrations/026_sensor_ingested_at.sql
+      - migrations/027_audit_log_context.sql
