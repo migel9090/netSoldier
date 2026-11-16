@@ -151,7 +151,7 @@ func TestBacklogSurvivesEngineCrashE2E(t *testing.T) {
 	var serving atomic.Bool
 	serving.Store(true)
 	ag := startMockAdGuardWith(t, serving.Load, map[string]any{
-		"question": map[string]string{"host": "evil.example.com", "type": "A"},
+		"question": map[string]string{"name": "evil.example.com", "type": "A"},
 		"client":   "192.168.1.42", "time": time.Now().Add(time.Hour),
 	})
 	rx := startSwitchableReceiver(t)
@@ -257,12 +257,12 @@ func TestFloodDoesNotMaskCriticalDetectionE2E(t *testing.T) {
 	var entries []map[string]any
 	for i := 249; i >= 0; i-- {
 		entries = append(entries, map[string]any{
-			"question": map[string]string{"host": fmt.Sprintf("n%d.old-urlhaus-host.example", i), "type": "A"},
+			"question": map[string]string{"name": fmt.Sprintf("n%d.old-urlhaus-host.example", i), "type": "A"},
 			"client":   "192.168.1.66", "time": base.Add(time.Duration(i+1) * time.Millisecond),
 		})
 	}
 	entries = append(entries, map[string]any{
-		"question": map[string]string{"host": "c2.real-threat.example", "type": "A"},
+		"question": map[string]string{"name": "c2.real-threat.example", "type": "A"},
 		"client":   "192.168.1.66", "time": base,
 	})
 	ag := startMockAdGuardWith(t, ready, entries...)

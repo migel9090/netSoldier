@@ -39,6 +39,38 @@ func TestQueryLogPageParameters(t *testing.T) {
 	}
 }
 
+// TestQueryLogRealAdGuardEntry decodes an entry exactly as AdGuard Home
+// v0.107.55 returns it (captured on the lite lab host). The question is
+// "name", not "host": reading only "host" left every queried name empty and
+// no DNS detection could match.
+func TestQueryLogRealAdGuardEntry(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"answer":[{"type":"A","value":"172.66.147.243","ttl":230},
+			{"type":"A","value":"104.20.23.154","ttl":230}],"answer_dnssec":true,"cached":false,
+			"client":"192.168.77.114","client_info":{"whois":{},"name":"","disallowed_rule":"192.168.77.114",
+			"disallowed":false},"client_proto":"","elapsedMs":"24.480895999999998",
+			"question":{"class":"IN","name":"example.com","type":"A"},"reason":"NotFilteredNotFound",
+			"rules":[],"status":"NOERROR","time":"2026-11-16T15:45:11.366933906Z",
+			"upstream":"https://dns.cloudflare.com:443/dns-query"}],"oldest":"2026-11-16T15:45:11.366933906Z"}`))
+	}))
+	defer srv.Close()
+
+	page, err := NewClient(srv.URL, "u", "p").QueryLog(context.Background(), time.Time{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Entries) != 1 {
+		t.Fatalf("got %d entries", len(page.Entries))
+	}
+	e := page.Entries[0]
+	if e.Question.Host != "example.com" || e.Question.Type != "A" || e.Client != "192.168.77.114" {
+		t.Errorf("question %+v client %q: the queried name was not read", e.Question, e.Client)
+	}
+	if len(e.Answer) != 2 || e.Answer[0].Value != "172.66.147.243" || e.Answer[0].TTL != 230 {
+		t.Errorf("answers %+v", e.Answer)
+	}
+}
+
 func TestQueryLogErrors(t *testing.T) {
 	status := http.StatusUnauthorized
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
