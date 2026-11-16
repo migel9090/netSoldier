@@ -2,7 +2,7 @@
 # its own directory as context — there is no shared module to resolve — so
 # the context is apps/web-ui and .dockerignore's apps/web-ui exclusion (which
 # keeps the frontend out of the GO builds' root context) does not apply here.
-FROM node:22-alpine AS build
+FROM node:22-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a AS build
 
 WORKDIR /app
 
@@ -13,7 +13,7 @@ RUN npm ci --no-audit --no-fund
 COPY . .
 RUN npm run build && npm prune --omit=dev
 
-FROM node:22-alpine
+FROM node:22-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a
 
 WORKDIR /app
 

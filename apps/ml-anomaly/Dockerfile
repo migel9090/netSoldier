@@ -1,7 +1,7 @@
 # ml-anomaly: RITA beacon sync + Isolation Forest flow worker (Python).
 # amd64-only: runs on the proxmox-soc profile alongside RITA/ClickHouse.
 # Build context is this directory (apps/ml-anomaly); see .dockerignore.
-FROM python:3.13-slim AS build
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS build
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -14,7 +14,7 @@ COPY requirements.txt /tmp/requirements.txt
 RUN python -m venv /venv \
     && /venv/bin/pip install --require-hashes --only-binary=:all: -r /tmp/requirements.txt
 
-FROM python:3.13-slim
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
 # Non-root, matches the distroless nonroot uid used across the fleet. The
 # state and model directories exist so a misconfigured pod fails on a clear

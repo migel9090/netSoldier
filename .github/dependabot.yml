@@ -32,8 +32,11 @@ updates:
           - "*"
 
   # ── Python ────────────────────────────────────────────────────
+  # scripts/ci: the hash-pinned tools of the CI gates (requirements.txt).
   - package-ecosystem: pip
-    directory: /apps/ml-anomaly
+    directories:
+      - /apps/ml-anomaly
+      - /scripts/ci
     schedule:
       interval: weekly
     commit-message:
@@ -60,7 +63,9 @@ updates:
   # ── Docker base images ────────────────────────────────────────
   # The golang: tag is one of the places that carry the single project Go
   # version (go.work is the source of truth; every go.mod matches). A PR
-  # bumping it must also bump `go` in go.work and every go.mod.
+  # bumping it must also bump `go` in go.work and every go.mod. Base images
+  # are pinned by digest (tag@sha256); Dependabot moves both. A node:22
+  # bump must also move node-version in the web-ui job of ci.yml.
   - package-ecosystem: docker
     directories:
       - /apps/detection-engine

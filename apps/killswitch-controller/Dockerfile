@@ -3,7 +3,7 @@
 # shared contract module has to be inside the context or `go mod download`
 # cannot resolve the module graph. See /.dockerignore for what the context
 # actually carries, and the `build-killswitch-controller` job in .github/workflows/ci.yml.
-FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -20,7 +20,7 @@ COPY apps/killswitch-controller/ .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /killswitch-controller ./cmd/killswitch-controller
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
 COPY --from=build /killswitch-controller /killswitch-controller
 
