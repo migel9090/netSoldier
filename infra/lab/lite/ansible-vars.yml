@@ -9,6 +9,8 @@ podman_edge_settings:
   LAN_NETWORKS: 192.168.77.0/24
   PROTECTED_MACS: ""
   PROTECTED_IPS: ""
+  # Quoted: a bare off is YAML for false.
+  AUTO_BLOCK: "off"
   BLOCK_TTL: 240
   IMAGE_PREFIX: localhost/netsoldier
   IMAGE_TAG: lab

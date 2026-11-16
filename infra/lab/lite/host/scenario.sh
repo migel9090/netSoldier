@@ -2,9 +2,11 @@
 # The lite smoke scenario, run on the lab host (as root) after
 # `netsoldier-lite install` with netsoldier.lab.conf and lan.sh up.
 #
-#   scenario.sh            steps 1-10 (phase A: shipped policy; phase B:
-#                          auto-block arranged, then the restarts; last, an
-#                          analyst's verdict across a restart)
+#   scenario.sh            steps 1-10 (phase A: shipped policy, automatic
+#                          blocking off, this host and the router protected;
+#                          phase B: AUTO_BLOCK=on arranged, then the
+#                          restarts; last, an analyst's verdict across a
+#                          restart)
 #   KEEP_GOING=1 scenario.sh   do not stop at the first failure
 #
 # Every check prints PASS/FAIL with the evidence it rests on. The profile is
@@ -24,6 +26,8 @@ DE=http://10.231.47.12:8080
 AG=http://10.231.47.10:3000
 UI=http://192.168.77.2:3000
 HOST_IP=192.168.77.2
+# The MAC of LAN_INTERFACE (nslab0, lan.sh): protected with HOST_IP.
+HOST_MAC=02:00:5e:77:00:02
 GW_IP=192.168.77.1
 GW_MAC=02:00:5e:77:00:01
 VICTIM_MAC=02:00:5e:77:00:50
@@ -36,6 +40,8 @@ TTL=240
 D_PENDING=example.com
 D_GW=example.net
 D_AUTO=example.org
+
+AUTO_OFF_REASON="auto-block disabled: POLICY_AUTO_BLOCK=off"
 
 FAILED=0
 RESULTS=()
@@ -111,9 +117,17 @@ action_for() {
   done
   return 1
 }
-alert_for() { # alert_for DOMAIN CLIENT_IP -> sets ALERT (JSON)
+# alert_for DOMAIN CLIENT_IP [SINCE] -> sets ALERT (JSON).
+# SINCE (epoch seconds): only an alert of a lookup made at or after it
+# counts. A step that has just made a lookup must pass it: the history also
+# holds alerts of earlier lookups, and one recorded under a suppression never
+# reaches the killswitch, so waiting for its action would wait for ever.
+alert_for() {
   ALERT=$(curl -sS -m 10 "$DE/alerts?limit=200" |
-    jq -c --arg d "$1" --arg ip "$2" '[.[] | select(.domain == $d and .client_ip == $ip)] | first // empty')
+    jq -c --arg d "$1" --arg ip "$2" --argjson since "${3:-0}" \
+      '[.[] | select(.domain == $d and .client_ip == $ip and .suppressed != true
+                     and ((.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) >= $since))]
+       | first // empty')
   [[ -n $ALERT ]]
 }
 state_of() { ks "$KS/actions/$1" | jq -r .state; }
@@ -136,6 +150,16 @@ suppression() {
 suppressed_total() {
   curl -s "$DE/metrics" | awk '$1 == "detection_engine_alerts_suppressed_total" {print $2 + 0; f = 1} END {if (!f) print 0}'
 }
+withheld_off() { # killswitch_auto_block_withheld_total{reason="auto_block_off"}
+  curl -s "$KS/metrics" | awk '$1 == "killswitch_auto_block_withheld_total{reason=\"auto_block_off\"}" {print $2 + 0; f = 1} END {if (!f) print "absent"}'
+}
+policy() { ks "$KS/policy" | jq -c '{auto_block, auto_block_allowed, auto_block_disabled_reason, allowlist_entries, auto_min_confidence, auto_min_severity}'; }
+# netagent's container health (its unit's HealthCmd, `/netagent health`).
+netagent_health() { podman inspect --format '{{.State.Health.Status}}' netsoldier-netagent 2>/dev/null || true; }
+netagent_health_output() {
+  { podman inspect --format '{{range .State.Health.Log}}{{.Output}}{{end}}' netsoldier-netagent 2>/dev/null || true; } |
+    sed '/^$/d' | tail -n1
+}
 rule_present() { ag_rules | grep -qxF "||$1^"; }
 rule_absent() { ! rule_present "$1"; }
 sinkholed() { [[ $(lookup victim "$1") == "NOERROR 0.0.0.0" ]]; }
@@ -148,8 +172,7 @@ all_healthy() {
   [[ $(curl -s -o /dev/null -m 3 -w '%{http_code}' "$AG/") =~ ^(200|302)$ ]] || return 1
   # From the LAN (the router's namespace: it has an address from the start).
   ip netns exec nslab-gw curl -s -o /dev/null -m 3 -w '%{http_code}' "$UI/healthz" | grep -qx 200 || return 1
-  [[ -s /run/netsoldier/netagent/health.json ]] &&
-    (($(date +%s) - $(stat -c %Y /run/netsoldier/netagent/health.json) < 15))
+  [[ $(netagent_health) == healthy ]]
 }
 
 # ── 1. Installed on a clean host ───────────────────────────────────────────
@@ -160,9 +183,20 @@ step1() {
     [[ $(systemctl is-active "netsoldier-$u.service") == active ]] || { bad=1; say "  netsoldier-$u not active"; }
   done
   if ((bad == 0)) && wait_for 120 all_healthy; then
-    pass "1 install: 7 units active, every /healthz (device-inventory /readyz) 200, netagent heartbeat fresh"
+    pass "1 install: 7 units active, every /healthz (device-inventory /readyz) 200, netagent container healthy"
   else
     fail "1 install: not every service is healthy"
+  fi
+  # netagent's health is its container's health check now; nothing of it
+  # is on the host any more.
+  local hc mounts
+  hc=$(podman inspect --format '{{json .Config.Healthcheck.Test}} interval={{.Config.Healthcheck.Interval}} retries={{.Config.Healthcheck.Retries}} on-failure={{.Config.HealthcheckOnFailureAction}}' netsoldier-netagent 2>&1 || true)
+  mounts=$(podman inspect --format '{{range .Mounts}}{{.Type}}:{{.Destination}} {{end}}' netsoldier-netagent || true)
+  say "  netagent health check: $hc; status $(netagent_health): $(netagent_health_output); mounts: ${mounts:-none}; tmpfs: $(podman inspect --format '{{json .HostConfig.Tmpfs}}' netsoldier-netagent)"
+  if [[ $(netagent_health) == healthy && $hc == '["CMD","/netagent","health"]'* && ! -e /run/netsoldier/netagent && $mounts != *bind* ]]; then
+    pass "1 netagent: healthy by its own health check ($(netagent_health_output)); no host mount, no /run/netsoldier/netagent"
+  else
+    fail "1 netagent health: status=$(netagent_health) check=$hc mounts=${mounts:-none} host dir: $(ls -d /run/netsoldier/netagent 2>/dev/null || echo none)"
   fi
   say "  container       networks                          user        caps(eff)          ro    ports                        mem limit"
   local n
@@ -184,7 +218,7 @@ step1() {
   real_ip=$(ip -4 -o addr show dev eth0 | awk '{split($4, a, "/"); print a[1]; exit}')
   say "  host listeners: $(ss -H -lntu | awk '{print $1 "/" $5}' | sort -u | tr '\n' ' ')"
   local reach=""
-  for port in 3000 8080 8081 8083 8084 53; do
+  for port in 3000 8080 8081 8083 8084 9464 53; do
     curl -s -o /dev/null -m 2 "http://$real_ip:$port/" && reach+=" $port"
   done
   ip netns exec nslab-gw ip route add 10.231.47.0/24 via "$HOST_IP"
@@ -192,7 +226,7 @@ step1() {
   lan_reach=$(ip netns exec nslab-gw curl -s -o /dev/null -m 3 -w '%{http_code}' "$DI/healthz" || true)
   ip netns exec nslab-gw ip route del 10.231.47.0/24 via "$HOST_IP"
   if [[ -z $reach && $lan_reach == 000 ]]; then
-    pass "1 exposure: nothing answers on eth0 ($real_ip: 53/3000/808x refused); the router routing 10.231.47.0/24 via $HOST_IP cannot reach device-inventory (curl code $lan_reach)"
+    pass "1 exposure: nothing answers on eth0 ($real_ip: 53/3000/808x/9464 refused); the router routing 10.231.47.0/24 via $HOST_IP cannot reach device-inventory (curl code $lan_reach)"
   else
     fail "1 exposure: eth0 answers on:$reach; LAN reach to the internal network: $lan_reach"
   fi
@@ -238,10 +272,11 @@ step2() {
 # ── 3. Known-bad lookup -> alert with MAC -> pending action ────────────────
 step3() {
   say "=== 3. victim resolves $D_PENDING (listed in $IOC)"
-  local r
+  local r since
+  since=$(($(date +%s) - 1))
   r=$(lookup victim "$D_PENDING")
   say "  victim: dig $D_PENDING @$HOST_IP -> $r"
-  if wait_for 60 alert_for "$D_PENDING" "$VICTIM_IP"; then
+  if wait_for 60 alert_for "$D_PENDING" "$VICTIM_IP" "$since"; then
     local mac
     mac=$(jq -r .client_mac <<<"$ALERT")
     [[ $mac == "$VICTIM_MAC" ]] && pass "3 alert after ${WAITED}s: $(jq -c '{id, domain, client_ip, client_mac, client_name, severity, confidence, source}' <<<"$ALERT")" ||
@@ -260,10 +295,38 @@ step3() {
   else
     fail "3 no killswitch action for $DET_ID within 60s"
   fi
-  local pol
-  pol=$(ks "$KS/policy" | jq -c '{auto_block_allowed, auto_block_disabled_reason, allowlist_entries, auto_min_confidence, auto_min_severity}')
-  [[ $(jq -r .auto_block_allowed <<<"$pol") == false ]] &&
-    pass "3 empty protected set = no auto-block: $pol" || fail "3 auto-block is on with an empty protected set: $pol"
+  # As shipped: the host and the router are protected (so the allowlist is
+  # not empty) and AUTO_BLOCK=off; automation is off for that reason alone.
+  local pol allow
+  pol=$(policy)
+  allow=$(ks "$KS/allowlist" | jq -c .)
+  if [[ $(jq -r .auto_block <<<"$pol") == off && $(jq -r .auto_block_allowed <<<"$pol") == false &&
+    $(jq -r .auto_block_disabled_reason <<<"$pol") == "$AUTO_OFF_REASON" &&
+    $(jq -r --arg ip "$HOST_IP" '.ips | index($ip) != null' <<<"$allow") == true &&
+    $(jq -r --arg m "$HOST_MAC" '.macs | index($m) != null' <<<"$allow") == true ]]; then
+    pass "3 as shipped: $pol; allowlist (this host): $allow"
+  else
+    fail "3 automation not off as shipped, or the host not protected: $pol; allowlist: $allow"
+  fi
+  # The local list's 80/high is below the default auto thresholds, so the
+  # lookup above stays pending either way. A detection that clears every
+  # other auto-block condition (attested, 99, critical, the victim) shows
+  # that the switch is what holds it back.
+  local w0 w1 resp id
+  w0=$(withheld_off)
+  resp=$(evaluate "$(event "DET-lab-$(date +%s)0" "$VICTIM_IP" "$VICTIM_MAC" domain auto-off.example)")
+  w1=$(withheld_off)
+  id=$(jq -r '.action.id // empty' <<<"$resp")
+  say "  signed detection for the victim (attested, 99, critical): $(jq -c '{action: .decision.Action, withheld: .decision.Withheld, reason: .decision.Reason, state: .action.state}' <<<"$resp")"
+  if [[ $(jq -r .decision.Action <<<"$resp") == pending && $(jq -r .action.state <<<"$resp") == pending &&
+    $(jq -r .decision.Reason <<<"$resp") == *"$AUTO_OFF_REASON; every other auto-block condition held"* &&
+    $w0 != absent && $w1 != absent ]] && ((w1 > w0)); then
+    pass "3 an otherwise auto-blockable detection is queued for a human, withheld as auto_block_off ($w0 -> $w1)"
+  else
+    fail "3 auto-blockable detection with AUTO_BLOCK=off: $resp; withheld $w0 -> $w1"
+  fi
+  [[ -z $id ]] || say "  $id rejected -> $(ks -X POST -H "X-Netsoldier-Actor: $ACTOR" -H 'Content-Type: application/json' \
+    -d '{"reason":"lab scenario: automation-off check"}' "$KS/actions/$id/reject" | jq -c '{state, rejected_by}')"
 }
 
 # ── 4. Operator approves -> rule in AdGuard -> sinkholed ────────────────────
@@ -321,11 +384,12 @@ step6() {
 # ── 7. The gateway is never enforced ────────────────────────────────────────
 step7() {
   say "=== 7. detections that name the gateway"
-  local r s0
+  local r s0 since
   s0=$(deliveries)
+  since=$(($(date +%s) - 1))
   r=$(lookup gw "$D_GW")
   say "  router: dig $D_GW @$HOST_IP -> $r"
-  if wait_for 60 alert_for "$D_GW" "$GW_IP"; then
+  if wait_for 60 alert_for "$D_GW" "$GW_IP" "$since"; then
     local det
     det=$(jq -r .id <<<"$ALERT")
     say "  alert: $(jq -c '{id, domain, client_ip, client_mac}' <<<"$ALERT")"
@@ -371,6 +435,23 @@ step7() {
   else
     pass "7d target = gateway address: no action created"
   fi
+  # This host is protected by the installer whatever PROTECTED_* says: by
+  # its LAN address, and by the MAC of LAN_INTERFACE behind another address.
+  host_ignored 7e "$HOST_IP" ""
+  host_ignored 7f 192.168.77.124 "$HOST_MAC"
+}
+
+# host_ignored LABEL CLIENT_IP CLIENT_MAC: a signed critical/99 detection
+# naming this host is ignored as a protected device, with no action.
+host_ignored() {
+  local resp
+  resp=$(evaluate "$(event "DET-lab-$(date +%s%N | cut -c1-16)" "$2" "$3" domain "$D_GW")")
+  if [[ $(jq -r '.decision.Action' <<<"$resp") == ignore && $(jq -r .action <<<"$resp") == null &&
+    $(jq -r '.decision.Reason' <<<"$resp") == "allowlisted device "* ]]; then
+    pass "$1 this host (${2}${3:+ / $3}), critical/99, AUTO_BLOCK=$(ks "$KS/policy" | jq -r .auto_block): $(jq -c '{action: .decision.Action, reason: .decision.Reason}' <<<"$resp")"
+  else
+    fail "$1 a detection naming this host (${2}${3:+ / $3}): $resp"
+  fi
 }
 
 # ── 8. Web UI ───────────────────────────────────────────────────────────────
@@ -398,6 +479,19 @@ step8() {
   else
     fail "8 sign-in -> $code, cookies: $cookies"
   fi
+  # The counters are not on the UI port (404 there, from the LAN as from
+  # anywhere), and in this profile the metrics listener is not started
+  # (METRICS_ADDR=off): 9464 answers neither on HOST_IP nor on the internal
+  # network.
+  local m_ui m_lan m_int
+  m_ui=$("${in[@]}" curl -sS -m 5 -o /dev/null -w '%{http_code}' "$UI/metrics" || true)
+  m_lan=$("${in[@]}" curl -s -m 3 -o /dev/null -w '%{http_code}' "http://$HOST_IP:9464/metrics" || true)
+  m_int=$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://10.231.47.15:9464/metrics || true)
+  if [[ $m_ui == 404 && $m_lan == 000 && $m_int == 000 ]]; then
+    pass "8 victim: GET $UI/metrics -> $m_ui; :9464 on $HOST_IP -> $m_lan, on the internal 10.231.47.15 -> $m_int (000 = no answer)"
+  else
+    fail "8 metrics exposure: $UI/metrics -> $m_ui, $HOST_IP:9464 -> $m_lan, 10.231.47.15:9464 -> $m_int"
+  fi
   local p
   for p in killswitch/history devices alerts; do
     code=$("${in[@]}" curl -sS -m 10 -b "$jar" -o /run/nslab/ui.json -w '%{http_code}' "$UI/api/$p")
@@ -408,16 +502,31 @@ step8() {
 
 # ── Phase B: automatic block, then restarts (9) ────────────────────────────
 phase_b() {
-  say "=== auto-block arranged: PROTECTED_IPS=192.168.77.10 (allowlist no longer empty), auto thresholds = local list's 80/high"
-  sed -e 's/^PROTECTED_IPS=.*/PROTECTED_IPS=192.168.77.10/' "$LAB_CONF" >"$CONF"
+  say "=== auto-block arranged: AUTO_BLOCK=on, no PROTECTED_* (only this host and the router protected), auto thresholds = local list's 80/high"
+  sed -e 's/^AUTO_BLOCK=.*/AUTO_BLOCK=on/' "$LAB_CONF" >"$CONF"
   printf 'POLICY_AUTO_CONFIDENCE=80\nPOLICY_AUTO_SEVERITY=high\n' >>"$CONF"
-  $NL install | sed 's/^/  /'
+  local out
+  out=$($NL install 2>&1) || fail "B re-install failed: $(tail -n3 <<<"$out")"
+  sed 's/^/  /' <<<"$out"
+  # The installer says plainly what AUTO_BLOCK=on without PROTECTED_* means.
+  if grep -q "AUTO_BLOCK=on with no PROTECTED_MACS/PROTECTED_IPS: only this host ($HOST_IP, $HOST_MAC) and the router ($GW_IP, $GW_MAC) are protected" <<<"$out"; then
+    pass "B installer: $(grep -o 'AUTO_BLOCK=on with no.*' <<<"$out" | cut -c1-160)"
+  else
+    fail "B the installer did not say that only this host and the router are protected"
+  fi
   wait_for 120 all_healthy || fail "B: not healthy after re-install"
-  say "  policy: $(ks "$KS/policy" | jq -c '{auto_block_allowed, allowlist_entries, auto_min_confidence, auto_min_severity, default_ttl}')"
-  local r
+  local pol
+  pol=$(policy)
+  if [[ $(jq -r .auto_block <<<"$pol") == on && $(jq -r .auto_block_allowed <<<"$pol") == true ]]; then
+    pass "B policy: $pol"
+  else
+    fail "B AUTO_BLOCK=on did not switch automation on: $pol"
+  fi
+  local r since
+  since=$(($(date +%s) - 1))
   r=$(lookup victim "$D_AUTO")
   say "  victim: dig $D_AUTO -> $r"
-  if wait_for 60 alert_for "$D_AUTO" "$VICTIM_IP"; then
+  if wait_for 60 alert_for "$D_AUTO" "$VICTIM_IP" "$since"; then
     # shellcheck disable=SC2034 # read by the eval'd condition below
     DET_B=$(jq -r .id <<<"$ALERT")
   else
@@ -431,6 +540,9 @@ phase_b() {
   rule_present "$D_AUTO" && wait_for 15 sinkholed "$D_AUTO" &&
     pass "B AdGuard rule ||$D_AUTO^ present, victim lookup -> $(lookup victim "$D_AUTO")" ||
     fail "B rule/sinkhole missing for $D_AUTO"
+  # With automation on and nothing in PROTECTED_*, this host is still never
+  # acted against.
+  host_ignored "B host" "$HOST_IP" ""
 }
 
 still_blocked() {
@@ -523,18 +635,22 @@ step10() {
   else
     fail "10 suppression gone after the restart: $(curl -sS -m 10 "$DE/feedback")"
   fi
-  # A suppressed detection is still written to the alert history; what the
-  # verdict stops is the response. So the evidence is: the counter (0 in the
-  # new process) moved, the lookup's alert exists, and the killswitch never
-  # heard of it.
+  # A suppressed detection is still written to the alert history, marked
+  # "suppressed": true; what the verdict stops is the response. So the
+  # evidence is: the counter (0 in the new process) moved, the lookup's
+  # alert exists and says so, and the killswitch never heard of it.
   lookup victim "$D_PENDING" >/dev/null
   if wait_for 90 eval '(($(suppressed_total) >= 1))'; then
-    newest=$(curl -sS -m 10 "$DE/alerts?limit=200" | jq -r --arg d "$D_PENDING" --arg ip "$VICTIM_IP" \
-      '[.[] | select(.domain == $d and .client_ip == $ip)] | sort_by(.timestamp) | last | .id')
+    local alert
+    alert=$(curl -sS -m 10 "$DE/alerts?limit=200" | jq -c --arg d "$D_PENDING" --arg ip "$VICTIM_IP" \
+      '[.[] | select(.domain == $d and .client_ip == $ip)] | sort_by(.timestamp) | last')
+    newest=$(jq -r .id <<<"$alert")
     if r=$(action_for "$newest"); then
       fail "10 lookup of $D_PENDING counted as suppressed, yet $newest reached the killswitch as $r"
+    elif [[ $(jq -r .suppressed <<<"$alert") != true ]]; then
+      fail "10 the suppressed lookup's alert does not say so: $(jq -c '{id, timestamp, suppressed}' <<<"$alert")"
     else
-      pass "10 the victim's next lookup of $D_PENDING was suppressed after ${WAITED}s: in the history as $newest, no action for it, deliveries since the restart: $(deliveries)"
+      pass "10 the victim's next lookup of $D_PENDING was suppressed after ${WAITED}s: in the history as $(jq -c '{id, suppressed}' <<<"$alert"), no action for it, deliveries since the restart: $(deliveries)"
     fi
   else
     fail "10 lookup of $D_PENDING not suppressed: suppressed_total=$(suppressed_total)"
@@ -554,9 +670,28 @@ restore() {
   say "=== restore the shipped lab configuration (automatic blocking off)"
   cp "$LAB_CONF" "$CONF"
   $NL install | sed 's/^/  /'
+  local pol
+  pol=$(policy)
+  if [[ $(jq -r .auto_block <<<"$pol") == off && $(jq -r .auto_block_disabled_reason <<<"$pol") == "$AUTO_OFF_REASON" ]]; then
+    pass "restore: shipped configuration back, $pol"
+  else
+    fail "restore: automation not off after restoring netsoldier.lab.conf: $pol"
+  fi
 }
 
 say "lite scenario on $(hostname), $(cat /opt/netsoldier/src/.lab-revision 2>/dev/null)"
+# The whole scenario is written for a fresh installation: detection-engine
+# folds a repeated detection into the one it delivered in the last ten
+# minutes, so on a used installation step 3 would wait for an action that is
+# never created. Say so instead of failing there (lite.sh e2e reinstalls).
+if ((!$#)) && [[ ${ALLOW_USED:-0} != 1 ]]; then
+  seen=$(curl -sS -m 10 "$DE/alerts?limit=200" |
+    jq --arg a "$D_PENDING" --arg b "$D_GW" --arg c "$D_AUTO" '[.[] | select(.domain == $a or .domain == $b or .domain == $c)] | length')
+  if ((seen > 0)); then
+    say "this installation already holds $seen alerts for the scenario's names: run the scenario on a fresh installation (lite.sh e2e), or single steps (scenario.sh stepN), or set ALLOW_USED=1"
+    exit 2
+  fi
+fi
 if (($#)); then # scenario.sh step1 step2 ...: only those, in that order
   for s in "$@"; do "$s"; done
   finish
