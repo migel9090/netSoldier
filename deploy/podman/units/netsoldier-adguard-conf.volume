@@ -1,0 +1,11 @@
+# netSoldier lite: AdGuard Home's configuration (AdGuardHome.yaml, including
+# the sinkhole rules the killswitch adds). Seeded by netsoldier-lite on the
+# first install. Owned by the unprivileged user the container runs as.
+[Unit]
+Description=netSoldier lite: volume adguard-conf
+
+[Volume]
+VolumeName=netsoldier-adguard-conf
+User=65532
+Group=65532
+Label=app=netsoldier

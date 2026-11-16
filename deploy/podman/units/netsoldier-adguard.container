@@ -1,0 +1,46 @@
+# netSoldier lite: AdGuard Home, the LAN's DNS resolver.
+#
+# DNS is published on the host's LAN address only (HOST_IP:53, written by
+# netsoldier-lite into netsoldier-adguard.container.d/50-site.conf). The admin
+# API (3000) stays on the internal network for detection-engine and the
+# killswitch; it is not published. The configuration, with its one user
+# rendered from the generated secret, lives in the adguard-conf volume.
+[Unit]
+Description=netSoldier lite: AdGuard Home (DNS)
+PartOf=netsoldier.target
+
+[Container]
+ContainerName=netsoldier-adguard
+# Upstream AdGuard Home with its file capability removed (adguard/Containerfile),
+# built locally by netsoldier-lite.
+Image=localhost/netsoldier/adguardhome:v0.107.55
+Pull=never
+# Edge first: it carries the default route (upstream DNS) and the published port.
+Network=netsoldier-edge.network
+Network=netsoldier-internal.network:ip=10.231.47.10
+User=65532:65532
+ReadOnly=true
+DropCapability=ALL
+NoNewPrivileges=true
+# Bind 53 without NET_BIND_SERVICE: this sysctl is per network namespace, so
+# it only affects the container's own namespace.
+Sysctl=net.ipv4.ip_unprivileged_port_start=53
+Volume=netsoldier-adguard-conf.volume:/opt/adguardhome/conf
+Volume=netsoldier-adguard-work.volume:/opt/adguardhome/work
+PidsLimit=256
+PodmanArgs=--memory=160m --memory-swap=160m
+StopTimeout=20
+Label=app=netsoldier
+
+[Service]
+# Unprivileged LXC containers make Podman keep network namespaces under the
+# runtime directory, which logind mounts over and removes at each root
+# login and logout; give it one of its own (created by netsoldier-lite's
+# tmpfiles.d entry).
+Environment=XDG_RUNTIME_DIR=/run/netsoldier/podman
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=netsoldier.target
