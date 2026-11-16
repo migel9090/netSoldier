@@ -16,6 +16,7 @@ spec:
             app.kubernetes.io/component: clickhouse-backup
         spec:
           serviceAccountName: backup
+          automountServiceAccountToken: false
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
@@ -24,7 +25,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: backup
-              image: clickhouse/clickhouse-client:24.3-alpine
+              image: clickhouse/clickhouse-server:24.3-alpine@sha256:c3f166f4a80098480463d897a63f6867d24e3a7661fc1fe72e889788115a25f1
               command: ["/bin/sh", "/scripts/backup-clickhouse.sh"]
               securityContext:
                 readOnlyRootFilesystem: true
