@@ -38,6 +38,7 @@ spec:
         app.kubernetes.io/component: migrate
     spec:
       serviceAccountName: clickhouse
+      automountServiceAccountToken: false
       restartPolicy: Never
       securityContext:
         runAsNonRoot: true
@@ -49,7 +50,7 @@ spec:
         - name: migrate
           # The server image, for its clickhouse-client: no extra image to
           # pin, and client and server versions always match.
-          image: clickhouse/clickhouse-server:24.3-alpine
+          image: clickhouse/clickhouse-server:24.3-alpine@sha256:c3f166f4a80098480463d897a63f6867d24e3a7661fc1fe72e889788115a25f1
           command: ["/bin/sh", "/opt/migrate/migrate.sh", "apply"]
           # clickhouse-client creates scratch directories (user_defined/)
           # in its working directory when it parses data client-side; the

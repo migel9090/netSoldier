@@ -13,6 +13,7 @@ spec:
         app.kubernetes.io/name: ml-anomaly
     spec:
       serviceAccountName: ml-anomaly
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -25,6 +26,19 @@ spec:
           # step 112: RITA beacon consumer. The FastAPI scoring server
           # (step 115) will be a second container/command on this image.
           command: ["python", "-m", "ml_anomaly.sync"]
+          # The worker's metrics listener (METRICS_PORT default): up once the
+          # worker has started, gone when it dies.
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9101
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9101
+            periodSeconds: 10
           env:
             - name: CLICKHOUSE_URL
               value: "http://clickhouse.netsoldier.svc:8123"
@@ -64,6 +78,19 @@ spec:
           # step 113: Isolation Forest over connection windows; writes
           # ml_anomalies, tailed by detection-engine (step 116).
           command: ["python", "-m", "ml_anomaly.flowsync"]
+          # The worker's metrics listener (METRICS_PORT default): up once the
+          # worker has started, gone when it dies.
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9102
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9102
+            periodSeconds: 10
           env:
             - name: CLICKHOUSE_URL
               value: "http://clickhouse.netsoldier.svc:8123"

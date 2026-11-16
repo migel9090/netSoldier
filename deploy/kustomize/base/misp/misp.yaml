@@ -14,6 +14,7 @@ spec:
         app.kubernetes.io/component: core
     spec:
       serviceAccountName: misp
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 33
@@ -22,7 +23,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: misp
-          image: ghcr.io/misp/misp-docker/misp-core:v2.4.190
+          image: ghcr.io/misp/misp-docker/misp-core:v2.4.190@sha256:ade6a74aca4f35351b79453039f5f2338987bc02a20171a084c69d57da359b01
           ports:
             - name: http
               containerPort: 8080
