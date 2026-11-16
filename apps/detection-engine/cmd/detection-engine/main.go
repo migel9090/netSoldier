@@ -105,7 +105,7 @@ func run(ctx context.Context, getenv func(string) string, onListen func(addr str
 	var ch *clickhouse.Client
 	if cfg, ok := clickhouse.ConfigFromEnv(getenv); ok {
 		if ch, err = clickhouse.New(cfg); err != nil {
-			slog.Error("ClickHouse disabled: sensor ingest and feedback persistence are off", "error", err)
+			slog.Error("ClickHouse disabled: sensor ingest and the feedback history copy are off", "error", err)
 		} else {
 			if !ch.Authenticated() {
 				slog.Warn("CLICKHOUSE_USER is not set: ClickHouse will treat this service as its " +
@@ -181,25 +181,44 @@ func run(ctx context.Context, getenv func(string) string, onListen func(addr str
 	slog.Info("client identity from device-inventory", "url", devURL, "authenticated", devKey != "")
 
 	// False-positive feedback loop (step 118): suppressions gate what
-	// reaches the killswitch.
-	var feedbackSink feedback.Sink
+	// reaches the killswitch. The verdicts are kept in the local store; with
+	// ClickHouse, a copy of each goes there too.
+	journal := st.Feedback()
+	var forwarder *feedback.Forwarder
 	if ch != nil {
-		feedbackSink = feedback.NewCHSink(ch)
+		forwarder = feedback.NewForwarder(journal, feedback.NewCHSink(ch))
 	}
-	feedbackStore := feedback.NewWithOptions(feedbackSink, feedback.Options{
+	fbOpts := feedback.Options{
 		TTL:         parseDuration(env("FEEDBACK_SUPPRESSION_TTL", "720h"), feedback.DefaultSuppressionTTL),
 		AlertLookup: alerts.ByID,
-	})
-	if ch != nil {
+		Forwarding:  forwarder != nil,
+	}
+	if forwarder != nil {
+		fbOpts.Notify = forwarder.Notify
+	}
+	feedbackStore := feedback.NewWithOptions(journal, fbOpts)
+	{
 		// Before any producer starts, so the first detections after a
 		// restart are already judged against the analysts' verdicts.
-		lctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		if n, err := feedback.LoadInto(lctx, ch, feedbackStore); err != nil {
-			slog.Warn("feedback load failed: suppressions start empty", "error", err)
-		} else {
-			slog.Info("feedback suppressions loaded", "verdicts", n, "active", len(feedbackStore.Active()))
+		var history feedback.Querier
+		if ch != nil {
+			history = ch
 		}
+		lctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		res, err := feedbackStore.Restore(lctx, history)
 		cancel()
+		if err != nil {
+			slog.Warn("feedback restore failed: suppressions start from what could be read", "error", err)
+		}
+		slog.Info("feedback suppressions restored", "replayed", res.Replayed,
+			"imported_from_clickhouse", res.Imported, "active", len(feedbackStore.Active()),
+			"durable", journal.Durable())
+	}
+	forwarderDone := make(chan struct{})
+	if forwarder != nil {
+		go func() { defer close(forwarderDone); forwarder.Run(ctx) }()
+	} else {
+		close(forwarderDone)
 	}
 
 	// Delivery to the killswitch (or any receiver of the shared contract)
@@ -280,18 +299,19 @@ func run(ctx context.Context, getenv func(string) string, onListen func(addr str
 	}
 
 	maintained := make(chan struct{})
-	go func() { defer close(maintained); maintain(ctx, alerts, outbox, records) }()
+	go func() { defer close(maintained); maintain(ctx, alerts, outbox, records, feedbackStore) }()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.HandleFunc("GET /alerts", alerts.HandleList)
 	mux.HandleFunc("POST /feedback", feedbackStore.HandleFeedback)
+	mux.HandleFunc("POST /feedback/lift", feedbackStore.HandleLift)
 	mux.HandleFunc("GET /feedback", feedbackStore.HandleList)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
 	apiKey := getenv("DETECTION_API_KEY")
 	if apiKey == "" {
-		slog.Error("no DETECTION_API_KEY set — POST /feedback is UNAUTHENTICATED. " +
+		slog.Error("no DETECTION_API_KEY set — POST /feedback and /feedback/lift are UNAUTHENTICATED. " +
 			"A false-positive verdict suppresses detections before they reach the " +
 			"killswitch, so an unauthenticated caller can disable enforcement for " +
 			"any indicator.")
@@ -341,6 +361,9 @@ func run(ctx context.Context, getenv func(string) string, onListen func(addr str
 			"waited", producerStop)
 	}
 	<-maintained
+	// The forwarder stops on ctx; what it has not copied stays in the
+	// journal for the next start.
+	<-forwarderDone
 
 	// 3. Deliver what can be delivered quickly; the rest stays on disk.
 	<-dispatcherDone
@@ -377,16 +400,17 @@ func openStore(getenv func(string) string) (*store.Store, error) {
 		slog.Info("local store opened", "path", defaultDBPath)
 		return st, nil
 	}
-	slog.Error("no writable data directory: alerts and undelivered detections are kept in memory "+
+	slog.Error("no writable data directory: alerts, undelivered detections and analyst verdicts are kept in memory "+
 		"and LOST on restart; mount a volume at the default path's directory or set DB_PATH",
 		"path", defaultDBPath, "error", err)
 	return store.OpenMemory()
 }
 
-// maintain applies retention to the alert history, forgets delivered events
-// once they can no longer absorb repeats, and handled records once they can
-// no longer be read again.
-func maintain(ctx context.Context, alerts *store.Alerts, outbox *store.Outbox, records *store.Records) {
+// maintain applies retention to the alert history and the analysts'
+// verdicts, forgets delivered events once they can no longer absorb
+// repeats, and handled records once they can no longer be read again.
+func maintain(ctx context.Context, alerts *store.Alerts, outbox *store.Outbox, records *store.Records,
+	verdicts *feedback.Store) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
 	for {
@@ -405,6 +429,7 @@ func maintain(ctx context.Context, alerts *store.Alerts, outbox *store.Outbox, r
 			if _, err := records.Prune(); err != nil {
 				slog.Warn("handled-record retention failed", "error", err)
 			}
+			verdicts.Maintain()
 		}
 	}
 }
