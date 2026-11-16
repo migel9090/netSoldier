@@ -128,3 +128,26 @@ func TestSubcommand(t *testing.T) {
 		}
 	}
 }
+
+// TestHealthCheckRejectsAFutureStamp: a file stamped ahead of the clock
+// passed as "fresh" (a negative age) for as long as it stayed ahead — after
+// the clock stepped back, a stopped agent's last file kept the probe green.
+// Within the limit it is still healthy: the next heartbeat corrects it.
+func TestHealthCheckRejectsAFutureStamp(t *testing.T) {
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	for stamp, want := range map[string]int{
+		"2026-11-16T12:00:05Z": 0, // within three heartbeats (10 s floor)
+		"2026-11-16T12:01:00Z": 1,
+		"2027-11-16T12:00:00Z": 1,
+	} {
+		var out bytes.Buffer
+		env := envMap(map[string]string{"NETAGENT_HEALTH_FILE": writeHealth(t, `{"agent":"a","time":"`+stamp+`"}`)})
+		if code := runHealthCheck(env, now, &out); code != want {
+			t.Errorf("stamped %s at %s: exit %d, want %d (%s)", stamp, now.Format(time.RFC3339), code, want,
+				strings.TrimSpace(out.String()))
+		}
+		if want == 1 && (!strings.HasPrefix(out.String(), "unhealthy: ") || strings.Count(out.String(), "\n") != 1) {
+			t.Errorf("want a one-line reason, got %q", out.String())
+		}
+	}
+}
