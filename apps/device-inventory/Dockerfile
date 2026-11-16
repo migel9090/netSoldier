@@ -27,8 +27,9 @@ COPY --from=build /device-inventory /device-inventory
 
 EXPOSE 8081
 
-# Discovery listens on mDNS/SSDP/LLDP; the deployment grants
-# NET_BIND_SERVICE for the privileged ports rather than running as root.
+# device-inventory no longer captures: netagent does, and posts frames to the
+# /agent/v1/frames endpoint (ADR-0004). It opens no raw socket, binds only the
+# unprivileged API port, and needs NO Linux capability and no host network.
 USER nonroot:nonroot
 
 ENTRYPOINT ["/device-inventory"]
