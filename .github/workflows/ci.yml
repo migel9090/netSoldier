@@ -32,51 +32,34 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Validate deploy configs
-        run: pip install --quiet pyyaml jsonschema && python scripts/validate-configs.py
+      # Hash-pinned: pip installs exactly the files listed or fails.
+      - name: Install the gates' Python tools
+        run: pip install --quiet --require-hashes -r scripts/ci/requirements.txt
 
-      - name: Install kustomize and kubeconform
-        run: |
-          # The hosted runner image now ships its own kustomize and the
-          # installer refuses to overwrite it ("exists. Remove it first."),
-          # which failed this job. Drop it so the pinned 5.4.3 is what runs.
-          rm -f /usr/local/bin/kustomize
-          curl -sSfL https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh \
-            | bash -s 5.4.3 /usr/local/bin
-          curl -sSfL -o /tmp/kubeconform.tar.gz \
-            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
-          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+      - name: Validate deploy configs
+        run: python scripts/validate-configs.py
 
       # The YAML/schema check only ever parsed individual files, so
       # structural problems were invisible: the proxmox-soc overlay was
       # missing fluent-bit, pi-edge shipped no NetworkPolicies at all, and
-      # manifests referenced images that had no Dockerfile. Rendering both
-      # overlays and validating the result catches that class of mistake.
-      # base/misp generates its Secret with ksops, which decrypts a
-      # SOPS-encrypted file during `kustomize build`. CI has no ksops binary,
-      # no key, and the encrypted payload is deliberately uncommitted, so the
-      # build died on the proxmox-soc overlay and this step never once
-      # passed. The stub stands in for the plugin with a placeholder Secret
-      # so everything around it still renders and gets schema-checked;
-      # ArgoCD's repo-server does the real decryption at deploy time.
-      - name: Install ksops stub for build-time validation
-        run: |
-          install -m 0755 scripts/ci/ksops-stub.py /usr/local/bin/ksops
+      # manifests referenced images that had no Dockerfile. This renders
+      # what is deployed (every site) and every profile they are built from,
+      # and validates each with kubeconform in strict mode against pinned
+      # schemas; a target that does not render or validate fails the step by
+      # name. kustomize and kubeconform are pinned release artefacts checked
+      # against pinned SHA-256s (scripts/ci/tools.sh): the step used to pipe
+      # kustomize's installer from its master branch into bash, which ran
+      # unpinned code and failed whenever GitHub rate-limited the installer's
+      # unauthenticated API call. Same command locally: task validate:manifests.
+      - name: Render and validate every deployable target
+        env:
+          NETSOLDIER_TOOLS: ${{ runner.temp }}/tools
+        run: scripts/ci/render-manifests.sh "$RUNNER_TEMP/rendered"
 
-      - name: Build and validate kustomize overlays
-        run: |
-          for overlay in deploy/kustomize/overlays/*/; do
-            name=$(basename "$overlay")
-            echo "::group::kustomize build $name"
-            kustomize build --enable-alpha-plugins --enable-exec \
-              "$overlay" > "/tmp/$name.yaml"
-            kubeconform -strict -summary -ignore-missing-schemas "/tmp/$name.yaml"
-            echo "::endgroup::"
-          done
-
-      # Every first-party image a manifest references must have a Dockerfile
-      # and a build job, or the workload cannot start — and Kyverno's
-      # verifyImages policy rejects it outright for being unsigned.
+      # Every first-party image a manifest references must have a Dockerfile,
+      # a build job, a signature and provenance, or the workload cannot start
+      # — Kyverno's verifyImages policy rejects it outright for being
+      # unsigned. Same command locally: task check:images.
       - name: Check every referenced first-party image is built
         run: python scripts/check-images.py
 
@@ -132,8 +115,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      # ruff comes hash-pinned from scripts/ci/requirements.txt, so a new
+      # release cannot change the verdict of an unchanged tree.
       - name: Ruff lint
-        run: pip install --quiet ruff && ruff check apps/ml-anomaly/
+        run: |
+          pip install --quiet --require-hashes -r scripts/ci/requirements.txt
+          ruff check apps/ml-anomaly/
 
   web-ui:
     runs-on: ubuntu-latest

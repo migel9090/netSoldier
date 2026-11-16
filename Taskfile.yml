@@ -130,11 +130,44 @@ tasks:
     cmds:
       - bash scripts/backup-restore-test.sh
 
+  # ── CI gates ───────────────────────────────────────────────────
+  # Each runs the same script the workflow runs, so a green run here is a
+  # green job there. The scanners need Docker; tools land in
+  # ~/.cache/netsoldier (NETSOLDIER_TOOLS overrides).
+
+  ci:deps:
+    desc: Install the gates' hash-pinned Python tools (use a virtualenv)
+    cmds:
+      - python3 -m pip install --quiet --require-hashes -r scripts/ci/requirements.txt
+
+  tools:
+    desc: Install the pinned, checksum-verified gate binaries (kustomize, kubeconform, hadolint)
+    cmds:
+      - scripts/ci/tools.sh install
+
+  validate:
+    desc: Run the validate job (configs, every rendered target, first-party images)
+    cmds:
+      - task: validate:configs
+      - task: validate:manifests
+      - task: check:images
+
   validate:configs:
     desc: Validate deploy configs (YAML syntax + Helm values schemas)
+    deps: [ci:deps]
     cmds:
-      - python3 -m pip install --quiet pyyaml jsonschema
       - python3 scripts/validate-configs.py
+
+  validate:manifests:
+    desc: Render every site and profile with kustomize and validate it with kubeconform (strict)
+    cmds:
+      - scripts/ci/render-manifests.sh {{.CLI_ARGS}}
+
+  check:images:
+    desc: Fail when a manifest references a first-party image that CI does not build, sign and attest
+    deps: [ci:deps]
+    cmds:
+      - python3 scripts/check-images.py
 
   scan:
     desc: Run security scanners locally
