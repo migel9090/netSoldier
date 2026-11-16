@@ -29,7 +29,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 # writes an extended attribute, which does not depend on the binary's
 # architecture, so the arm64 image needs no emulator (QEMU) on the amd64
 # runner.
-FROM --platform=$BUILDPLATFORM alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f AS setcap
+FROM --platform=$BUILDPLATFORM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS setcap
 RUN apk add --no-cache libcap
 COPY --from=build /netagent /netagent
 RUN setcap cap_net_raw+ep /netagent && getcap /netagent
