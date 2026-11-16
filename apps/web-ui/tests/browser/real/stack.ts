@@ -43,6 +43,22 @@ export const REAL_DEVICES = [
 ] as const
 export const THREAT_DOMAINS = ['evil.example.com', 'c2.example.net'] as const
 
+/**
+ * `s` as a literal inside a RegExp, every metacharacter escaped: the one
+ * way these tests put a domain (or any other string) into a pattern.
+ */
+export function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * The AdGuard rule the killswitch writes for `domain`: the domain itself,
+ * anchored, not a substring of some other rule.
+ */
+export function sinkholeRule(domain: string): string {
+  return `||${domain}^`
+}
+
 export type Service = 'killswitch' | 'device-inventory' | 'detection-engine'
 export type Upstreams = Record<Service, { url: string; key: string }>
 

@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test'
 import { test, expect, signIn } from './fixtures'
-import { REAL_DEVICES, THREAT_DOMAINS } from './real/stack'
+import { REAL_DEVICES, THREAT_DOMAINS, escapeRegExp, sinkholeRule } from './real/stack'
 
 /**
  * The production build in front of the real killswitch-controller,
@@ -112,13 +112,13 @@ test('sign in, approve a detection, see it enforced by its approver, revert it, 
   const active = actionRow(page, 'active-table', id)
   await expect(active).toHaveAttribute('data-state', 'active')
   await expect(active.getByTestId('approved-by')).toHaveText('Michal')
-  expect((await real.rules()).some((r) => r.includes(TABLET_DOMAIN))).toBe(true)
+  expect(await real.rules()).toContain(sinkholeRule(TABLET_DOMAIN))
 
   page.once('dialog', (d) => void d.accept('checked, it was the school app'))
   await active.getByRole('button', { name: 'Revert' }).click()
   await expect(outcome(page)).toHaveAttribute('data-state', 'reverted')
   await expect(active).toHaveCount(0)
-  expect((await real.rules()).some((r) => r.includes(TABLET_DOMAIN))).toBe(false)
+  expect(await real.rules()).not.toContain(sinkholeRule(TABLET_DOMAIN))
 
   await page.getByTestId('killswitch-nav').getByRole('link', { name: 'Audit log' }).click()
   const trail = page.getByTestId('audit-table').locator(`tr[data-action-id="${id}"]`)
@@ -240,7 +240,7 @@ test('alerts and false-positive feedback against the real detection engine', asy
   // GET /feedback says when it ends.
   await expect(page.getByTestId('feedback-note').first()).toHaveText(
     new RegExp(
-      `^Marked ${TABLET_DOMAIN.replace(/\./g, '\\.')} as a false positive: silenced until .+ \\(30 days left\\)\\. Saved\\.$`,
+      `^Marked ${escapeRegExp(TABLET_DOMAIN)} as a false positive: silenced until .+ \\(30 days left\\)\\. Saved\\.$`,
     ),
   )
   await expect(alert.getByTestId('fp-marked')).toBeVisible()
