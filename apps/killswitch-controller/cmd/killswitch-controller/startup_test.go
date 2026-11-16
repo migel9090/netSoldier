@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -160,7 +161,8 @@ func startMain(t *testing.T, env map[string]string) (*exec.Cmd, *lockedBuffer) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestMainSubprocess$")
 	cmd.Env = append(os.Environ(), "KILLSWITCH_TEST_RUN_MAIN=1",
 		// never reach for a real DNS server or AdGuard from a test
-		"ADGUARD_URL=http://127.0.0.1:1", "CLICKHOUSE_URL=")
+		"ADGUARD_URL=http://127.0.0.1:1", "CLICKHOUSE_URL=",
+		"KILLSWITCH_DB_PATH="+filepath.Join(t.TempDir(), "ks.db"))
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -195,6 +197,9 @@ func TestServiceRefusesToStart(t *testing.T) {
 		{"no ingest token", map[string]string{"KILLSWITCH_INGEST_TOKEN": ""}, "KILLSWITCH_INGEST_TOKEN"},
 		{"no operator token", map[string]string{"KILLSWITCH_API_KEY": ""}, "KILLSWITCH_API_KEY"},
 		{"one key for both roles", map[string]string{"KILLSWITCH_INGEST_TOKEN": "op"}, "same value"},
+		{"agent shares the operator token", map[string]string{"NETAGENT_KILLSWITCH_TOKEN": "op"}, "NETAGENT_KILLSWITCH_TOKEN must differ"},
+		// Without its database the service cannot know what it enforces.
+		{"database cannot be opened", map[string]string{"KILLSWITCH_DB_PATH": "/proc/killswitch/ks.db"}, "action database"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

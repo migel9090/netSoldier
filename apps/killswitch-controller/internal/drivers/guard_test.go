@@ -52,7 +52,7 @@ func TestGuardProtectsGatewayAcrossSpellings(t *testing.T) {
 	var g TargetGuard
 	mustProtect(t, &g, []string{"192.168.1.1"}, []string{"AA:BB:CC:DD:EE:FF"})
 
-	if err := g.Check("11:22:33:44:55:66", "192.168.1.1"); err == nil {
+	if err := g.Check("02:22:33:44:55:66", "192.168.1.1"); err == nil {
 		t.Error("protected IP should be refused")
 	}
 	for _, spelling := range []string{
@@ -62,7 +62,7 @@ func TestGuardProtectsGatewayAcrossSpellings(t *testing.T) {
 			t.Errorf("protected MAC spelling %q should be refused", spelling)
 		}
 	}
-	if err := g.Check("11:22:33:44:55:66", "192.168.1.50"); err != nil {
+	if err := g.Check("02:22:33:44:55:66", "192.168.1.50"); err != nil {
 		t.Errorf("unprotected device should pass: %v", err)
 	}
 }
@@ -211,6 +211,41 @@ func TestNormalizeMACKey(t *testing.T) {
 	for _, in := range []string{"", "aa:bb", "zz:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:ff:00"} {
 		if got := normalizeMACKey(in); got != "" {
 			t.Errorf("normalizeMACKey(%q) = %q, want empty", in, got)
+		}
+	}
+}
+
+// TestGuardRefusesTargetsThatAreNotOneDevice: the ARP driver accepted a
+// broadcast or multicast target MAC — which poisons every host on the
+// segment — and the MAC 11:22:33:44:55:66 used throughout the tests is
+// itself multicast.
+func TestGuardRefusesTargetsThatAreNotOneDevice(t *testing.T) {
+	var g TargetGuard
+	label := map[string]string{"reason": refusedNotUnicast}
+	for _, tc := range []struct{ mac, ip string }{
+		{"ff:ff:ff:ff:ff:ff", "192.168.1.50"},
+		{"01:00:5e:00:00:01", "192.168.1.50"},
+		{"33:33:00:00:00:01", "192.168.1.50"},
+		{"11:22:33:44:55:66", "192.168.1.50"},
+		{"00:00:00:00:00:00", "192.168.1.50"},
+		{"02:00:00:00:00:01", "255.255.255.255"},
+		{"02:00:00:00:00:01", "0.0.0.0"},
+		{"02:00:00:00:00:01", "224.0.0.1"},
+		{"02:00:00:00:00:01", "127.0.0.1"},
+		{"02:00:00:00:00:01", "::"},
+		{"02:00:00:00:00:01", "ff02::1"},
+	} {
+		before := counterValue(t, "killswitch_guard_refusals_total", label)
+		if _, err := g.Vet(tc.mac, tc.ip); err == nil {
+			t.Errorf("mac=%s ip=%s must be refused", tc.mac, tc.ip)
+		}
+		if got := counterValue(t, "killswitch_guard_refusals_total", label); got != before+1 {
+			t.Errorf("mac=%s ip=%s: not counted as %s", tc.mac, tc.ip, refusedNotUnicast)
+		}
+	}
+	for _, mac := range []string{"02:00:00:00:00:01", "aa:bb:cc:dd:ee:ff", "00:11:22:33:44:55"} {
+		if _, err := g.Vet(mac, "192.168.1.50"); err != nil {
+			t.Errorf("unicast %s refused: %v", mac, err)
 		}
 	}
 }

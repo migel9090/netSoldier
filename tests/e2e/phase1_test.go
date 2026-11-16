@@ -70,10 +70,11 @@ func TestPhase1E2E(t *testing.T) {
 
 	ksAddr := freeAddr(t)
 	stopKs := startProc(t, ksBin, map[string]string{
-		"LISTEN_ADDR":      ksAddr,
-		"ADGUARD_URL":      ag.url,
-		"ADGUARD_USER":     "admin",
-		"ADGUARD_PASSWORD": "test",
+		"LISTEN_ADDR":        ksAddr,
+		"KILLSWITCH_DB_PATH": ksDBPath(t),
+		"ADGUARD_URL":        ag.url,
+		"ADGUARD_USER":       "admin",
+		"ADGUARD_PASSWORD":   "test",
 		// Run with authentication and an allowlist configured — the
 		// production posture. Every earlier e2e run left both unset, so the
 		// authenticated path was never exercised and auto-block was never
@@ -185,7 +186,8 @@ func TestPhase1E2E(t *testing.T) {
 	t.Log("approving action")
 	var approved actionSummary
 	httpPostJSON(t, "http://"+ksAddr+"/actions/"+actionID+"/approve",
-		map[string]string{"approved_by": "e2e-operator"}, &approved)
+		// The body's identity is ignored: the approver is the actor header.
+		map[string]string{"approved_by": "mallory"}, &approved)
 	assertEq(t, "approved.state", "active", approved.State)
 	assertEq(t, "approved.approved_by", "e2e-operator", approved.ApprovedBy)
 

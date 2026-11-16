@@ -1,13 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,97 +19,23 @@ import (
 	"github.com/migel9090/netSoldier/libs/events"
 )
 
-// evalEnv is the production posture: bearer token, signature v2, a
-// populated allowlist, and a driver the test can observe.
-type evalEnv struct {
-	srv    *httptest.Server
-	store  *actions.Store
-	key    string
-	secret string
-}
-
-func newEvalEnv(t *testing.T, drv drivers.Driver) *evalEnv {
-	t.Helper()
-	pol := policy.DefaultPolicy()
-	if err := pol.Allowlist.AddIP("192.168.1.1"); err != nil {
-		t.Fatal(err)
-	}
-	return newEvalEnvWith(t, pol, func(string) (drivers.Driver, error) { return drv, nil })
-}
-
-func newEvalEnvWith(t *testing.T, pol *policy.Policy, resolve driverResolver) *evalEnv {
-	t.Helper()
-	store := actions.NewStore(actions.NopAuditWriter{}, actions.StoreOptions{})
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /evaluate", handleEvaluate(pol, store, resolve,
-		newEvaluationLedger(ledgerRetention(0))))
-	// key is the ingest token: these tests only submit events.
-	env := &evalEnv{store: store, key: "k", secret: "whsec"}
-	env.srv = httptest.NewServer(authMiddleware(credentials{operator: "operator-key", ingest: env.key},
-		&events.SignatureVerifier{Secret: env.secret}, mux))
-	t.Cleanup(env.srv.Close)
-	return env
-}
-
-type evalResponse struct {
-	status    int
-	Decision  policy.Decision           `json:"decision"`
-	Action    *events.EnforcementAction `json:"action"`
-	Duplicate bool                      `json:"duplicate"`
-	Error     string                    `json:"error"`
-}
-
-func (e *evalEnv) postBody(t *testing.T, body []byte, sig string) evalResponse {
-	t.Helper()
-	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+"/evaluate", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+e.key)
-	req.Header.Set(events.SignatureHeader, sig)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("POST /evaluate: %v", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	out := evalResponse{status: resp.StatusCode}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		t.Fatalf("decode %q: %v", raw, err)
-	}
-	return out
-}
-
-func (e *evalEnv) post(t *testing.T, ev events.DetectionEvent) evalResponse {
-	t.Helper()
-	body, _ := json.Marshal(ev)
-	return e.postBody(t, body, events.SignPayload(e.secret, body))
-}
-
-func (e *evalEnv) actionCount() int {
-	n := 0
-	for _, st := range []string{events.StatePending, events.StateApproved, events.StateActive,
-		events.StateFailed, events.StateReverted, events.StateRejected} {
-		n += len(e.store.ListByState(st))
-	}
-	return n
-}
-
 // TestReplayedSignedEventCreatesOneAction: the same signed event delivered
 // three times used to produce three active actions and three driver calls.
 // Inside the signature window a repeat must return the first decision and
 // create nothing.
 func TestReplayedSignedEventCreatesOneAction(t *testing.T) {
 	drv := &recordingDriver{}
-	env := newEvalEnv(t, drv)
+	h := newHarness(t, harnessOpts{driver: drv})
 
 	body, _ := json.Marshal(criticalIoCEvent())
-	sig := events.SignPayload(env.secret, body)
+	sig := events.SignPayload(testWebhookSecret, body)
 
-	first := env.postBody(t, body, sig)
+	first := h.evaluateRaw(body, sig)
 	if first.status != http.StatusOK || first.Decision.Action != "auto_block" || first.Action == nil {
 		t.Fatalf("first delivery: %+v", first)
 	}
 	for i := 0; i < 2; i++ {
-		again := env.postBody(t, body, sig)
+		again := h.evaluateRaw(body, sig)
 		if again.status != http.StatusOK || !again.Duplicate {
 			t.Fatalf("repeat %d: %+v, want 200 marked duplicate", i+1, again)
 		}
@@ -118,7 +43,7 @@ func TestReplayedSignedEventCreatesOneAction(t *testing.T) {
 			t.Fatalf("repeat %d must return the original decision and action, got %+v", i+1, again)
 		}
 	}
-	if n := env.actionCount(); n != 1 {
+	if n := h.actionCount(); n != 1 {
 		t.Errorf("one event, %d actions", n)
 	}
 	if got := drv.applied.Load(); got != 1 {
@@ -130,24 +55,22 @@ func TestReplayedSignedEventCreatesOneAction(t *testing.T) {
 // accepted, because the MAC covered only the body.
 func TestStaleSignedEventRejected(t *testing.T) {
 	drv := &recordingDriver{}
-	env := newEvalEnv(t, drv)
+	h := newHarness(t, harnessOpts{driver: drv})
 
 	ev := criticalIoCEvent()
 	ev.Timestamp = time.Now().Add(-90 * 24 * time.Hour)
 	body, _ := json.Marshal(ev)
-	old := events.SignPayloadAt(env.secret, time.Now().Add(-90*24*time.Hour), body)
+	old := events.SignPayloadAt(testWebhookSecret, time.Now().Add(-90*24*time.Hour), body)
 
-	got := env.postBody(t, body, old)
+	got := h.evaluateRaw(body, old)
 	if got.status != http.StatusUnauthorized || !strings.Contains(got.Error, "tolerance") {
 		t.Fatalf("a 90-day-old signature must be refused as stale, got %+v", got)
 	}
-	if n := env.actionCount(); n != 0 || drv.applied.Load() != 0 {
+	if n := h.actionCount(); n != 0 || drv.applied.Load() != 0 {
 		t.Fatalf("a refused replay created %d actions / %d applies", n, drv.applied.Load())
 	}
-
 	// The body-only 1.x scheme must not be a way around the window.
-	legacy := env.postBody(t, body, "sha256=00")
-	if legacy.status != http.StatusUnauthorized {
+	if legacy := h.evaluateRaw(body, "sha256=00"); legacy.status != http.StatusUnauthorized {
 		t.Fatalf("legacy signature: %+v", legacy)
 	}
 }
@@ -167,7 +90,7 @@ func (d *slowDriver) Apply(ctx context.Context, a *events.EnforcementAction) err
 // delivery is still being enforced.
 func TestConcurrentDeliveriesOfOneEventCreateOneAction(t *testing.T) {
 	drv := &slowDriver{delay: 200 * time.Millisecond}
-	env := newEvalEnv(t, drv)
+	h := newHarness(t, harnessOpts{driver: drv})
 	body, _ := json.Marshal(criticalIoCEvent())
 
 	var wg sync.WaitGroup
@@ -177,7 +100,7 @@ func TestConcurrentDeliveriesOfOneEventCreateOneAction(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			got := env.postBody(t, body, events.SignPayload(env.secret, body))
+			got := h.evaluateRaw(body, events.SignPayload(testWebhookSecret, body))
 			if got.status != http.StatusOK || got.Action == nil {
 				t.Errorf("delivery: %+v", got)
 				return
@@ -202,17 +125,16 @@ func TestConcurrentDeliveriesOfOneEventCreateOneAction(t *testing.T) {
 // (the 1.x engine restarted at DET-1 on every boot) would otherwise have a
 // different detection silently answered with an old decision.
 func TestReusedEventIDWithDifferentContentRefused(t *testing.T) {
-	env := newEvalEnv(t, &recordingDriver{})
+	h := newHarness(t, harnessOpts{})
 	ev := testEvent(60, events.SeverityMedium)
-	if got := env.post(t, ev); got.status != http.StatusOK {
+	if got := h.evaluate(ev); got.status != http.StatusOK {
 		t.Fatalf("first: %+v", got)
 	}
-	other := withDomainTarget(ev, "other.example")
-	got := env.post(t, other)
+	got := h.evaluate(withDomainTarget(ev, "other.example"))
 	if got.status != http.StatusConflict || !strings.Contains(got.Error, ev.ID) {
 		t.Fatalf("reused id with different content: %+v, want 409", got)
 	}
-	if n := env.actionCount(); n != 1 {
+	if n := h.actionCount(); n != 1 {
 		t.Errorf("%d actions, want 1", n)
 	}
 }
@@ -221,7 +143,7 @@ func TestReusedEventIDWithDifferentContentRefused(t *testing.T) {
 // event without an id, a summary or any evidence was evaluated anyway.
 func TestInvalidEventRejectedWithReason(t *testing.T) {
 	drv := &recordingDriver{}
-	env := newEvalEnv(t, drv)
+	h := newHarness(t, harnessOpts{driver: drv})
 
 	tests := []struct {
 		name   string
@@ -244,7 +166,7 @@ func TestInvalidEventRejectedWithReason(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ev := criticalIoCEvent()
 			tt.mutate(&ev)
-			got := env.post(t, ev)
+			got := h.evaluate(ev)
 			if got.status != http.StatusUnprocessableEntity {
 				t.Fatalf("status = %d, want 422 (%+v)", got.status, got)
 			}
@@ -253,7 +175,7 @@ func TestInvalidEventRejectedWithReason(t *testing.T) {
 			}
 		})
 	}
-	if n := env.actionCount(); n != 0 || drv.applied.Load() != 0 {
+	if n := h.actionCount(); n != 0 || drv.applied.Load() != 0 {
 		t.Fatalf("invalid events created %d actions / %d applies", n, drv.applied.Load())
 	}
 }
@@ -261,15 +183,17 @@ func TestInvalidEventRejectedWithReason(t *testing.T) {
 // miniAdGuard is a stand-in for AdGuard Home's filtering API, so these tests
 // run the real sinkhole driver.
 type miniAdGuard struct {
-	mu     sync.Mutex
-	rules  []string
-	writes int
-	srv    *httptest.Server
+	mu       sync.Mutex
+	rules    []string
+	writes   int
+	setDelay time.Duration
+	failSets int
+	srv      *httptest.Server
 }
 
-func newMiniAdGuard(t *testing.T) *miniAdGuard {
+func newMiniAdGuard(t *testing.T, rules ...string) *miniAdGuard {
 	t.Helper()
-	f := &miniAdGuard{}
+	f := &miniAdGuard{rules: rules}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/control/filtering/status", func(w http.ResponseWriter, _ *http.Request) {
 		f.mu.Lock()
@@ -282,8 +206,16 @@ func newMiniAdGuard(t *testing.T) *miniAdGuard {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
-		f.rules, f.writes = body.Rules, f.writes+1
+		if f.failSets > 0 {
+			f.failSets--
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		f.rules, f.writes = body.Rules, f.writes+1 // AdGuard has applied the change…
+		delay := f.setDelay
 		f.mu.Unlock()
+		time.Sleep(delay) // …but may be slow to answer
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
@@ -296,16 +228,32 @@ func (f *miniAdGuard) current() ([]string, int) {
 	return append([]string{}, f.rules...), f.writes
 }
 
+func (f *miniAdGuard) set(fn func(f *miniAdGuard)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn(f)
+}
+
+// sinkHarness runs the real sinkhole driver, owning its rules in the
+// harness store.
+func sinkHarness(t *testing.T, ag *miniAdGuard, o harnessOpts) *harness {
+	t.Helper()
+	o.driversFor = func(s *actions.Store) map[string]drivers.Driver {
+		return map[string]drivers.Driver{events.ActionDNSSinkhole: drivers.NewSinkholeDriver(ag.srv.URL, "u", "p", s)}
+	}
+	return newHarness(t, o)
+}
+
 // TestDomainTargetIsWhatGetsSinkholed: the rule is built from the target
 // (the listed indicator), not from the queried name in `domain`.
 func TestDomainTargetIsWhatGetsSinkholed(t *testing.T) {
 	ag := newMiniAdGuard(t)
-	env := newEvalEnv(t, drivers.NewSinkholeDriver(ag.srv.URL, "u", "p"))
+	h := sinkHarness(t, ag, harnessOpts{})
 
 	ev := withDomainTarget(testEvent(95, events.SeverityCritical), "evil.example")
 	ev.Domain = "cdn7.a.evil.example"
 	ev.ClientName = "kids-tablet"
-	got := env.post(t, ev)
+	got := h.evaluate(ev)
 
 	if got.Decision.Action != "auto_block" || got.Action == nil || got.Action.State != events.StateActive {
 		t.Fatalf("expected an active auto-block, got %+v", got)
@@ -326,14 +274,14 @@ func TestDomainTargetIsWhatGetsSinkholed(t *testing.T) {
 // driver; a Zeek Intel address became the rule ||203.0.113.9^.
 func TestIPTargetIsPendingNotSinkholed(t *testing.T) {
 	ag := newMiniAdGuard(t)
-	env := newEvalEnv(t, drivers.NewSinkholeDriver(ag.srv.URL, "u", "p"))
+	h := sinkHarness(t, ag, harnessOpts{})
 
 	ev := testEvent(95, events.SeverityCritical)
 	ev.Domain = "cdn.legit.example" // the observed name: context only
 	ev.MatchedIoC, ev.IoCType = "203.0.113.7", events.IndicatorIP
 	ev.Signals[0].Indicator, ev.Signals[0].IndicatorType = "203.0.113.7", events.IndicatorIP
 	ev.Target = &events.Target{Type: events.TargetIP, Value: "203.0.113.7"}
-	got := env.post(t, ev)
+	got := h.evaluate(ev)
 
 	if got.Decision.Action != "pending" || got.Action == nil || got.Action.State != events.StatePending {
 		t.Fatalf("an ip target must be queued for a human, got %+v", got)
@@ -353,7 +301,7 @@ func TestIPTargetIsPendingNotSinkholed(t *testing.T) {
 // the event's domain and was offered to the sinkhole.
 func TestIDSEventWithoutTargetIsPending(t *testing.T) {
 	ag := newMiniAdGuard(t)
-	env := newEvalEnv(t, drivers.NewSinkholeDriver(ag.srv.URL, "u", "p"))
+	h := sinkHarness(t, ag, harnessOpts{})
 
 	ev := testEvent(95, events.SeverityCritical)
 	ev.Summary = `IDS signature "ET MALWARE Cobalt Strike Beacon Observed" (192.168.1.100:51544 → 203.0.113.7:443)`
@@ -362,7 +310,7 @@ func TestIDSEventWithoutTargetIsPending(t *testing.T) {
 	ev.Signals = []events.Signal{{Class: events.SignalIDS, Confidence: 95, Indicator: "2031999",
 		IndicatorType: events.IndicatorSID, Source: "et-open"}}
 	ev.Target = nil
-	got := env.post(t, ev)
+	got := h.evaluate(ev)
 
 	if got.Decision.Action != "pending" || got.Action == nil {
 		t.Fatalf("an event without a target must be queued for a human, got %+v", got)
@@ -378,67 +326,85 @@ func TestIDSEventWithoutTargetIsPending(t *testing.T) {
 	}
 }
 
+func ledgerStore(t *testing.T) *actions.Store {
+	t.Helper()
+	s, err := actions.Open(filepath.Join(t.TempDir(), "ks.db"), actions.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
 func TestLedgerForgetsAfterRetention(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	l := newEvaluationLedger(time.Minute)
+	now := time.Now()
+	l := newEvaluationLedger(ledgerStore(t), time.Minute)
 	l.now = func() time.Time { return now }
 	digest := sha256.Sum256([]byte("x"))
 
-	e, first := l.claim("DET-a-1", digest)
-	if !first {
-		t.Fatal("first claim")
+	e, first, err := l.claim("DET-a-1", digest)
+	if err != nil || !first {
+		t.Fatal("first claim", err)
 	}
-	if _, again := l.claim("DET-a-1", digest); again {
+	if _, again, _ := l.claim("DET-a-1", digest); again {
 		t.Fatal("an in-flight id must not be claimed twice")
 	}
-	l.finish(e, policy.Decision{Action: "ignore"}, "")
-
+	if err := l.finish("DET-a-1", e, digest, policy.Decision{Action: "ignore"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if past, again, _ := l.claim("DET-a-1", digest); again || past.decision.Action != "ignore" {
+		t.Fatal("a finished id is answered from the ledger inside the retention")
+	}
 	now = now.Add(2 * time.Minute)
-	if _, first := l.claim("DET-a-1", digest); !first {
+	if _, first, _ := l.claim("DET-a-1", digest); !first {
 		t.Error("an id past retention is evaluated afresh (the signature window has closed by then)")
 	}
 }
 
+// TestLedgerSurvivesARestart: idempotency lived in memory, so a restart
+// inside the signature window let a replay be evaluated again.
+func TestLedgerSurvivesARestart(t *testing.T) {
+	s := ledgerStore(t)
+	digest := sha256.Sum256([]byte("x"))
+	l := newEvaluationLedger(s, time.Hour)
+	e, _, _ := l.claim("DET-a-1", digest)
+	l.finish("DET-a-1", e, digest, policy.Decision{Action: "pending", Reason: "r"}, "ACT-x-1")
+
+	restarted := newEvaluationLedger(s, time.Hour)
+	past, first, err := restarted.claim("DET-a-1", digest)
+	if err != nil || first {
+		t.Fatalf("after a restart the id must still be known: first=%v err=%v", first, err)
+	}
+	d, id, ok := restarted.outcome(past)
+	if !ok || d.Reason != "r" || id != "ACT-x-1" || past.digest != digest {
+		t.Fatalf("outcome after restart: %+v %s %v", d, id, ok)
+	}
+}
+
 func TestLedgerKeepsInFlightEntries(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	l := newEvaluationLedger(time.Minute)
+	now := time.Now()
+	l := newEvaluationLedger(ledgerStore(t), time.Minute)
 	l.now = func() time.Time { return now }
 	digest := sha256.Sum256([]byte("x"))
-
-	if _, first := l.claim("DET-a-1", digest); !first {
+	if _, first, _ := l.claim("DET-a-1", digest); !first {
 		t.Fatal("first claim")
 	}
 	now = now.Add(time.Hour)
-	if _, first := l.claim("DET-a-1", digest); first {
+	if _, first, _ := l.claim("DET-a-1", digest); first {
 		t.Error("an evaluation still in progress must never be forgotten")
 	}
 }
 
 func TestLedgerAbandonAllowsRetry(t *testing.T) {
-	l := newEvaluationLedger(time.Minute)
+	l := newEvaluationLedger(ledgerStore(t), time.Minute)
 	digest := sha256.Sum256([]byte("x"))
-	e, _ := l.claim("DET-a-1", digest)
+	e, _, _ := l.claim("DET-a-1", digest)
 	l.abandon("DET-a-1", e)
 	if _, _, ok := l.outcome(e); ok {
 		t.Error("an abandoned evaluation has no outcome")
 	}
-	if _, first := l.claim("DET-a-1", digest); !first {
+	if _, first, _ := l.claim("DET-a-1", digest); !first {
 		t.Error("after an abandoned evaluation the next delivery is evaluated")
-	}
-}
-
-func TestLedgerIsBounded(t *testing.T) {
-	l := newEvaluationLedger(time.Hour)
-	digest := sha256.Sum256([]byte("x"))
-	for i := 0; i < maxLedgerEntries+10; i++ {
-		e, _ := l.claim(events.FormatDetectionID("a", uint64(i)), digest)
-		l.finish(e, policy.Decision{}, "")
-	}
-	l.mu.Lock()
-	n := len(l.entries)
-	l.mu.Unlock()
-	if n > maxLedgerEntries+1 {
-		t.Errorf("ledger holds %d entries, cap %d", n, maxLedgerEntries)
 	}
 }
 

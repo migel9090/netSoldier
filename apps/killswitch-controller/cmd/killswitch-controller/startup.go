@@ -27,20 +27,34 @@ const insecureEnv = "KILLSWITCH_ALLOW_UNAUTHENTICATED"
 // data and is the component most likely to be compromised. With one shared
 // key it could approve, reject or revert the very actions it submitted; with
 // the ingest token it can only submit, and only signed events.
+//
+// The netagent has a third, because its results move actions: it can only
+// poll, and nothing else can.
 type credentials struct {
-	operator string // KILLSWITCH_API_KEY: every endpoint except POST /evaluate
+	operator string // KILLSWITCH_API_KEY: every endpoint except POST /evaluate and the agent's
 	ingest   string // KILLSWITCH_INGEST_TOKEN: POST /evaluate, with the signature
+	agent    string // NETAGENT_KILLSWITCH_TOKEN: POST /agent/v1/poll; optional
 }
 
 // loadAuth reads the credentials and the webhook signature secret. A missing
 // token used to switch its check off with a log line; now any gap refuses
-// the start, unless KILLSWITCH_ALLOW_UNAUTHENTICATED=true.
+// the start, unless KILLSWITCH_ALLOW_UNAUTHENTICATED=true. The agent token
+// is optional — without it there is no ARP isolation — but when it is set
+// it must be a credential of its own.
 func loadAuth(tolerance time.Duration) (credentials, *events.SignatureVerifier, error) {
 	creds := credentials{
 		operator: os.Getenv("KILLSWITCH_API_KEY"),
 		ingest:   os.Getenv("KILLSWITCH_INGEST_TOKEN"),
+		agent:    os.Getenv("NETAGENT_KILLSWITCH_TOKEN"),
 	}
 	secret := os.Getenv("WEBHOOK_SECRET")
+
+	if creds.agent != "" && (creds.agent == creds.operator || creds.agent == creds.ingest) {
+		// Not waivable: with a shared token the agent could approve, or
+		// the web UI could report isolations lifted.
+		return credentials{}, nil, fmt.Errorf("NETAGENT_KILLSWITCH_TOKEN must differ from " +
+			"KILLSWITCH_API_KEY and KILLSWITCH_INGEST_TOKEN")
+	}
 
 	var problems []string
 	if creds.operator == "" {

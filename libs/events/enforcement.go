@@ -41,21 +41,34 @@ const (
 	// IS still enforced. The TTL reaper keeps retrying; such an action is
 	// never evicted and never reported as reverted.
 	StateRevertFailed = "revert_failed"
-
-	// StateFailed is the single failure state of schema 1.x.
-	//
-	// Deprecated: it cannot say whether the device is still enforced. Use
-	// StateApplyFailed or StateRevertFailed. Kept until the store's state
-	// machine moves to the split states.
-	StateFailed = "failed"
 )
 
 // enforcementStates is every state an action can be seen in on the wire,
-// mirrored by the schema enum. StateFailed stays listed for as long as the
-// controller can still emit it.
+// mirrored by the schema enum.
 var enforcementStates = []string{
 	StatePending, StateApproved, StateActive, StateReverted, StateRejected,
-	StateExpired, StateApplyFailed, StateRevertFailed, StateFailed,
+	StateExpired, StateApplyFailed, StateRevertFailed,
+}
+
+// terminalStates never change again. revert_failed is deliberately absent:
+// it is still enforced and the controller keeps working on it.
+var terminalStates = []string{StateReverted, StateRejected, StateExpired, StateApplyFailed}
+
+// IsTerminalState reports whether an action in this state is finished:
+// nothing is enforced and nothing will move it again.
+func IsTerminalState(state string) bool {
+	for _, s := range terminalStates {
+		if s == state {
+			return true
+		}
+	}
+	return false
+}
+
+// IsEnforcedState reports whether an action in this state may still be in
+// force on the network: active, or a revert that has not taken effect.
+func IsEnforcedState(state string) bool {
+	return state == StateActive || state == StateRevertFailed
 }
 
 // EnforcementAction represents a killswitch enforcement decision and its

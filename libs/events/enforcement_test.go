@@ -33,9 +33,44 @@ func TestEnforcementStateConstants(t *testing.T) {
 		}
 	}
 	// The two failures mean opposite things for the device and must never
-	// share a spelling with each other or with the deprecated state.
-	if StateApplyFailed == StateRevertFailed || StateApplyFailed == StateFailed || StateRevertFailed == StateFailed {
-		t.Error("apply_failed, revert_failed and failed must be distinct")
+	// share a spelling.
+	if StateApplyFailed == StateRevertFailed {
+		t.Error("apply_failed and revert_failed must be distinct")
+	}
+	// The 1.x single failure state could not say whether the device was
+	// still enforced; it must not come back.
+	if seen["failed"] {
+		t.Error(`the 1.x state "failed" is still in the wire vocabulary`)
+	}
+}
+
+func TestEnforcementStateClasses(t *testing.T) {
+	for _, s := range enforcementStates {
+		if IsTerminalState(s) && IsEnforcedState(s) {
+			t.Errorf("%s is both terminal and enforced", s)
+		}
+	}
+	for _, s := range []string{StateReverted, StateRejected, StateExpired, StateApplyFailed} {
+		if !IsTerminalState(s) {
+			t.Errorf("%s should be terminal", s)
+		}
+	}
+	// revert_failed is STILL enforced: it must never count as finished, or
+	// it would be evicted and never retried.
+	for _, s := range []string{StatePending, StateApproved, StateActive, StateRevertFailed, "failed"} {
+		if IsTerminalState(s) {
+			t.Errorf("%s must not be terminal", s)
+		}
+	}
+	for _, s := range []string{StateActive, StateRevertFailed} {
+		if !IsEnforcedState(s) {
+			t.Errorf("%s should count as enforced", s)
+		}
+	}
+	for _, s := range []string{StatePending, StateApproved, StateApplyFailed, StateReverted, "failed", ""} {
+		if IsEnforcedState(s) {
+			t.Errorf("%s must not count as enforced", s)
+		}
 	}
 }
 

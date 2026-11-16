@@ -55,10 +55,9 @@
         "rejected",
         "expired",
         "apply_failed",
-        "revert_failed",
-        "failed"
+        "revert_failed"
       ],
-      "description": "apply_failed: nothing is enforced. revert_failed: STILL enforced. expired: pending and never approved. 'failed' is the deprecated 1.x state, still emitted until the state machine moves to the split states."
+      "description": "pending: awaiting a human. approved: approved, the driver has not confirmed yet. active: enforced. apply_failed: the driver failed to apply and nothing is enforced (terminal). revert_failed: the driver failed to lift it and it is STILL enforced; the controller keeps retrying. reverted, rejected, expired (pending and never approved in time): terminal."
     },
     "target_mac": {
       "type": "string",
@@ -90,7 +89,8 @@
     },
     "expires_at": {
       "type": "string",
-      "format": "date-time"
+      "format": "date-time",
+      "description": "activated_at + ttl_seconds; absent until the action is active."
     },
     "reverted_at": {
       "type": "string",

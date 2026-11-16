@@ -17,6 +17,7 @@ const (
 	refusedMissingIdentifier = "missing_identifier"
 	refusedInvalidIdentifier = "invalid_identifier"
 	refusedProtectedDevice   = "protected_device"
+	refusedNotUnicast        = "not_unicast"
 )
 
 var guardRefusals = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -28,7 +29,7 @@ var guardRefusals = prometheus.NewCounterVec(prometheus.CounterOpts{
 func init() {
 	prometheus.MustRegister(guardRefusals)
 	for _, r := range []string{refusedNoGuard, refusedMissingIdentifier,
-		refusedInvalidIdentifier, refusedProtectedDevice} {
+		refusedInvalidIdentifier, refusedProtectedDevice, refusedNotUnicast} {
 		guardRefusals.WithLabelValues(r)
 	}
 }
@@ -142,6 +143,9 @@ func (g *TargetGuard) Vet(mac, ip string) (Device, error) {
 	if err != nil {
 		return Device{}, refuse(refusedInvalidIdentifier, mac, ip, fmt.Errorf("target IP: %w", err))
 	}
+	if why := notOneDevice(key, addr); why != "" {
+		return Device{}, refuse(refusedNotUnicast, mac, ip, fmt.Errorf("refusing to enforce against %s", why))
+	}
 
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -160,6 +164,29 @@ func (g *TargetGuard) Vet(mac, ip string) (Device, error) {
 		}
 	}
 	return Device{MAC: formatMACKey(key), IP: addr.String()}, nil
+}
+
+// limitedBroadcast is 255.255.255.255, which netip has no predicate for.
+var limitedBroadcast = netip.AddrFrom4([4]byte{255, 255, 255, 255})
+
+// notOneDevice explains why an identifier names something other than one
+// device, or returns "". A group MAC (broadcast or multicast: the low bit
+// of the first octet) reaches every host that listens to it — an ARP
+// isolation "of" ff:ff:ff:ff:ff:ff poisons the whole segment — and the
+// all-zero MAC, an unspecified, multicast, loopback or broadcast address
+// is no device at all.
+func notOneDevice(macKey string, addr netip.Addr) string {
+	if strings.ContainsAny(macKey[1:2], "13579bdf") {
+		return "group MAC " + formatMACKey(macKey) + ": a broadcast/multicast address reaches every listener, not one device"
+	}
+	if macKey == "000000000000" {
+		return "the all-zero MAC, which is not a device"
+	}
+	switch {
+	case addr.IsUnspecified(), addr.IsMulticast(), addr.IsLoopback(), addr == limitedBroadcast:
+		return "address " + addr.String() + ", which is not a single device"
+	}
+	return ""
 }
 
 func refuse(reason, mac, ip string, err error) error {

@@ -26,7 +26,18 @@ const (
 	e2eAPIKey        = "e2e-api-key" // the killswitch operator token, and the other services' keys
 	e2eIngestToken   = "e2e-ingest-token"
 	e2eWebhookSecret = "e2e-webhook-secret"
+	e2eAgentToken    = "e2e-agent-token"
+	// e2eActor is who the web UI's proxy says is acting, on every operator
+	// mutation (X-Netsoldier-Actor).
+	e2eActor = "e2e-operator"
 )
+
+// ksDBPath is a fresh database for one killswitch process. The service
+// refuses to start without one.
+func ksDBPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "killswitch.db")
+}
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
@@ -202,10 +213,13 @@ func postAuthedJSON(t *testing.T, url, token string, body any, dst any) {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	// Only /evaluate carries a signed detection payload; operator actions
-	// are authenticated by the bearer token alone. Signature v2 is
-	// timestamped, so it is computed here, at send time.
+	// are authenticated by the bearer token alone, and name the operator
+	// the way the web UI's proxy does. Signature v2 is timestamped, so it
+	// is computed here, at send time.
 	if strings.HasSuffix(url, "/evaluate") {
 		req.Header.Set(events.SignatureHeader, events.SignPayload(e2eWebhookSecret, data))
+	} else {
+		req.Header.Set("X-Netsoldier-Actor", e2eActor)
 	}
 
 	resp, err := http.DefaultClient.Do(req)

@@ -52,6 +52,7 @@ func TestDetectionToKillswitchContract(t *testing.T) {
 	ksAddr := freeAddr(t)
 	stopKs := startProc(t, ksBin, map[string]string{
 		"LISTEN_ADDR":             ksAddr,
+		"KILLSWITCH_DB_PATH":      ksDBPath(t),
 		"ADGUARD_URL":             ag.url,
 		"ADGUARD_USER":            "admin",
 		"ADGUARD_PASSWORD":        "test",
@@ -125,6 +126,7 @@ func TestKillswitchRejectsUnauthenticated(t *testing.T) {
 	ksAddr := freeAddr(t)
 	stopKs := startProc(t, ksBin, map[string]string{
 		"LISTEN_ADDR":             ksAddr,
+		"KILLSWITCH_DB_PATH":      ksDBPath(t),
 		"ADGUARD_URL":             ag.url,
 		"ADGUARD_USER":            "admin",
 		"ADGUARD_PASSWORD":        "test",
@@ -213,6 +215,7 @@ func TestEmptyAllowlistDisablesAutoBlock(t *testing.T) {
 	ksAddr := freeAddr(t)
 	stopKs := startProc(t, ksBin, map[string]string{
 		"LISTEN_ADDR":             ksAddr,
+		"KILLSWITCH_DB_PATH":      ksDBPath(t),
 		"ADGUARD_URL":             ag.url,
 		"ADGUARD_USER":            "admin",
 		"ADGUARD_PASSWORD":        "test",
@@ -269,6 +272,7 @@ func TestHeuristicsNeverAutoBlockE2E(t *testing.T) {
 	ksAddr := freeAddr(t)
 	stopKs := startProc(t, ksBin, map[string]string{
 		"LISTEN_ADDR":             ksAddr,
+		"KILLSWITCH_DB_PATH":      ksDBPath(t),
 		"ADGUARD_URL":             ag.url,
 		"ADGUARD_USER":            "admin",
 		"ADGUARD_PASSWORD":        "test",
@@ -369,6 +373,7 @@ func TestAllowlistProtectsGatewayE2E(t *testing.T) {
 	ksAddr := freeAddr(t)
 	stopKs := startProc(t, ksBin, map[string]string{
 		"LISTEN_ADDR":             ksAddr,
+		"KILLSWITCH_DB_PATH":      ksDBPath(t),
 		"ADGUARD_URL":             ag.url,
 		"ADGUARD_USER":            "admin",
 		"ADGUARD_PASSWORD":        "test",

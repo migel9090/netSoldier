@@ -154,7 +154,7 @@ func TestSwitchPortRefusesProtectedTarget(t *testing.T) {
 	d := NewSwitchPortDriver(fs.srv.URL, 0, "s", &g)
 
 	action := &events.EnforcementAction{
-		ID: "ACT-1", TargetMAC: "11:22:33:44:55:66", TargetIP: "192.168.1.1",
+		ID: "ACT-1", TargetMAC: "02:22:33:44:55:66", TargetIP: "192.168.1.1",
 	}
 	if err := d.Apply(context.Background(), action); err == nil {
 		t.Fatal("protected target should be refused")
@@ -170,8 +170,18 @@ func TestSwitchPortReportsFailure(t *testing.T) {
 	d := NewSwitchPortDriver(fs.srv.URL, 0, "s", &TargetGuard{})
 
 	action := &events.EnforcementAction{ID: "ACT-1", TargetMAC: "aa:bb:cc:dd:ee:ff", TargetIP: "192.168.1.50"}
-	if err := d.Apply(context.Background(), action); err == nil {
+	err := d.Apply(context.Background(), action)
+	if err == nil {
 		t.Fatal("a non-2xx webhook response must fail Apply")
+	}
+	// The adapter answered "no": nothing changed, so nothing is undone.
+	if !errors.Is(err, ErrNotApplied) {
+		t.Errorf("a refusal by the adapter is not ambiguous: %v", err)
+	}
+	// No answer at all: the port may have been changed.
+	unreachable := NewSwitchPortDriver("http://127.0.0.1:1", 0, "s", &TargetGuard{})
+	if err := unreachable.Apply(context.Background(), action); err == nil || errors.Is(err, ErrNotApplied) {
+		t.Errorf("a transport error is ambiguous: %v", err)
 	}
 }
 
