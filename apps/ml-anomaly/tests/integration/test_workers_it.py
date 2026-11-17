@@ -364,6 +364,45 @@ def test_unchanged_beacon_over_many_passes_is_emitted_once(tmp_path, admin):
     ]
 
 
+def test_sni_beacons_of_one_device_survive_a_merge(tmp_path, admin):
+    """Two SNI beacons of one device seen in the same second both stay.
+
+    They have no destination address (dst_ip is empty) and share src_ip and
+    timestamp; ml_beacons was keyed on (timestamp, src_ip, dst_ip), so a merge
+    of the ReplacingMergeTree kept one of them. Migration 032 adds dst_domain
+    to the key.
+    """
+    now = int(admin.scalar("SELECT toUnixTimestamp(now())"))
+    seen = now - 600
+    beacons = [
+        {
+            "hash": h,
+            "src": "::ffff:192.168.1.60",
+            "dst": "::",
+            "fqdn": name,
+            "type": "sni",
+            "score": 0.92,
+            "count": 1440,
+            "last_seen": seen,
+        }
+        for h, name in (("EEEEEEEEEEEEEEEE", "a.c2.example"), ("FFFFFFFFFFFFFFFF", "b.c2.example"))
+    ]
+    _rita_import(admin, beacons, analyzed_at=now - 300)
+    _beacon_worker(tmp_path).cycle()
+    key = admin.scalar(
+        "SELECT sorting_key FROM system.tables"
+        " WHERE database = 'netsoldier' AND name = 'ml_beacons'"
+    )
+    assert key == "timestamp, src_ip, dst_ip, dst_domain"
+    admin.run("SYSTEM START MERGES netsoldier.ml_beacons")
+    admin.run("OPTIMIZE TABLE netsoldier.ml_beacons FINAL")
+    rows = [r for r in _beacons(admin) if r["src_ip"] == "192.168.1.60"]
+    assert [(r["dst_domain"], int(r["ts"])) for r in rows] == [
+        ("a.c2.example", seen),
+        ("b.c2.example", seen),
+    ]
+
+
 @dataclasses.dataclass
 class _Row:
     hash: str
