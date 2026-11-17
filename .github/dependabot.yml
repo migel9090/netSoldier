@@ -76,8 +76,9 @@ updates:
   # The golang: tag is one of the places that carry the single project Go
   # version (go.work is the source of truth; every go.mod matches). A PR
   # bumping it must also bump `go` in go.work and every go.mod. Base images
-  # are pinned by digest (tag@sha256); Dependabot moves both. A node:22
-  # bump must also move node-version in the web-ui job of ci.yml.
+  # are pinned by digest (tag@sha256); Dependabot moves both. A node: bump
+  # must also move node-version in the web-ui job of ci.yml, and a python:
+  # bump the python-version of the jobs that test ml-anomaly.
   - package-ecosystem: docker
     directories:
       - /apps/detection-engine
@@ -88,6 +89,7 @@ updates:
       - /apps/ml-anomaly
       - /apps/web-ui
       - /deploy/docker/zeek
+      - /deploy/docker/suricata
     schedule:
       interval: monthly
     cooldown:
