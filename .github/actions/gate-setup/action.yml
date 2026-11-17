@@ -1,0 +1,32 @@
+name: Gate setup
+description: >-
+  Python 3.12, the pinned Task binary on PATH and, unless turned off, the
+  gates' hash-pinned Python tools (task ci:deps): what a developer installs
+  to run the same Taskfile target locally. The pinned tool cache lives in
+  the runner's temp directory (NETSOLDIER_TOOLS).
+
+inputs:
+  python-deps:
+    description: Install scripts/ci/requirements.txt with `task ci:deps`
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: '3.12'
+
+    # Task comes from scripts/ci/tools.sh like every other gate tool: a
+    # pinned release checked against its published SHA-256.
+    - name: Pinned Task
+      shell: bash
+      run: |
+        echo "NETSOLDIER_TOOLS=$RUNNER_TEMP/tools" >>"$GITHUB_ENV"
+        NETSOLDIER_TOOLS=$RUNNER_TEMP/tools scripts/ci/tools.sh install task >>"$GITHUB_PATH"
+
+    - name: Gate Python tools (task ci:deps)
+      if: inputs.python-deps == 'true'
+      shell: bash
+      run: '"$RUNNER_TEMP/tools/bin/task" ci:deps'

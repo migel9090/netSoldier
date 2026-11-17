@@ -1,0 +1,109 @@
+name: Static checks
+
+# Linters for what the other workflows do not read: the workflows
+# themselves, the shell scripts, the lite profile's Quadlet units and the
+# Prometheus alert rules. Each job calls the Taskfile target a developer runs
+# (task lint:actions, lint:shell, lint:quadlet, lint:prometheus), with the
+# tools pinned in scripts/ci/tools.sh.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: static-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Egress: block mode, the endpoints each job needs (GitHub release
+# downloads, PyPI for the hash-pinned PyYAML). quadlet pulls the pinned
+# Podman image from quay.io, whose CDN hosts are not yet confirmed by a run,
+# so it stays in audit mode.
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/gate-setup
+        with:
+          python-deps: 'false'
+
+      - name: actionlint
+        run: task lint:actions
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/gate-setup
+        with:
+          python-deps: 'false'
+
+      - name: ShellCheck
+        run: task lint:shell
+
+  quadlet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/gate-setup
+        with:
+          python-deps: 'false'
+
+      - name: Quadlet dry run (Podman 5.4)
+        run: task lint:quadlet
+
+  promtool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            files.pythonhosted.org:443
+            github.com:443
+            objects.githubusercontent.com:443
+            pypi.org:443
+            release-assets.githubusercontent.com:443
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/gate-setup
+
+      - name: promtool check and test rules
+        run: task lint:prometheus

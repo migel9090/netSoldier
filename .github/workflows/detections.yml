@@ -1,0 +1,64 @@
+name: Detections
+
+# Detection-as-code regression tests (audit CI-5: the corpus replay was
+# documented as a CI gate and run by no workflow). The PCAP corpus is
+# regenerated deterministically, checked against its sha256 pins and
+# replayed through the production Suricata rules and Zeek scripts; each
+# capture must raise the SIDs and Zeek logs detections/pcap-corpus/
+# manifest.yaml expects, and the benign capture must raise nothing.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: detections-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Egress: audit mode. Both jobs pull sensor images from Docker Hub, and the
+# image build fetches Debian packages and a zkg package from GitHub; their
+# CDN hosts are not yet confirmed by a run (see iac-scan.yml).
+
+jobs:
+  # Suricata as the manifests deploy it and the upstream Zeek image the
+  # netSoldier image is built from, both by digest. Same command locally:
+  # task test:corpus.
+  pcap-corpus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/gate-setup
+
+      - name: Replay the corpus (Suricata + Zeek)
+        run: task test:corpus
+
+  # The Zeek image exactly as deploy/docker/zeek builds it (base, zkg
+  # packages, baked-in scripts, file capabilities, non-root user), so a change
+  # to the image is judged by the corpus before anything publishes it. The
+  # JA4 golden test in ci.yml's build-zeek checks fingerprints only. Same
+  # command locally: task test:corpus:zeek-image.
+  pcap-corpus-zeek-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/gate-setup
+
+      - name: Replay the corpus through a fresh build of the Zeek image
+        run: task test:corpus:zeek-image
