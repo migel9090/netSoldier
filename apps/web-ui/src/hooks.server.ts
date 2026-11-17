@@ -23,11 +23,14 @@ import {
  * backend. Sign-in and sign-out are ordinary `+server.ts` endpoints reached
  * through `resolve()`: SvelteKit only writes cookies set via `event.cookies`
  * onto responses that come out of `resolve()`, and answering /api/login from
- * the hook directly is why no browser could ever sign in.
+ * the hook directly is why no browser could ever sign in. GET /api/status is
+ * one too (after the session check): it composes the services' own health
+ * on the server and is not a proxy route.
  */
 
 const SAFE_METHODS = new Set(['GET', 'HEAD'])
 const PUBLIC_PAGES = new Set(['/login'])
+const STATUS_PATH = '/api/status'
 
 /** Upstream request bodies are small JSON documents; anything larger is refused. */
 const MAX_PROXY_BODY_BYTES = 64 * 1024
@@ -38,7 +41,9 @@ export const init: ServerInit = async () => {
     log('INFO', 'web-ui configured', {
       origin: result.config.origin,
       secure_cookies: result.config.secureCookies,
+      threat_intel: result.config.threatIntel ? 'configured' : 'not configured',
     })
+    for (const note of result.config.notes) log('WARN', 'optional setting ignored', { note })
   } else {
     log('ERROR', 'web-ui is not configured; every request will get 503', {
       problems: result.problems,
@@ -100,6 +105,13 @@ async function route(event: RequestEvent, resolve: Parameters<Handle>[0]['resolv
     if (!session) return json({ error: 'not signed in', reason: 'session' }, 401)
     if (mutating && !csrfOk(config.sessionSecret, session, csrfHeader(event))) {
       return json({ error: 'csrf check failed' }, 403)
+    }
+    // Composed here from the services' probes and metrics, not proxied:
+    // an endpoint of the UI's own (routes/api/status/+server.ts), GET only.
+    if (pathname === STATUS_PATH) {
+      return method === 'GET' || method === 'HEAD'
+        ? resolve(event)
+        : json({ error: 'method not allowed' }, 405)
     }
     return proxy(event, session, config)
   }

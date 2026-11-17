@@ -23,6 +23,16 @@ export interface Upstream {
   keyVar: string
 }
 
+/**
+ * A service the UI reads for the system-status page only, never through
+ * the proxy, and can run without: threat-intel-sync (no API key; it serves
+ * only probes, metrics and its public feed exports).
+ */
+export interface OptionalUpstream {
+  url: string
+  urlVar: string
+}
+
 export interface Config {
   sessionSecret: string
   password: string
@@ -31,7 +41,17 @@ export interface Config {
   /** Cookies carry `Secure` exactly when the UI is served over https. */
   secureCookies: boolean
   upstreams: Record<Service, Upstream>
+  /** THREAT_INTEL_URL; null when it is not set (or not usable, see `notes`). */
+  threatIntel: OptionalUpstream | null
+  /**
+   * Problems with optional settings. They never make the UI unconfigured —
+   * the approval pages do not depend on them — but the status page and the
+   * start-up log name them.
+   */
+  notes: string[]
 }
+
+export const THREAT_INTEL_URL_VAR = 'THREAT_INTEL_URL'
 
 export type ConfigResult = { ok: true; config: Config } | { ok: false; problems: string[] }
 
@@ -99,6 +119,17 @@ export function readConfig(source: Record<string, string | undefined> = env): Co
     upstreams[service] = { url: url.replace(/\/+$/, ''), key, ...vars }
   }
 
+  const notes: string[] = []
+  let threatIntel: OptionalUpstream | null = null
+  const tiUrl = (source[THREAT_INTEL_URL_VAR] ?? '').trim()
+  if (tiUrl && !isHttpUrl(tiUrl)) {
+    notes.push(
+      `${THREAT_INTEL_URL_VAR} must be an http:// or https:// URL; threat-intel-sync is not read`,
+    )
+  } else if (tiUrl) {
+    threatIntel = { url: tiUrl.replace(/\/+$/, ''), urlVar: THREAT_INTEL_URL_VAR }
+  }
+
   if (problems.length > 0) return { ok: false, problems }
   return {
     ok: true,
@@ -108,6 +139,8 @@ export function readConfig(source: Record<string, string | undefined> = env): Co
       origin: origin!,
       secureCookies: origin!.startsWith('https:'),
       upstreams,
+      threatIntel,
+      notes,
     },
   }
 }

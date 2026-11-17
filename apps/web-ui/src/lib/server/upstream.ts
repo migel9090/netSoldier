@@ -128,6 +128,14 @@ export const ROUTES: Route[] = [
     pattern: /^\/api\/killswitch\/policy$/,
     upstream: () => '/policy',
   },
+  // The devices the controller must never act against (the operator's
+  // list; the infrastructure it protects on its own is not listed there).
+  {
+    service: 'killswitch',
+    method: 'GET',
+    pattern: /^\/api\/killswitch\/allowlist$/,
+    upstream: () => '/allowlist',
+  },
   {
     service: 'killswitch',
     method: 'GET',

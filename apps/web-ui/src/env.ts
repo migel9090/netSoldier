@@ -38,6 +38,11 @@ export const variables = defineEnvVars({
   DEVICE_API_KEY: { schema: asIs, description: 'The device-inventory API key.' },
   DETECTION_ENGINE_URL: { schema: asIs, description: 'Base URL of the detection-engine API.' },
   DETECTION_API_KEY: { schema: asIs, description: 'The detection-engine API key.' },
+  THREAT_INTEL_URL: {
+    schema: asIs,
+    description:
+      'Optional. Base URL of threat-intel-sync, read for the system status page (feeds, last sync).',
+  },
   METRICS_ADDR: {
     schema: asIs,
     description: 'host:port of the separate /metrics listener, or "off" (default 0.0.0.0:9464).',
