@@ -292,6 +292,44 @@ func TestQueryLogDenseBoundaryReadsDeeper(t *testing.T) {
 	}
 }
 
+// TestQueryLogEntriesReachOnQuery: every entry checked is handed on once,
+// with what dns_queries stores of it, the indicator it matched named.
+func TestQueryLogEntriesReachOnQuery(t *testing.T) {
+	f := &agQueryLog{}
+	ipIoC := iocmatch.IoC{Value: "203.0.113.7", Type: "ip", Source: "feodo", Confidence: 90, Threat: "Dridex"}
+	e, _ := newPagedEngine(t, f, c2, ipIoC)
+	var got []Query
+	e.OnQuery = func(q Query) { got = append(got, q) }
+	now := time.Now().Add(-time.Second)
+	f.add("C2.evil-ioc.com.", "192.168.1.66", now.Add(-2*time.Second))
+	f.add("cdn.example.net", "192.168.1.67", now.Add(-time.Second), "203.0.113.7")
+	f.add("www.example.org", "192.168.1.68", now, "93.184.216.34")
+	f.mu.Lock()
+	f.entries[2]["status"], f.entries[2]["elapsedMs"], f.entries[2]["reason"] = "NOERROR", "12.75", "NotFilteredNotFound"
+	f.mu.Unlock()
+	e.poll(context.Background())
+	e.poll(context.Background())
+	if len(got) != 3 {
+		t.Fatalf("OnQuery got %d entries over two polls, want each of the 3 once", len(got))
+	}
+	byDomain := map[string]Query{}
+	for _, q := range got {
+		byDomain[q.Domain] = q
+	}
+	if q := byDomain["c2.evil-ioc.com"]; q.ThreatSource != "threatfox" || q.Client != "192.168.1.66" {
+		t.Errorf("name match: %+v", q)
+	}
+	if q := byDomain["cdn.example.net"]; q.ThreatSource != "feodo" || q.ThreatName != "Dridex" {
+		t.Errorf("answer match: %+v", q)
+	}
+	q := byDomain["www.example.org"]
+	if q.ThreatSource != "" || q.Status != "NOERROR" || q.Reason != "NotFilteredNotFound" ||
+		q.Elapsed != 12750*time.Microsecond || len(q.Answers) != 1 || q.Answers[0] != "93.184.216.34" ||
+		q.QueryType != "A" {
+		t.Errorf("plain entry: %+v", q)
+	}
+}
+
 // TestQueryLogResumesAfterRestart: the position used to start at "now" in
 // memory, so a lookup logged while the pod was down was never checked. A new
 // engine on the same store resumes where the old one stopped; the overlap it

@@ -307,6 +307,10 @@ type Engine struct {
 	// OnDNSAnswer receives every A/AAAA answer a client got, for the TLS
 	// heuristics' per-client resolution cache.
 	OnDNSAnswer func(client, ip, domain string, ttl int)
+	// OnQuery receives every querylog entry once it has been checked (the
+	// DNS query log copy in ClickHouse). It must not block: it runs on the
+	// poller.
+	OnQuery func(Query)
 
 	// ResolveClient maps a client IP to its MAC and friendly name. The
 	// killswitch allowlist checks MAC first and home DHCP leases move, so a
@@ -498,6 +502,28 @@ func (e *Engine) poll(ctx context.Context) {
 	e.forget()
 }
 
+// Query is one querylog entry as the engine checked it, for OnQuery.
+type Query struct {
+	// Time is when the query arrived (AdGuard's stamp).
+	Time time.Time
+	// Client is the address that asked, canonical where it parses.
+	Client string
+	// Domain is the queried name, lower case, without the trailing dot.
+	Domain    string
+	QueryType string
+	// Answers are the values of the answer records, in AdGuard's order.
+	Answers []string
+	// Status is the response code, Reason AdGuard's filtering verdict.
+	Status string
+	Reason string
+	// Elapsed is how long the answer took; 0 when AdGuard did not say.
+	Elapsed time.Duration
+	// ThreatSource and ThreatName name the indicator the query matched
+	// (the name, or one of its answers), "" when it matched none.
+	ThreatSource string
+	ThreatName   string
+}
+
 // check matches one querylog entry against the indicators.
 func (e *Engine) check(entry adguard.QueryLogEntry, key string) {
 	queriesChecked.Inc()
@@ -511,17 +537,54 @@ func (e *Engine) check(entry adguard.QueryLogEntry, key string) {
 		}
 	}
 
+	var hit *iocmatch.IoC
 	if ioc, ok := e.matcher.MatchDomain(domain); ok {
+		hit = &ioc
 		e.emitAlert(entry, key, domain, "", ioc)
 	}
 
 	for _, ans := range entry.Answer {
 		if ans.Type == "A" || ans.Type == "AAAA" {
 			if ioc, ok := e.matcher.MatchIP(ans.Value); ok {
+				if hit == nil {
+					hit = &ioc
+				}
 				e.emitAlert(entry, key, domain, ans.Value, ioc)
 			}
 		}
 	}
+
+	if e.OnQuery != nil {
+		e.OnQuery(queryOf(entry, domain, hit))
+	}
+}
+
+func queryOf(entry adguard.QueryLogEntry, domain string, hit *iocmatch.IoC) Query {
+	q := Query{
+		Time:      entry.Time,
+		Client:    canonicalOrRaw(entry.Client),
+		Domain:    domain,
+		QueryType: entry.Question.Type,
+		Status:    entry.Status,
+		Reason:    entry.Reason,
+	}
+	if ms, err := strconv.ParseFloat(entry.ElapsedMs, 64); err == nil && ms > 0 {
+		// An hour bounds any real answer and keeps the conversion in range.
+		q.Elapsed = time.Duration(min(ms, 3.6e6) * float64(time.Millisecond))
+	}
+	if len(entry.Answer) > 0 {
+		q.Answers = make([]string, 0, len(entry.Answer))
+		for _, a := range entry.Answer {
+			q.Answers = append(q.Answers, a.Value)
+		}
+	}
+	if hit != nil {
+		q.ThreatSource, q.ThreatName = hit.Source, hit.Threat
+		if q.ThreatSource == "" {
+			q.ThreatSource = "local"
+		}
+	}
+	return q
 }
 
 // entryKey identifies one querylog entry. AdGuard stamps entries with

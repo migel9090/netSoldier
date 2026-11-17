@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/adguard"
+	"github.com/migel9090/netSoldier/apps/detection-engine/internal/chexport"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/clickhouse"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/composite"
 	"github.com/migel9090/netSoldier/apps/detection-engine/internal/detection"
@@ -117,6 +118,10 @@ func run(ctx context.Context, getenv func(string) string, onListen func(addr str
 	agClient, err := adguardFromEnv(getenv)
 	if err != nil {
 		return err
+	}
+	dnsExport, err := parseSwitch(getenv("DNS_QUERY_EXPORT"), true)
+	if err != nil {
+		return fmt.Errorf("refusing to start: DNS_QUERY_EXPORT %w", err)
 	}
 
 	matcher := iocmatch.New()
@@ -260,6 +265,35 @@ func run(ctx context.Context, getenv func(string) string, onListen func(addr str
 	}
 	engine.OnAlert = pipe.Handle
 
+	// ClickHouse copies for the dashboards and the device pages (step
+	// 125.10): the alert history, and the query log the engine checks. Both
+	// run beside detection, never in its way, and neither exists without
+	// ClickHouse (the lite profile). The query-log copy stops only after the
+	// poller has, so it writes what the last poll read.
+	exportCtx, stopExport := context.WithCancel(context.Background())
+	defer stopExport()
+	var exporters sync.WaitGroup
+	goExport := func(f func()) {
+		exporters.Add(1)
+		go func() { defer exporters.Done(); f() }()
+	}
+	if ch != nil {
+		copier := chexport.NewAlertCopier(alerts, cursors, ch)
+		goExport(func() { copier.Run(ctx) })
+		switch {
+		case !dnsExport:
+			slog.Info("DNS query log is not copied to ClickHouse (DNS_QUERY_EXPORT=off)")
+		case agClient == nil:
+			// Nothing to copy; adguardFromEnv has said why.
+		default:
+			dnsLog := chexport.NewDNSLog(ch, parseInt(env("DNS_QUERY_EXPORT_QUEUE", ""), chexport.DefaultDNSQueue))
+			engine.OnQuery = dnsLog.Add
+			goExport(func() { dnsLog.Run(exportCtx) })
+			slog.Info("DNS query log copied to ClickHouse: every lookup of every device, kept 30 days "+
+				"(migration 031); DNS_QUERY_EXPORT=off stops it", "table", chexport.DNSQueriesTable)
+		}
+	}
+
 	// The engine also routes sensor detections (Ingest), so it exists either
 	// way; only its query-log poller needs AdGuard.
 	if agClient != nil {
@@ -362,6 +396,11 @@ func run(ctx context.Context, getenv func(string) string, onListen func(addr str
 		slog.Warn("pollers did not stop in time; a detection they make after the store closes is lost",
 			"waited", producerStop)
 	}
+	// The copies: the alert copier has stopped on ctx (what it has not
+	// copied, it copies after the next start); the query-log writer now
+	// writes what is queued.
+	stopExport()
+	exporters.Wait()
 	<-maintained
 	// The forwarder stops on ctx; what it has not copied stays in the
 	// journal for the next start.
@@ -558,6 +597,20 @@ func parseDuration(s string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// parseSwitch reads an on/off setting; empty means fallback. Anything else
+// is an error rather than a guess: these switches decide what is stored.
+func parseSwitch(s string, fallback bool) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "":
+		return fallback, nil
+	case "on", "true", "1", "yes":
+		return true, nil
+	case "off", "false", "0", "no":
+		return false, nil
+	}
+	return false, fmt.Errorf("must be on or off, not %q", s)
 }
 
 // parseInt reads a positive integer setting.

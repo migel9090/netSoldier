@@ -793,3 +793,108 @@ func sample(r io.Reader, series string) float64 {
 	}
 	return 0
 }
+
+// fakeClickHouse answers the HTTP interface the way the service uses it:
+// every SELECT returns no rows, every INSERT is recorded by table.
+type fakeClickHouse struct {
+	url  string
+	mu   sync.Mutex
+	rows map[string][]map[string]any
+}
+
+func startFakeClickHouse(t *testing.T) *fakeClickHouse {
+	f := &fakeClickHouse{rows: map[string][]map[string]any{}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("query")
+		if table, ok := strings.CutPrefix(q, "INSERT INTO "); ok {
+			table = strings.Fields(table)[0]
+			sc := bufio.NewScanner(r.Body)
+			for sc.Scan() {
+				var row map[string]any
+				if err := json.Unmarshal(sc.Bytes(), &row); err != nil {
+					http.Error(w, "bad row", http.StatusBadRequest)
+					return
+				}
+				f.mu.Lock()
+				f.rows[table] = append(f.rows[table], row)
+				f.mu.Unlock()
+			}
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	f.url = srv.URL
+	return f
+}
+
+func (f *fakeClickHouse) table(name string) []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]any(nil), f.rows[name]...)
+}
+
+// TestRunCopiesAlertsAndQueryLogToClickHouse is DP-11 at the wiring level:
+// the alerts table and dns_queries had no writer, so the device pages and
+// the DNS and alert dashboards were empty. With ClickHouse configured, every
+// alert in the local history is copied to alerts, and every query-log entry
+// the engine checked to dns_queries — including what was still queued when
+// the service stopped.
+func TestRunCopiesAlertsAndQueryLogToClickHouse(t *testing.T) {
+	ch := startFakeClickHouse(t)
+	env := baseEnv(t, startQuerylog(t, "192.168.1.42"), startReceiver(t),
+		startInventory(t, "192.168.1.42", "aa:bb:cc:00:00:42", "laptop").url, filepath.Join(t.TempDir(), "de.db"))
+	env["CLICKHOUSE_URL"] = ch.url
+	env["CLICKHOUSE_USER"] = "detection"
+	addr, stop := start(t, env)
+
+	waitFor(t, "an alert in ClickHouse", func() bool { return len(ch.table("alerts")) > 0 })
+	local := getAlerts(t, addr)
+	row := ch.table("alerts")[0]
+	if len(local) == 0 || row["id"] != local[0].ID || row["summary"] != local[0].Summary ||
+		row["client_mac"] != "aa:bb:cc:00:00:42" || row["target_type"] != "domain" ||
+		row["target_value"] != "evil.example.com" || row["signal_class"] != "ioc" {
+		t.Errorf("ClickHouse alert row %v does not carry the local alert %+v", row, local)
+	}
+	if err := stop(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	dns := ch.table("dns_queries")
+	if len(dns) == 0 {
+		t.Fatal("no query-log row reached dns_queries")
+	}
+	if d := dns[0]; d["domain"] != "evil.example.com" || d["client_ip"] != "192.168.1.42" ||
+		d["query_type"] != "A" || d["threat_source"] == "" {
+		t.Errorf("dns_queries row %v", d)
+	}
+	if n := len(ch.table("alerts")); n != len(local) {
+		t.Errorf("%d alerts in ClickHouse, %d in the local history", n, len(local))
+	}
+}
+
+// TestRunDNSQueryExportOff: the query log is every lookup of every device;
+// DNS_QUERY_EXPORT=off keeps it out of ClickHouse while alerts still go
+// there, and a value that is neither on nor off refuses the start.
+func TestRunDNSQueryExportOff(t *testing.T) {
+	ch := startFakeClickHouse(t)
+	env := baseEnv(t, startQuerylog(t, "192.168.1.42"), startReceiver(t),
+		startInventory(t, "192.168.1.42", "aa:bb:cc:00:00:42", "laptop").url, filepath.Join(t.TempDir(), "de.db"))
+	env["CLICKHOUSE_URL"] = ch.url
+	env["DNS_QUERY_EXPORT"] = "off"
+	_, stop := start(t, env)
+	waitFor(t, "an alert in ClickHouse", func() bool { return len(ch.table("alerts")) > 0 })
+	if err := stop(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if n := len(ch.table("dns_queries")); n != 0 {
+		t.Errorf("%d query-log rows written with DNS_QUERY_EXPORT=off", n)
+	}
+
+	env["DNS_QUERY_EXPORT"] = "sometimes"
+	err := run(context.Background(), func(k string) string { return env[k] }, func(string) {
+		t.Error("the service started with DNS_QUERY_EXPORT=sometimes")
+	})
+	if err == nil || !strings.Contains(err.Error(), "DNS_QUERY_EXPORT") {
+		t.Fatalf("run = %v, want a start-up error naming DNS_QUERY_EXPORT", err)
+	}
+}

@@ -26,7 +26,15 @@ type QueryLogEntry struct {
 	} `json:"answer"`
 	Client string    `json:"client"`
 	Time   time.Time `json:"time"`
-	Reason string    `json:"reason"`
+	// Reason is AdGuard's filtering verdict (NotFilteredNotFound,
+	// FilteredBlackList, Rewrite, ...).
+	Reason string `json:"reason"`
+	// Status is the response code (NOERROR, NXDOMAIN, ...); absent when
+	// AdGuard kept no answer.
+	Status string `json:"status"`
+	// ElapsedMs is how long the answer took, in milliseconds, as AdGuard
+	// sends it: a decimal string.
+	ElapsedMs string `json:"elapsedMs"`
 }
 
 type queryLogResponse struct {
