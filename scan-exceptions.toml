@@ -431,7 +431,7 @@ tool = "hadolint"
 rule = "DL3018"
 files = ["apps/netagent/Dockerfile"]
 until = 2027-05-15
-reason = """The setcap stage installs libcap from Alpine 3.22 only to write the
+reason = """The setcap stage installs libcap from Alpine 3.24 only to write the
 file capability onto the netagent binary; nothing from that stage ships but
 the binary. Alpine drops superseded package versions from its mirrors, so an
 exact pin would break the build at the next security update; the stage's
