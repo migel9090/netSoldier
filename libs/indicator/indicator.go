@@ -12,6 +12,10 @@
 // Everything here is an allow-list: a value is accepted only if it has the
 // exact shape of its type, and then returned in one canonical spelling so
 // both sides key their maps identically.
+//
+// Whether a well-formed indicator may be acted on is a second question,
+// answered by NeverBlock / CheckBlockable (neverblock.go): popular and
+// shared hosts and public resolvers must never become an automatic block.
 package indicator
 
 import (

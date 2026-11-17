@@ -1,0 +1,476 @@
+# netSoldier never-block list
+#
+# Hosts that a threat feed must never turn into an automatic block: blocking
+# one would break a household's everyday use of the internet, or every
+# unrelated tenant of a shared host, because one feed row said so.
+# threat-intel-sync drops a feed indicator that names one of them, and
+# libs/indicator exposes the same check (NeverBlock, CheckBlockable) to every
+# other service that blocks. A URL indicator on one of these hosts is not
+# affected: a URL names one resource, not the host.
+#
+# Format: "<reason> <scope> <value>", one entry per line.
+#   reason  popular | cdn | shared_hosting | dynamic_dns | public_resolver
+#   scope   tree  the name and every name under it
+#           name  the name itself only; the names under it belong to
+#                 customers (tenants) and stay blockable
+#           addr  an IP address or prefix; an IP indicator equal to it,
+#                 inside it or containing it is refused
+#
+# Provenance
+#
+#   popular — selected by hand from the first 600 rows of the
+#   Majestic Million of 2026-11-17
+#   (https://majestic.com/reports/majestic-million),
+#   (c) Majestic-12 Ltd, licensed under CC BY 3.0
+#   (https://creativecommons.org/licenses/by/3.0/). Changes made: the rows
+#   were reduced to registrable domains with the Public Suffix List, most of
+#   them were left out (criteria below), and hosts the same operators run
+#   for those sites (content and update hosts, connectivity checks) were
+#   added. CC BY permits commercial use and redistribution with attribution.
+#   The other rankings in common use were ruled out by their terms:
+#   Cloudflare Radar (CC BY-NC 4.0, non-commercial), the Cisco Umbrella
+#   popularity list (no licence granted), Tranco (combines both) and Alexa
+#   (discontinued, proprietary).
+#
+#   cdn, shared_hosting, dynamic_dns, public_resolver — first-party, factual
+#   entries compiled from the providers' own documentation. Shared hosts and
+#   dynamic-DNS zones that the Public Suffix List already lists (github.io,
+#   herokuapp.com, duckdns.org, ddns.net, ...) are not repeated: Domain
+#   refuses a public suffix as an indicator outright, and their tenants are
+#   separate registrable names that stay blockable.
+#
+# Criteria for "popular": one large operator that runs every name under the
+# domain (tree), or whose subdomains are its customers' (name: the apex
+# only); a household would notice it blocked; not a link-farm, parking or
+# domain-aftermarket name, not a theme or plugin footer artefact, not a
+# legacy domain whose ownership could lapse. News, government, universities
+# and publishers are left out on purpose: blocking one does not break a
+# household, and a compromised one must stay blockable. Every entry is
+# immunity from automatic blocking, so the list stays small.
+#
+# Refresh (yearly, or when a household reports a false block):
+#   1. curl -r 0-400000 https://downloads.majestic.com/majestic_million.csv
+#      (about the first 5000 rows, header included).
+#   2. Reduce the rows to registrable domains
+#      (golang.org/x/net/publicsuffix.EffectiveTLDPlusOne) and drop public
+#      suffixes and duplicates.
+#   3. Review what entered and what left the first 600 against the criteria
+#      above; prefer "name" whenever subdomains could belong to customers.
+#   4. Update the snapshot date above and NeverBlockSnapshot in
+#      neverblock.go, and run the libs/indicator tests: they check every
+#      entry's shape and scope against the Public Suffix List.
+
+# --- popular: search, mail, portals ---------------------------------------
+popular tree google.com
+popular tree google.de
+popular tree google.co.uk
+popular tree google.fr
+popular tree gmail.com
+popular tree gstatic.com
+popular tree googleusercontent.com
+popular tree googletagmanager.com
+popular tree google-analytics.com
+popular tree googleblog.com
+popular tree blogger.com
+popular tree bp.blogspot.com
+popular tree blog.google
+popular tree safety.google
+popular tree share.google
+popular tree goo.gl
+popular tree g.co
+popular tree g.page
+popular tree forms.gle
+popular name ajax.googleapis.com
+popular name fonts.googleapis.com
+popular name maps.googleapis.com
+popular name www.googleapis.com
+popular name translate.googleapis.com
+popular name play.googleapis.com
+popular name android.googleapis.com
+popular tree android.com
+popular tree bing.com
+popular tree msn.com
+popular tree yahoo.com
+popular tree yahoo.co.jp
+popular tree aol.com
+popular tree baidu.com
+popular tree yandex.ru
+popular tree naver.com
+popular tree 163.com
+popular tree sohu.com
+popular tree sina.com.cn
+
+# --- popular: social, messaging, video, music -----------------------------
+popular tree facebook.com
+popular tree facebook.net
+popular tree fbcdn.net
+popular tree fbsbx.com
+popular tree fb.com
+popular tree fb.me
+popular tree fb.watch
+popular tree m.me
+popular tree messenger.com
+popular tree instagram.com
+popular tree cdninstagram.com
+popular tree whatsapp.com
+popular tree whatsapp.net
+popular tree wa.me
+popular tree threads.net
+popular tree threads.com
+popular tree youtube.com
+popular tree youtu.be
+popular tree youtube-nocookie.com
+popular tree googlevideo.com
+popular tree ytimg.com
+popular tree ggpht.com
+popular tree twitter.com
+popular tree x.com
+popular tree t.co
+popular tree twimg.com
+popular tree linkedin.com
+popular tree licdn.com
+popular tree lnkd.in
+popular tree pinterest.com
+popular tree pinimg.com
+popular tree tiktok.com
+popular tree tiktokcdn.com
+popular tree tiktokv.com
+popular tree douyin.com
+popular tree reddit.com
+popular tree redd.it
+popular tree redditmedia.com
+popular tree redditstatic.com
+popular tree discord.com
+popular tree discord.gg
+popular tree discordapp.com
+popular tree discordapp.net
+popular tree telegram.org
+popular tree telegram.me
+popular tree t.me
+popular tree snapchat.com
+popular tree skype.com
+popular tree line.me
+popular tree bsky.app
+popular tree vk.com
+popular tree vk.ru
+popular tree ok.ru
+popular tree qq.com
+popular tree weibo.com
+popular tree zhihu.com
+popular tree bilibili.com
+popular tree youku.com
+popular tree vimeo.com
+popular tree vimeocdn.com
+popular tree twitch.tv
+popular tree ttvnw.net
+popular tree jtvnw.net
+popular tree netflix.com
+popular tree nflxvideo.net
+popular tree nflximg.net
+popular tree nflxext.com
+popular tree nflxso.net
+popular tree spotify.com
+popular tree scdn.co
+popular tree spotifycdn.com
+popular tree soundcloud.com
+popular tree dailymotion.com
+popular tree imdb.com
+popular tree imgur.com
+popular tree giphy.com
+popular tree flickr.com
+popular tree gravatar.com
+popular tree patreon.com
+popular name tumblr.com
+popular name medium.com
+popular name substack.com
+popular name zoom.us
+popular tree zoom.com
+popular name slack.com
+
+# --- popular: devices, operating systems, software -------------------------
+popular tree apple.com
+popular tree icloud.com
+popular tree mzstatic.com
+popular tree aaplimg.com
+popular tree cdn-apple.com
+popular tree microsoft.com
+popular tree cloud.microsoft
+popular tree windows.com
+popular tree windowsupdate.com
+popular tree msftconnecttest.com
+popular tree msftncsi.com
+popular tree msedge.net
+popular tree live.com
+popular tree live.net
+popular tree outlook.com
+popular tree office.com
+popular tree office.net
+popular tree microsoftonline.com
+popular tree sfx.ms
+popular tree 1drv.ms
+popular tree xboxlive.com
+popular tree visualstudio.com
+popular name sharepoint.com
+popular tree samsung.com
+popular tree huawei.com
+popular tree hp.com
+popular tree dell.com
+popular tree intel.com
+popular tree nvidia.com
+popular tree adobe.com
+popular tree oracle.com
+popular tree mozilla.org
+popular tree firefox.com
+popular tree opera.com
+popular tree ubuntu.com
+popular tree debian.org
+popular tree fedoraproject.org
+popular tree redhat.com
+popular tree kernel.org
+popular tree launchpad.net
+popular tree python.org
+popular tree npmjs.com
+popular tree nodejs.org
+popular tree docker.com
+popular tree github.com
+popular tree githubassets.com
+popular tree gitlab.com
+popular tree sourceforge.net
+popular tree apache.org
+popular tree nginx.org
+popular tree w3.org
+popular tree wordpress.org
+popular tree wp.com
+popular name wordpress.com
+popular tree steampowered.com
+popular tree steamcommunity.com
+popular tree steamstatic.com
+popular tree steamcontent.com
+popular tree letsencrypt.org
+popular tree lencr.org
+popular tree digicert.com
+popular tree sectigo.com
+popular tree pki.goog
+popular tree ntp.org
+
+# --- popular: reference, shopping, payments, storage -----------------------
+popular tree wikipedia.org
+popular tree wikimedia.org
+popular tree wiktionary.org
+popular tree archive.org
+popular tree stackoverflow.com
+popular tree stackexchange.com
+popular tree amazon.com
+popular tree amazon.de
+popular tree amazon.co.uk
+popular tree amazon.co.jp
+popular tree amzn.to
+popular tree media-amazon.com
+popular tree ssl-images-amazon.com
+popular tree primevideo.com
+popular tree ebay.com
+popular tree etsy.com
+popular tree aliexpress.com
+popular tree alibaba.com
+popular tree taobao.com
+popular tree jd.com
+popular tree walmart.com
+popular tree ikea.com
+popular tree booking.com
+popular tree airbnb.com
+popular tree paypal.com
+popular tree stripe.com
+popular tree shopify.com
+popular tree canva.com
+popular tree dropbox.com
+popular tree dropboxstatic.com
+popular tree cloudflare.com
+popular tree atlassian.com
+popular tree bit.ly
+popular tree tinyurl.com
+popular tree linktr.ee
+
+# --- cdn: shared edge namespaces of enterprise CDNs ------------------------
+# The Akamai namespaces are shared edge infrastructure that only vetted
+# enterprise customers use, so the whole tree is protected, including the
+# ones the Public Suffix List lists. Self-service CDNs (CloudFront, Azure
+# Front Door, Bunny, CDN77, Fastly customers) are tenants and stay
+# blockable; only the bare apex is protected.
+cdn tree akamai.net
+cdn tree akamaiedge.net
+cdn tree akamaihd.net
+cdn tree akamaized.net
+cdn tree edgekey.net
+cdn tree edgesuite.net
+cdn tree akamaitechnologies.com
+cdn tree jsdelivr.net
+cdn tree unpkg.com
+cdn tree jquery.com
+cdn tree bootstrapcdn.com
+cdn name fastly.net
+cdn name b-cdn.net
+cdn name cdn77.org
+
+# --- shared_hosting: user content behind one operator's names -------------
+# GitHub's content hosts sit under githubusercontent.com, a public suffix,
+# so each of them is a separate registrable name that Domain accepts; a
+# feed that extracts the host of a malicious raw URL would otherwise block
+# raw.githubusercontent.com for everyone. Likewise Google's storage hosts
+# under googleapis.com (customer buckets below them stay blockable).
+shared_hosting tree raw.githubusercontent.com
+shared_hosting tree objects.githubusercontent.com
+shared_hosting tree avatars.githubusercontent.com
+shared_hosting tree user-images.githubusercontent.com
+shared_hosting tree private-user-images.githubusercontent.com
+shared_hosting tree release-assets.githubusercontent.com
+shared_hosting tree gist.githubusercontent.com
+shared_hosting tree camo.githubusercontent.com
+shared_hosting tree media.githubusercontent.com
+shared_hosting name storage.googleapis.com
+shared_hosting name firebasestorage.googleapis.com
+shared_hosting tree dropboxusercontent.com
+shared_hosting tree pastebin.com
+shared_hosting tree mediafire.com
+shared_hosting tree mega.nz
+shared_hosting tree mega.io
+shared_hosting tree telegra.ph
+shared_hosting tree bitbucket.org
+shared_hosting tree ipfs.io
+shared_hosting tree we.tl
+shared_hosting name wetransfer.com
+shared_hosting name box.com
+
+# --- shared_hosting: apexes whose subdomains are customer sites ------------
+# Not in the Public Suffix List, so Domain accepts the apex itself; a rule
+# for the apex would block every customer site. The customers' own names
+# stay blockable.
+shared_hosting name 000webhostapp.com
+shared_hosting name weebly.com
+shared_hosting name weeblysite.com
+shared_hosting name wix.com
+shared_hosting name squarespace.com
+shared_hosting name jimdofree.com
+shared_hosting name jimdosite.com
+shared_hosting name strikingly.com
+shared_hosting name mystrikingly.com
+shared_hosting name godaddysites.com
+shared_hosting name site123.me
+shared_hosting name tilda.ws
+shared_hosting name ucoz.ru
+shared_hosting name narod.ru
+shared_hosting name neocities.org
+shared_hosting name surge.sh
+shared_hosting name railway.app
+shared_hosting name zendesk.com
+shared_hosting name atlassian.net
+shared_hosting name typeform.com
+shared_hosting name dweb.link
+shared_hosting name w3s.link
+shared_hosting name nftstorage.link
+shared_hosting name mypinata.cloud
+shared_hosting name infura-ipfs.io
+shared_hosting name loca.lt
+shared_hosting name localtunnel.me
+shared_hosting name pagekite.me
+
+# --- dynamic_dns: provider zones the Public Suffix List does not list ------
+dynamic_dns name no-ip.com
+dynamic_dns name noip.com
+dynamic_dns name dynu.com
+dynamic_dns name afraid.org
+dynamic_dns name mooo.com
+dynamic_dns name chickenkiller.com
+dynamic_dns name dyndns.com
+dynamic_dns name ydns.eu
+dynamic_dns name now-dns.com
+dynamic_dns name changeip.com
+dynamic_dns name linkpc.net
+dynamic_dns name publicvm.com
+
+# --- public_resolver: names -------------------------------------------------
+public_resolver tree dns.google
+public_resolver tree cloudflare-dns.com
+public_resolver tree one.one.one.one
+public_resolver tree quad9.net
+public_resolver tree opendns.com
+public_resolver tree adguard-dns.com
+public_resolver tree cleanbrowsing.org
+public_resolver tree controld.com
+public_resolver tree nextdns.io
+
+# --- public_resolver: addresses ---------------------------------------------
+# Many devices hard-code one of these (a smart TV that ignores DHCP-assigned
+# DNS, for one); a feed that lists one as "C2" because malware used it for a
+# connectivity check would cut those devices off.
+# Google Public DNS
+public_resolver addr 8.8.8.8
+public_resolver addr 8.8.4.4
+public_resolver addr 2001:4860:4860::8888
+public_resolver addr 2001:4860:4860::8844
+public_resolver addr 2001:4860:4860::64
+public_resolver addr 2001:4860:4860::6464
+# Cloudflare (standard, malware, family)
+public_resolver addr 1.1.1.1
+public_resolver addr 1.0.0.1
+public_resolver addr 1.1.1.2
+public_resolver addr 1.0.0.2
+public_resolver addr 1.1.1.3
+public_resolver addr 1.0.0.3
+public_resolver addr 2606:4700:4700::1111
+public_resolver addr 2606:4700:4700::1001
+public_resolver addr 2606:4700:4700::1112
+public_resolver addr 2606:4700:4700::1002
+public_resolver addr 2606:4700:4700::1113
+public_resolver addr 2606:4700:4700::1003
+# Quad9 (standard, unsecured, ECS)
+public_resolver addr 9.9.9.9
+public_resolver addr 149.112.112.112
+public_resolver addr 9.9.9.10
+public_resolver addr 149.112.112.10
+public_resolver addr 9.9.9.11
+public_resolver addr 149.112.112.11
+public_resolver addr 2620:fe::fe
+public_resolver addr 2620:fe::9
+public_resolver addr 2620:fe::10
+public_resolver addr 2620:fe::fe:10
+public_resolver addr 2620:fe::11
+public_resolver addr 2620:fe::fe:11
+# OpenDNS (standard, FamilyShield)
+public_resolver addr 208.67.222.222
+public_resolver addr 208.67.220.220
+public_resolver addr 208.67.222.123
+public_resolver addr 208.67.220.123
+public_resolver addr 2620:119:35::35
+public_resolver addr 2620:119:53::53
+# AdGuard DNS (default, unfiltered, family)
+public_resolver addr 94.140.14.14
+public_resolver addr 94.140.15.15
+public_resolver addr 94.140.14.140
+public_resolver addr 94.140.14.141
+public_resolver addr 94.140.14.15
+public_resolver addr 94.140.15.16
+public_resolver addr 2a10:50c0::ad1:ff
+public_resolver addr 2a10:50c0::ad2:ff
+public_resolver addr 2a10:50c0::1:ff
+public_resolver addr 2a10:50c0::2:ff
+public_resolver addr 2a10:50c0::bad1:ff
+public_resolver addr 2a10:50c0::bad2:ff
+# CleanBrowsing (security, adult, family)
+public_resolver addr 185.228.168.9
+public_resolver addr 185.228.169.9
+public_resolver addr 185.228.168.10
+public_resolver addr 185.228.169.11
+public_resolver addr 185.228.168.168
+public_resolver addr 185.228.169.168
+public_resolver addr 2a0d:2a00:1::2
+public_resolver addr 2a0d:2a00:2::2
+public_resolver addr 2a0d:2a00:1::1
+public_resolver addr 2a0d:2a00:2::1
+public_resolver addr 2a0d:2a00:1::
+public_resolver addr 2a0d:2a00:2::
+# Control D (unfiltered, malware)
+public_resolver addr 76.76.2.0
+public_resolver addr 76.76.10.0
+public_resolver addr 76.76.2.1
+public_resolver addr 2606:1a40::
+public_resolver addr 2606:1a40:1::
