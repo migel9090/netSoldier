@@ -39,12 +39,14 @@ type Client struct {
 }
 
 // NewClient creates a MISP REST client. The apiKey is sent as the
-// Authorization header on every request.
+// Authorization header on every request. The client is pinned to the origin
+// of baseURL: MISP answering with a redirect to another host (or from https
+// to http) is a failed fetch, not a new place to send the key.
 func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		apiKey:   apiKey,
-		http:     &http.Client{Timeout: 30 * time.Second},
+		http:     feedhttp.NewClient("misp", 30*time.Second),
 		maxBytes: feedhttp.DefaultMaxBodyBytes,
 		maxPages: DefaultMaxPages,
 		pageSize: DefaultPageSize,

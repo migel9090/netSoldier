@@ -27,10 +27,21 @@ type ThreatFoxClient struct {
 	opts   options
 }
 
+// The pinned endpoints of the abuse.ch feeds. feedhttp.NewClient refuses any
+// redirect off the host, so the Auth-Key never reaches another one.
+const (
+	ThreatFoxHost = "threatfox-api.abuse.ch"
+	ThreatFoxURL  = "https://" + ThreatFoxHost + "/api/v1/"
+	URLhausHost   = "urlhaus-api.abuse.ch"
+	URLhausURL    = "https://" + URLhausHost + "/v1/urls/recent/"
+	FeodoHost     = "feodotracker.abuse.ch"
+	FeodoURL      = "https://" + FeodoHost + "/downloads/ipblocklist.csv"
+)
+
 func NewThreatFoxClient(opts ...Option) *ThreatFoxClient {
 	return &ThreatFoxClient{
-		apiURL: "https://threatfox-api.abuse.ch/api/v1/",
-		http:   &http.Client{Timeout: 60 * time.Second},
+		apiURL: ThreatFoxURL,
+		http:   feedhttp.NewClient("threatfox", 60*time.Second),
 		opts:   buildOptions(opts),
 	}
 }

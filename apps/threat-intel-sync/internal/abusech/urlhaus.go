@@ -29,8 +29,8 @@ type URLhausClient struct {
 
 func NewURLhausClient(opts ...Option) *URLhausClient {
 	return &URLhausClient{
-		apiURL: "https://urlhaus-api.abuse.ch/v1/urls/recent/",
-		http:   &http.Client{Timeout: 60 * time.Second},
+		apiURL: URLhausURL,
+		http:   feedhttp.NewClient("urlhaus", 60*time.Second),
 		opts:   buildOptions(opts),
 	}
 }
