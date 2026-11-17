@@ -11,7 +11,18 @@
 #   deploy.sh down         delete the stack: namespaces netsoldier and dns with
 #                          their volumes (the simulated LAN stays)
 #
-# What it deploys is deploy/kustomize/sites/lab (profile core + the lab's site
+# LAB_SITE picks what is deployed: deploy/kustomize/sites/$LAB_SITE. The
+# default, `lab`, is the core profile. A variant (sites/lab-<name>, normally
+# sites/lab plus more bases) may bring infra/lab/site.d/$LAB_SITE.sh, which
+# is sourced here and by images.sh and may define, all optional:
+#   SITE_IMAGES=("name|Dockerfile|context" ...)  more first-party images
+#   site_secrets ROTATE   Secrets of its own, after the core ones exist
+#   site_pre_apply        just before `kubectl apply`
+#   site_wait             after the core stack is ready
+#   site_down             before the namespaces are deleted
+# A hook file only defines things; it runs nothing when sourced.
+#
+# What it deploys by default is deploy/kustomize/sites/lab (profile core + the lab's site
 # values) with the images of this build. Every credential is generated here,
 # randomly, and applied straight to the cluster: none is written to disk,
 # printed or committed. Read one back with
@@ -22,13 +33,16 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 KUBECTL=${KUBECTL:-$LAB_VENV/bin/kubectl}
 export KUBECONFIG=$LAB_KUBECONFIG
-SITE_DIR=$REPO_DIR/deploy/kustomize/sites/lab
+LAB_SITE=${LAB_SITE:-lab}
+SITE_DIR=$REPO_DIR/deploy/kustomize/sites/$LAB_SITE
+SITE_HOOKS=$LAB_DIR/site.d/$LAB_SITE.sh
 IMAGES_STATE=$LAB_STATE/lab-images.env
 FIRST_PARTY=(detection-engine device-inventory killswitch-controller threat-intel-sync netagent web-ui)
 NS=netsoldier
 
 k() { "$KUBECTL" "$@"; }
 step() { printf '==> %s\n' "$*"; }
+has_hook() { declare -F "$1" >/dev/null; }
 
 need_tools() {
   [[ -x $KUBECTL && -x $LAB_VENV/bin/python ]] || "$LAB_DIR/lab.sh" tools
@@ -187,18 +201,21 @@ cmd_up() {
   source "$IMAGES_STATE"
   tag=$LAB_IMAGE_TAG
 
-  step "render deploy/kustomize/sites/lab with images :$tag"
-  manifest=$(render "$tag") || lab_die "deploy/kustomize/sites/lab does not render"
+  step "render deploy/kustomize/sites/$LAB_SITE with images :$tag"
+  manifest=$(render "$tag") || lab_die "deploy/kustomize/sites/$LAB_SITE does not render"
 
   step "namespaces"
   only_kind Namespace <<<"$manifest" | k apply -f -
 
   step "secrets$( ((rotate)) && echo ' (rotating every one)')"
   generate_secrets "$rotate"
+  if has_hook site_secrets; then site_secrets "$rotate"; fi
 
   # A finished Job is immutable; it runs again (a no-op when the schema is
   # current) with the migrations of this checkout.
   k -n "$NS" delete job clickhouse-migrate --ignore-not-found --wait=true >/dev/null
+
+  if has_hook site_pre_apply; then site_pre_apply; fi
 
   step "apply"
   k apply -f - <<<"$manifest"
@@ -211,14 +228,26 @@ cmd_up() {
   fi
 
   wait_ready
+  if has_hook site_wait; then site_wait; fi
   summary
 }
 
 cmd_down() {
   need_tools
+  if has_hook site_down; then site_down; fi
   step "delete namespaces netsoldier and dns (and their volumes)"
   k delete namespace "$NS" dns --ignore-not-found --wait=true
 }
+
+[[ -d $SITE_DIR ]] || lab_die "no site at deploy/kustomize/sites/$LAB_SITE"
+SITE_IMAGES=()
+if [[ -f $SITE_HOOKS ]]; then
+  # shellcheck disable=SC1090
+  source "$SITE_HOOKS"
+fi
+for entry in "${SITE_IMAGES[@]}"; do
+  FIRST_PARTY+=("${entry%%|*}")
+done
 
 case ${1:-up} in
   up) shift || true; cmd_up "$@" ;;

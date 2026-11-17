@@ -26,6 +26,15 @@ IMAGES=(
 )
 STATE_FILE=$LAB_STATE/lab-images.env
 
+# A site variant may add first-party images (see deploy.sh, LAB_SITE).
+SITE_IMAGES=()
+SITE_HOOKS=$LAB_DIR/site.d/${LAB_SITE:-lab}.sh
+if [[ -f $SITE_HOOKS ]]; then
+  # shellcheck disable=SC1090
+  source "$SITE_HOOKS"
+fi
+IMAGES+=("${SITE_IMAGES[@]}")
+
 build=1
 [[ ${1:-} == --no-build ]] && build=0
 
