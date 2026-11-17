@@ -449,6 +449,17 @@ so an exact pin breaks the build at the next security update (the reason is
 also given next to the lines); the base images are pinned by digest, and the
 build fails if a library the binary needs is missing (ldd check)."""
 
+[[exception]]
+tool = "hadolint"
+rule = "DL3008"
+files = ["deploy/docker/suricata/Dockerfile"]
+until = 2027-05-15
+reason = """Suricata and suricata-update from trixie-backports, and libcap2-bin
+(setcap), removed again in the same layer. Debian keeps only the current
+version of a package in its archive (backports included), so an exact pin
+breaks the build at the next security update; the base image is pinned by
+digest, and test/run.sh asserts the Suricata major version."""
+
 # ════════════════════════════════════════════════════════════════════════════
 # Semgrep (rule ids as the registry names them; scripts/ci/semgrep-rules.txt)
 # ════════════════════════════════════════════════════════════════════════════

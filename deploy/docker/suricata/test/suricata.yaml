@@ -1,0 +1,58 @@
+%YAML 1.1
+---
+# Configuration for test/run.sh. The capture settings are the production
+# ones (deploy/kustomize/base/suricata/configmap.yaml) on the container's own
+# interface with one thread; the rules are the test's. No `capture:` section,
+# like production: Suricata then tries to switch NIC offloading off, which
+# needs CAP_NET_ADMIN the sensor does not have, and has to carry on without.
+
+vars:
+  address-groups:
+    HOME_NET: "[192.168.0.0/16,10.0.0.0/8,172.16.0.0/12]"
+    EXTERNAL_NET: "!$HOME_NET"
+  port-groups:
+    HTTP_PORTS: "80"
+
+default-log-dir: /var/log/suricata/
+
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve.json
+      types:
+        - alert:
+            metadata: yes
+        - tls:
+            extended: yes
+
+runmode: workers
+
+af-packet:
+  - interface: eth0
+    threads: 1
+    cluster-id: 99
+    cluster-type: cluster_flow
+    defrag: yes
+    tpacket-v3: yes
+    block-size: 65536
+    ring-size: 4096
+
+stream:
+  checksum-validation: no
+
+app-layer:
+  protocols:
+    tls:
+      enabled: yes
+      detection-ports:
+        dp: 443
+
+default-rule-path: /t/rules
+rule-files:
+  - test.rules
+
+default-data-dir: /var/lib/suricata/data
+
+unix-command:
+  enabled: no

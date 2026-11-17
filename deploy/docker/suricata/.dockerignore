@@ -1,0 +1,3 @@
+# The image copies nothing from its context (see the Dockerfile); the tests
+# stay out of the build.
+*
