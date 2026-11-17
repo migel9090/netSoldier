@@ -314,13 +314,18 @@ the command."""
 [[exception]]
 tool = "checkov"
 rule = "CKV_DOCKER_2"
-files = ["apps/ml-anomaly/Dockerfile", "deploy/docker/zeek/Dockerfile"]
+files = [
+  "apps/ml-anomaly/Dockerfile",
+  "deploy/docker/zeek/Dockerfile",
+  "deploy/docker/suricata/Dockerfile",
+]
 until = 2027-05-15
 reason = """Run only by Kubernetes (proxmox-soc), which ignores HEALTHCHECK.
 ml-anomaly is one image for three containers on three ports (beacon-sync,
 flow-anomaly, scoring-api), each probed on its own port by its manifest; a
-single HEALTHCHECK cannot be right for all three. Zeek is a passive sensor
-with no endpoint to check."""
+single HEALTHCHECK cannot be right for all three. Zeek and Suricata are
+passive sensors with no endpoint to check; the Suricata image also serves
+the rule init and updater containers, which run to completion."""
 
 # ── infra/lab/smoke.yaml ─────────────────────────────────────────────────────
 
