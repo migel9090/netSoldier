@@ -1,12 +1,15 @@
 package ioc
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/migel9090/netSoldier/libs/indicator"
 )
 
 // DefaultMaxIndicators caps the store when no explicit limit is configured.
@@ -41,6 +44,8 @@ type Store struct {
 	mu          sync.RWMutex
 	items       map[string]*entry
 	feedSuccess map[string]time.Time
+	history     map[string][]int   // volume history per feed, see SetVolumeHistory
+	held        map[string]HeldSet // fetches held back by the volume guard
 	max         int
 	now         func() time.Time
 
@@ -64,6 +69,8 @@ func NewStore(opts ...Option) *Store {
 	s := &Store{
 		items:       make(map[string]*entry),
 		feedSuccess: make(map[string]time.Time),
+		history:     make(map[string][]int),
+		held:        make(map[string]HeldSet),
 		now:         time.Now,
 	}
 	for _, o := range opts {
@@ -74,11 +81,60 @@ func NewStore(opts ...Option) *Store {
 
 // UpsertStats reports what one batch did to the store.
 type UpsertStats struct {
-	Accepted int   // valid rows now asserted by the feed
-	Rejected int   // rows that failed validation
-	Dropped  int   // valid rows refused because the store is full
-	Err      error // persistence failed; the in-memory set was still updated
+	Accepted int // valid rows now asserted by the feed
+	Rejected int // rows that failed validation
+	Dropped  int // valid rows refused because the store is full
+	// NeverBlock counts the rows refused because they name a host on the
+	// never-block list, by reason (indicator.Reason*). They are not in
+	// Rejected: the row is well formed, it only must not become a block.
+	NeverBlock map[string]int
+	Err        error // persistence failed; the in-memory set was still updated
 }
+
+// PrepareStats reports what validation made of one feed delivery.
+type PrepareStats struct {
+	Rows       int            // rows delivered
+	Rejected   int            // rows that failed validation
+	NeverBlock map[string]int // rows naming a never-block host, by reason
+}
+
+// NeverBlocked is the number of rows refused by the never-block list.
+func (p PrepareStats) NeverBlocked() int {
+	n := 0
+	for _, v := range p.NeverBlock {
+		n += v
+	}
+	return n
+}
+
+// Batch is one feed's delivery after validation, not yet applied to the
+// store: what the volume guard judges before anything changes. Duplicate
+// keys within the delivery are already merged.
+type Batch struct {
+	feed  string
+	order []string
+	inds  map[string]Indicator
+	rows  map[string]int
+	Stats PrepareStats
+}
+
+// Feed returns the feed the batch was delivered by.
+func (b *Batch) Feed() string { return b.feed }
+
+// Len is the number of distinct valid indicators in the batch.
+func (b *Batch) Len() int { return len(b.order) }
+
+// Indicators returns the batch's validated indicators, in delivery order.
+func (b *Batch) Indicators() []Indicator {
+	out := make([]Indicator, 0, len(b.order))
+	for _, k := range b.order {
+		out = append(out, b.inds[k])
+	}
+	return out
+}
+
+// Keys returns the batch's deduplication keys, in delivery order.
+func (b *Batch) Keys() []string { return append([]string(nil), b.order...) }
 
 // Upsert validates and inserts or refreshes one indicator, asserted by the
 // feed named in its Source. Invalid indicators are dropped.
@@ -110,27 +166,52 @@ func (s *Store) UpsertAll(inds []Indicator) (accepted, rejected int) {
 		st := s.UpsertFeed(feed, byFeed[feed])
 		accepted += st.Accepted
 		rejected += st.Rejected + st.Dropped
+		for _, n := range st.NeverBlock {
+			rejected += n
+		}
 	}
 	return accepted, rejected
 }
 
 // UpsertFeed validates a batch delivered by one feed and records each valid
 // row as that feed's current assertion, stamped with the current time.
-// Duplicate keys within the batch are merged first.
+// Duplicate keys within the batch are merged first. It is Prepare followed
+// by Apply, without a volume guard in between.
 func (s *Store) UpsertFeed(feed string, inds []Indicator) UpsertStats {
-	var st UpsertStats
-	now := s.now().UTC()
+	return s.Apply(s.Prepare(feed, inds))
+}
 
-	batch := make(map[string]Indicator, len(inds))
-	rows := make(map[string]int, len(inds))
-	var order []string
+// Prepare validates a delivery from feed without changing the store: rows
+// that fail validation are counted as rejected, rows naming a never-block
+// host are counted by reason, and duplicate keys are merged.
+func (s *Store) Prepare(feed string, inds []Indicator) *Batch {
+	b := &Batch{
+		feed:  feed,
+		inds:  make(map[string]Indicator, len(inds)),
+		rows:  make(map[string]int, len(inds)),
+		Stats: PrepareStats{Rows: len(inds)},
+	}
+	neverBlockLogs := 0
 	for _, raw := range inds {
 		v, err := Validate(raw)
-		if err != nil {
-			st.Rejected++
-			if st.Rejected <= maxRejectLogs {
+		var nb *indicator.NeverBlockError
+		switch {
+		case errors.As(err, &nb):
+			if b.Stats.NeverBlock == nil {
+				b.Stats.NeverBlock = make(map[string]int)
+			}
+			b.Stats.NeverBlock[nb.Reason]++
+			if neverBlockLogs++; neverBlockLogs <= maxRejectLogs {
+				slog.Warn("dropped never-block indicator from feed", "feed", feed,
+					"type", nb.Type, "value", truncateForLog(nb.Value),
+					"reason", nb.Reason, "entry", nb.Entry)
+			}
+			continue
+		case err != nil:
+			b.Stats.Rejected++
+			if b.Stats.Rejected <= maxRejectLogs {
 				slog.Warn("rejected indicator from feed", "feed", feed,
-					"source", raw.Source, "type", raw.Type,
+					"source", indicator.Text(raw.Source, indicator.MaxSourceLen), "type", indicator.Text(raw.Type, 32),
 					"value", truncateForLog(raw.Value), "error", err)
 			}
 			continue
@@ -138,38 +219,80 @@ func (s *Store) UpsertFeed(feed string, inds []Indicator) UpsertStats {
 		if v.Source == "" {
 			v.Source = feed
 		}
-		v.LastAsserted = now
 		k := v.Key()
-		if prev, ok := batch[k]; ok {
+		if prev, ok := b.inds[k]; ok {
 			prev.Merge(v)
-			batch[k] = prev
+			b.inds[k] = prev
 		} else {
-			batch[k] = v
-			order = append(order, k)
+			b.inds[k] = v
+			b.order = append(b.order, k)
 		}
-		rows[k]++
+		b.rows[k]++
 	}
-	if st.Rejected > maxRejectLogs {
+	if b.Stats.Rejected > maxRejectLogs {
 		slog.Warn("further indicators rejected from feed", "feed", feed,
-			"not_logged", st.Rejected-maxRejectLogs)
+			"not_logged", b.Stats.Rejected-maxRejectLogs)
 	}
+	if neverBlockLogs > maxRejectLogs {
+		slog.Warn("further never-block indicators dropped from feed", "feed", feed,
+			"not_logged", neverBlockLogs-maxRejectLogs)
+	}
+	return b
+}
 
-	applied := make([]Indicator, 0, len(order))
+// CountNew returns how many of the batch's indicators the store does not
+// hold at all yet: what applying it would add to every export.
+func (s *Store) CountNew(b *Batch) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, k := range b.order {
+		if _, ok := s.items[k]; !ok {
+			n++
+		}
+	}
+	return n
+}
+
+// Contains reports whether the store holds an indicator with key k
+// (Indicator.Key).
+func (s *Store) Contains(k string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.items[k]
+	return ok
+}
+
+// Apply records each indicator of a prepared batch as its feed's current
+// assertion, stamped with the current time.
+func (s *Store) Apply(b *Batch) UpsertStats {
+	st := UpsertStats{Rejected: b.Stats.Rejected}
+	if len(b.Stats.NeverBlock) > 0 {
+		st.NeverBlock = make(map[string]int, len(b.Stats.NeverBlock))
+		for r, n := range b.Stats.NeverBlock {
+			st.NeverBlock[r] = n
+		}
+	}
+	feed := b.feed
+	now := s.now().UTC()
+
+	applied := make([]Indicator, 0, len(b.order))
 	s.mu.Lock()
-	for _, k := range order {
+	for _, k := range b.order {
 		e := s.items[k]
 		if e == nil {
 			if s.max > 0 && len(s.items) >= s.max {
-				st.Dropped += rows[k]
+				st.Dropped += b.rows[k]
 				continue
 			}
 			e = &entry{}
 			s.items[k] = e
 		}
-		ind := batch[k]
+		ind := b.inds[k]
+		ind.LastAsserted = now
 		e.set(feed, ind)
 		applied = append(applied, ind)
-		st.Accepted += rows[k]
+		st.Accepted += b.rows[k]
 	}
 	s.mu.Unlock()
 
@@ -246,32 +369,148 @@ func (s *Store) PruneExpired(cutoff time.Time) int {
 // RetainFeeds removes every assertion made by a feed not in keep, and
 // returns how many indicators disappeared entirely. It runs at start-up so
 // a source that has since been disabled — notably the non-commercial feeds
-// under COMMERCIAL_MODE — is not served from the persisted set.
+// under COMMERCIAL_MODE — is not served from the persisted set. The
+// disabled feeds' volume history and held fetches go too; the store-wide
+// history (TotalHistoryKey) is kept.
 func (s *Store) RetainFeeds(keep []string) int {
-	allowed := make(map[string]bool, len(keep))
+	allowed := make(map[string]bool, len(keep)+1)
 	for _, f := range keep {
 		allowed[f] = true
 	}
 	n := s.prune(func(a assertion) bool { return !allowed[a.feed] })
+	allowed[TotalHistoryKey] = true
 	s.mu.Lock()
-	var gone []string
+	gone := map[string]bool{}
 	for f := range s.feedSuccess {
 		if !allowed[f] {
-			gone = append(gone, f)
+			gone[f] = true
 			delete(s.feedSuccess, f)
+		}
+	}
+	for f := range s.history {
+		if !allowed[f] {
+			gone[f] = true
+			delete(s.history, f)
+		}
+	}
+	for f := range s.held {
+		if !allowed[f] {
+			gone[f] = true
+			delete(s.held, f)
 		}
 	}
 	s.mu.Unlock()
 	if s.db != nil && len(gone) > 0 {
 		s.dbMu.Lock()
 		defer s.dbMu.Unlock()
-		for _, f := range gone {
+		for f := range gone {
 			if err := s.db.deleteFeed(f); err != nil {
 				slog.Error("indicator database: removing disabled feed failed", "feed", f, "error", err)
 			}
 		}
 	}
 	return n
+}
+
+// TotalHistoryKey is the volume-history key of the whole store; it can never
+// be a feed name.
+const TotalHistoryKey = "*"
+
+// VolumeHistory returns the recorded set sizes of feed (or of the whole
+// store, TotalHistoryKey), oldest first. The volume guard decides what is
+// recorded and how much is kept.
+func (s *Store) VolumeHistory(feed string) []int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]int(nil), s.history[feed]...)
+}
+
+// SetVolumeHistory replaces feed's volume history and persists it; nil or
+// empty forgets it.
+func (s *Store) SetVolumeHistory(feed string, sizes []int) error {
+	sizes = append([]int(nil), sizes...)
+	s.mu.Lock()
+	if len(sizes) == 0 {
+		delete(s.history, feed)
+	} else {
+		s.history[feed] = sizes
+	}
+	s.mu.Unlock()
+	if s.db == nil {
+		return nil
+	}
+	s.dbMu.Lock()
+	defer s.dbMu.Unlock()
+	return s.db.setVolumeHistory(feed, sizes)
+}
+
+// HeldSet is one feed fetch that the volume guard held back instead of
+// applying: the previous set keeps being served until an operator releases
+// or discards it, or a later fetch of the feed passes and supersedes it.
+type HeldSet struct {
+	Feed     string    `json:"source"`
+	ID       string    `json:"id"`      // content hash; a release must name it
+	Reason   string    `json:"reason"`  // the guard's reason
+	Detail   string    `json:"detail"`  // the guard's explanation, for humans
+	Partial  bool      `json:"partial"` // the fetch itself failed half-way
+	Started  time.Time `json:"fetch_started"`
+	HeldAt   time.Time `json:"held_at"`
+	Size     int       `json:"size"`     // distinct valid indicators in the fetch
+	Baseline int       `json:"baseline"` // the usual size it was judged against
+	NewKeys  int       `json:"new"`      // indicators the store did not hold, when held
+	Total    int       `json:"store_total"`
+	// Truncated counts indicators beyond the held cap that were not kept
+	// (the store could not have taken them anyway).
+	Truncated int         `json:"truncated,omitempty"`
+	Rows      []Indicator `json:"-"`
+}
+
+// Held returns the held fetch of feed, if any. Rows are shared: do not
+// modify them.
+func (s *Store) Held(feed string) (HeldSet, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	h, ok := s.held[feed]
+	return h, ok
+}
+
+// HeldSets returns every held fetch without its rows, by feed.
+func (s *Store) HeldSets() map[string]HeldSet {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]HeldSet, len(s.held))
+	for f, h := range s.held {
+		h.Rows = nil
+		out[f] = h
+	}
+	return out
+}
+
+// Hold records h as feed's held fetch, replacing any earlier one, and
+// persists it. On a persistence error it is still held in memory.
+func (s *Store) Hold(h HeldSet) error {
+	s.mu.Lock()
+	s.held[h.Feed] = h
+	s.mu.Unlock()
+	if s.db == nil {
+		return nil
+	}
+	s.dbMu.Lock()
+	defer s.dbMu.Unlock()
+	return s.db.saveHeld(h)
+}
+
+// DropHeld forgets feed's held fetch.
+func (s *Store) DropHeld(feed string) error {
+	s.mu.Lock()
+	delete(s.held, feed)
+	s.mu.Unlock()
+	if s.db == nil {
+		return nil
+	}
+	s.dbMu.Lock()
+	defer s.dbMu.Unlock()
+	return s.db.deleteHeld(feed)
 }
 
 func (s *Store) prune(drop func(assertion) bool) int {

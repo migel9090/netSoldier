@@ -3,15 +3,20 @@ package ioc
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/migel9090/netSoldier/libs/indicator"
 	_ "modernc.org/sqlite" // pure-Go driver, registered as "sqlite"
 )
 
 // schemaVersion is stored in PRAGMA user_version. A database written by a
-// newer build is refused rather than guessed at.
+// newer build is refused rather than guessed at. Additive changes — a new
+// table an older build never reads (volume_history, quarantine,
+// quarantine_rows) — keep the version, so rolling the image back still
+// starts on the same file.
 const schemaVersion = 1
 
 // sqliteDB persists each feed's assertions so a restart serves the last
@@ -28,9 +33,11 @@ type assertionKey struct {
 
 // LoadStats reports what OpenStore found in the database.
 type LoadStats struct {
-	Loaded  int // assertions loaded
-	Invalid int // assertions that no longer pass validation, deleted
-	Dropped int // assertions beyond the store cap, deleted
+	Loaded     int // assertions loaded
+	Invalid    int // assertions that no longer pass validation, deleted
+	NeverBlock int // assertions naming a host now on the never-block list, deleted
+	Dropped    int // assertions beyond the store cap, deleted
+	Held       int // held fetches loaded (volume guard quarantine)
 }
 
 // OpenStore opens (creating if needed) the SQLite database at path and
@@ -50,13 +57,26 @@ func OpenStore(path string, opts ...Option) (*Store, LoadStats, error) {
 		d.close()
 		return nil, ls, err
 	}
+	if s.history, err = d.loadVolumeHistory(); err != nil {
+		d.close()
+		return nil, ls, err
+	}
+	if s.held, err = d.loadHeld(); err != nil {
+		d.close()
+		return nil, ls, err
+	}
+	ls.Held = len(s.held)
 
 	var stale []assertionKey
 	rewrite := map[string][]Indicator{}
 	err = d.loadAssertions(func(feed string, raw Indicator) {
 		v, verr := Validate(raw)
 		if verr != nil {
-			ls.Invalid++
+			if errors.Is(verr, indicator.ErrNeverBlock) {
+				ls.NeverBlock++
+			} else {
+				ls.Invalid++
+			}
 			stale = append(stale, assertionKey{typ: raw.Type, value: raw.Value, feed: feed})
 			return
 		}
@@ -145,6 +165,33 @@ func openSQLite(path string) (*sqliteDB, error) {
 		`CREATE TABLE IF NOT EXISTS feeds (
 			feed         TEXT PRIMARY KEY,
 			last_success INTEGER NOT NULL
+		) WITHOUT ROWID`,
+		// The volume guard's memory of each feed's usual size (distinct
+		// indicators per applied fetch, a JSON array, oldest first). Without
+		// it every restart would be a cold start, and a poisoned feed would
+		// pass the guard by waiting for one.
+		`CREATE TABLE IF NOT EXISTS volume_history (
+			feed  TEXT PRIMARY KEY,
+			sizes TEXT NOT NULL
+		) WITHOUT ROWID`,
+		// Fetches held back by the volume guard, kept across a restart so
+		// the alert stays up and the operator can still release them.
+		`CREATE TABLE IF NOT EXISTS quarantine (
+			feed TEXT PRIMARY KEY,
+			meta TEXT NOT NULL
+		) WITHOUT ROWID`,
+		`CREATE TABLE IF NOT EXISTS quarantine_rows (
+			feed       TEXT    NOT NULL,
+			type       TEXT    NOT NULL,
+			value      TEXT    NOT NULL,
+			source     TEXT    NOT NULL DEFAULT '',
+			threat     TEXT    NOT NULL DEFAULT '',
+			confidence INTEGER NOT NULL DEFAULT 0,
+			first_seen INTEGER NOT NULL DEFAULT 0,
+			last_seen  INTEGER NOT NULL DEFAULT 0,
+			tags       TEXT    NOT NULL DEFAULT '[]',
+			reference  TEXT    NOT NULL DEFAULT '',
+			PRIMARY KEY (feed, type, value)
 		) WITHOUT ROWID`,
 		fmt.Sprintf("PRAGMA user_version = %d", schemaVersion),
 	} {
@@ -259,9 +306,187 @@ func (d *sqliteDB) deleteAssertions(keys []assertionKey) error {
 	return tx.Commit()
 }
 
+// deleteFeed forgets everything recorded about a feed apart from its
+// assertions (those go through deleteAssertions).
 func (d *sqliteDB) deleteFeed(feed string) error {
-	_, err := d.db.Exec(`DELETE FROM feeds WHERE feed = ?`, feed)
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	for _, stmt := range []string{
+		`DELETE FROM feeds WHERE feed = ?`,
+		`DELETE FROM volume_history WHERE feed = ?`,
+		`DELETE FROM quarantine WHERE feed = ?`,
+		`DELETE FROM quarantine_rows WHERE feed = ?`,
+	} {
+		if _, err := tx.Exec(stmt, feed); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (d *sqliteDB) loadVolumeHistory() (map[string][]int, error) {
+	rows, err := d.db.Query(`SELECT feed, sizes FROM volume_history`)
+	if err != nil {
+		return nil, fmt.Errorf("load volume history: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string][]int)
+	for rows.Next() {
+		var feed, sizes string
+		if err := rows.Scan(&feed, &sizes); err != nil {
+			return nil, fmt.Errorf("load volume history: %w", err)
+		}
+		var v []int
+		if err := json.Unmarshal([]byte(sizes), &v); err != nil {
+			// A row this build cannot read is a cold start for that feed,
+			// not a reason to refuse to serve the indicator set.
+			slog.Error("indicator database: unreadable volume history, starting it afresh",
+				"feed", feed, "error", err)
+			continue
+		}
+		clean := v[:0]
+		for _, n := range v {
+			if n >= 0 {
+				clean = append(clean, n)
+			}
+		}
+		if len(clean) > 0 {
+			out[feed] = clean
+		}
+	}
+	return out, rows.Err()
+}
+
+func (d *sqliteDB) setVolumeHistory(feed string, sizes []int) error {
+	if len(sizes) == 0 {
+		_, err := d.db.Exec(`DELETE FROM volume_history WHERE feed = ?`, feed)
+		return err
+	}
+	b, _ := json.Marshal(sizes)
+	_, err := d.db.Exec(`INSERT INTO volume_history (feed, sizes) VALUES (?, ?)
+		ON CONFLICT (feed) DO UPDATE SET sizes = excluded.sizes`, feed, string(b))
 	return err
+}
+
+// saveHeld replaces feed's held fetch, rows and description, in one
+// transaction.
+func (d *sqliteDB) saveHeld(h HeldSet) error {
+	meta, err := json.Marshal(h)
+	if err != nil {
+		return err
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("persist held %s: %w", h.Feed, err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	if _, err := tx.Exec(`DELETE FROM quarantine_rows WHERE feed = ?`, h.Feed); err != nil {
+		return fmt.Errorf("persist held %s: %w", h.Feed, err)
+	}
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO quarantine_rows (feed, type, value, source,
+			threat, confidence, first_seen, last_seen, tags, reference)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("persist held %s: %w", h.Feed, err)
+	}
+	defer stmt.Close()
+	for _, ind := range h.Rows {
+		tags, _ := json.Marshal(ind.Tags)
+		if ind.Tags == nil {
+			tags = []byte("[]")
+		}
+		if _, err := stmt.Exec(h.Feed, ind.Type, ind.Value, ind.Source, ind.Threat, ind.Confidence,
+			toUnixNano(ind.FirstSeen), toUnixNano(ind.LastSeen), string(tags), ind.Reference); err != nil {
+			return fmt.Errorf("persist held %s: %w", h.Feed, err)
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO quarantine (feed, meta) VALUES (?, ?)
+		ON CONFLICT (feed) DO UPDATE SET meta = excluded.meta`, h.Feed, string(meta)); err != nil {
+		return fmt.Errorf("persist held %s: %w", h.Feed, err)
+	}
+	return tx.Commit()
+}
+
+func (d *sqliteDB) deleteHeld(feed string) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	if _, err := tx.Exec(`DELETE FROM quarantine_rows WHERE feed = ?`, feed); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM quarantine WHERE feed = ?`, feed); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// loadHeld reads every held fetch. Its rows are validated again, like the
+// assertions: a row the rules no longer accept (or that the never-block
+// list now protects) is left out, so releasing an old held set can never
+// bypass them.
+func (d *sqliteDB) loadHeld() (map[string]HeldSet, error) {
+	out := make(map[string]HeldSet)
+	rows, err := d.db.Query(`SELECT feed, meta FROM quarantine`)
+	if err != nil {
+		return nil, fmt.Errorf("load quarantine: %w", err)
+	}
+	for rows.Next() {
+		var feed, meta string
+		if err := rows.Scan(&feed, &meta); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("load quarantine: %w", err)
+		}
+		var h HeldSet
+		if err := json.Unmarshal([]byte(meta), &h); err != nil {
+			slog.Error("indicator database: unreadable held fetch, ignoring it", "feed", feed, "error", err)
+			continue
+		}
+		h.Feed = feed
+		out[feed] = h
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("load quarantine: %w", err)
+	}
+
+	r, err := d.db.Query(`SELECT feed, type, value, source, threat, confidence,
+		first_seen, last_seen, tags, reference FROM quarantine_rows`)
+	if err != nil {
+		return nil, fmt.Errorf("load quarantine rows: %w", err)
+	}
+	defer r.Close()
+	for r.Next() {
+		var (
+			ind         Indicator
+			feed, tags  string
+			first, last int64
+		)
+		if err := r.Scan(&feed, &ind.Type, &ind.Value, &ind.Source, &ind.Threat, &ind.Confidence,
+			&first, &last, &tags, &ind.Reference); err != nil {
+			return nil, fmt.Errorf("load quarantine rows: %w", err)
+		}
+		h, ok := out[feed]
+		if !ok {
+			continue
+		}
+		ind.FirstSeen = fromUnixNano(first)
+		ind.LastSeen = fromUnixNano(last)
+		if err := json.Unmarshal([]byte(tags), &ind.Tags); err != nil {
+			ind.Tags = nil
+		}
+		v, err := Validate(ind)
+		if err != nil {
+			continue
+		}
+		h.Rows = append(h.Rows, v)
+		out[feed] = h
+	}
+	return out, r.Err()
 }
 
 func (d *sqliteDB) setFeedSuccess(feed string, t time.Time) error {
