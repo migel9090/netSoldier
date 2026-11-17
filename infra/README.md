@@ -76,6 +76,17 @@ the SSH key defaults to `~/.ssh/id_ed25519`. Terraform variables
 (address, VM id, sizes, allowed sources) are listed in `terraform/variables.tf`
 and `terraform/terraform.tfvars.example`; set them in `lab.auto.tfvars`.
 
+**More than one lab VM.** A lab instance is a state directory. For a second VM
+point `LAB_STATE` and `LAB_KUBECONFIG` at new locations and put that instance's
+values (`vm_id`, `vm_name`, `ipv4_address`) in `$LAB_STATE/lab.tfvars`; `tf.sh`
+passes the file after `lab.auto.tfvars`, so the token and the CA stay shared.
+The cloud image already exists on the node and the token may neither replace
+nor delete it, so the new state has to know it with all its attributes
+(`terraform import` leaves the URL and checksum unset and Terraform then plans
+a replacement). Before the first apply copy the first instance's
+`terraform.tfstate` into the new state directory and drop the VM from the copy:
+`infra/lab/tf.sh state rm 'proxmox_virtual_environment_vm.soc[0]'`.
+
 ### Pinned versions
 
 | What | Version | Checksum, and where it comes from |

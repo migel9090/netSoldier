@@ -41,11 +41,22 @@ if [[ -f $LAB_CONFIG/pve-root-ca.pem ]]; then
   )
 fi
 
-# Commands that evaluate variables get the token file and the SSH key.
+# Commands that evaluate variables get the token file and the SSH key, and,
+# when the state directory holds one, that lab instance's own values
+# ($LAB_STATE/lab.tfvars: vm_id, vm_name, ipv4_address, ...). A second lab VM
+# is a second state directory with such a file; the token and the CA are
+# shared.
+var_files=()
 if [[ -f $LAB_CONFIG/lab.auto.tfvars ]]; then
   args+=(-v "$LAB_CONFIG/lab.auto.tfvars:/config/lab.auto.tfvars:ro")
+  var_files+=(-var-file=/config/lab.auto.tfvars)
+fi
+if [[ -f $LAB_STATE/lab.tfvars ]]; then
+  var_files+=(-var-file=/state/lab.tfvars)
+fi
+if ((${#var_files[@]})); then
   for cmd in plan apply destroy refresh import console; do
-    args+=(-e "TF_CLI_ARGS_${cmd}=-var-file=/config/lab.auto.tfvars")
+    args+=(-e "TF_CLI_ARGS_${cmd}=${var_files[*]}")
   done
 fi
 if [[ -f $LAB_SSH_KEY.pub ]]; then
