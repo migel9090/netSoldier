@@ -52,3 +52,4 @@ configMapGenerator:
       - migrations/025_zeek_conn_ingested_at.sql
       - migrations/026_sensor_ingested_at.sql
       - migrations/027_audit_log_context.sql
+      - migrations/032_ml_beacons_domain_key.sql
