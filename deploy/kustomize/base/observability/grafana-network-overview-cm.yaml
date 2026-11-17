@@ -216,7 +216,7 @@ data:
               "editorType": "sql",
               "format": 1,
               "queryType": "sql",
-              "rawSql": "SELECT if(dst_domain != '', dst_domain, dst_ip) AS destination, sum(bytes_in + bytes_out) AS total_bytes FROM netsoldier.connections WHERE $__timeFilter(timestamp) GROUP BY destination ORDER BY total_bytes DESC LIMIT 10",
+              "rawSql": "SELECT if(s.sni != '', s.sni, f.dst_ip) AS destination, sum(f.bytes_in + f.bytes_out) AS total_bytes FROM netsoldier.network_flows AS f LEFT JOIN (SELECT uid, any(server_name) AS sni FROM netsoldier.zeek_ssl WHERE $__timeFilter(timestamp) AND server_name != '' GROUP BY uid) AS s ON s.uid = f.uid WHERE $__timeFilter(f.timestamp) GROUP BY destination ORDER BY total_bytes DESC LIMIT 10",
               "refId": "A"
             }
           ],
@@ -318,7 +318,7 @@ data:
           "id": 9,
           "type": "table",
           "title": "Top External Destinations",
-          "description": "Non-RFC1918 destination IPs ranked by traffic volume. IP Geolocation by DB-IP (db-ip.com), enriched by the Vector aggregator.",
+          "description": "Destination addresses outside the private, loopback and link-local ranges, ranked by traffic volume, with a TLS server name Zeek saw for them.",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
           "gridPos": { "h": 9, "w": 14, "x": 0, "y": 26 },
           "targets": [
@@ -326,7 +326,7 @@ data:
               "editorType": "sql",
               "format": 1,
               "queryType": "sql",
-              "rawSql": "SELECT dst_ip, anyLast(dst_country) AS country, anyLast(dst_as_org) AS as_org, sum(bytes_in + bytes_out) AS total_bytes, sum(packets_in + packets_out) AS total_packets, count() AS flow_count FROM netsoldier.network_flows WHERE $__timeFilter(timestamp) AND NOT (isIPAddressInRange(dst_ip, '10.0.0.0/8') OR isIPAddressInRange(dst_ip, '172.16.0.0/12') OR isIPAddressInRange(dst_ip, '192.168.0.0/16') OR isIPAddressInRange(dst_ip, '127.0.0.0/8')) GROUP BY dst_ip ORDER BY total_bytes DESC LIMIT 20",
+              "rawSql": "SELECT f.dst_ip AS dst_ip, anyIf(s.sni, s.sni != '') AS server_name, sum(f.bytes_in + f.bytes_out) AS total_bytes, sum(f.packets_in + f.packets_out) AS total_packets, count() AS flow_count FROM netsoldier.network_flows AS f LEFT JOIN (SELECT uid, any(server_name) AS sni FROM netsoldier.zeek_ssl WHERE $__timeFilter(timestamp) AND server_name != '' GROUP BY uid) AS s ON s.uid = f.uid WHERE $__timeFilter(f.timestamp) AND NOT (isIPAddressInRange(f.dst_ip, '10.0.0.0/8') OR isIPAddressInRange(f.dst_ip, '172.16.0.0/12') OR isIPAddressInRange(f.dst_ip, '192.168.0.0/16') OR isIPAddressInRange(f.dst_ip, '127.0.0.0/8') OR isIPAddressInRange(f.dst_ip, '169.254.0.0/16') OR isIPAddressInRange(f.dst_ip, 'fc00::/7') OR isIPAddressInRange(f.dst_ip, 'fe80::/10') OR isIPAddressInRange(f.dst_ip, '::1/128')) GROUP BY dst_ip ORDER BY total_bytes DESC LIMIT 20",
               "refId": "A"
             }
           ],
@@ -359,15 +359,9 @@ data:
                 ]
               },
               {
-                "matcher": { "id": "byName", "options": "country" },
+                "matcher": { "id": "byName", "options": "server_name" },
                 "properties": [
-                  { "id": "displayName", "value": "Country" }
-                ]
-              },
-              {
-                "matcher": { "id": "byName", "options": "as_org" },
-                "properties": [
-                  { "id": "displayName", "value": "AS Organization" }
+                  { "id": "displayName", "value": "TLS Server Name" }
                 ]
               }
             ]

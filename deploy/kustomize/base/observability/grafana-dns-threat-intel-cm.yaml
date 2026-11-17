@@ -229,7 +229,7 @@ data:
               "editorType": "sql",
               "format": 2,
               "queryType": "sql",
-              "rawSql": "SELECT $__timeInterval(timestamp) AS time, countIf(blocked = 0) AS allowed, countIf(blocked = 1) AS blocked FROM netsoldier.dns_queries WHERE $__timeFilter(timestamp) GROUP BY time ORDER BY time",
+              "rawSql": "SELECT $__timeInterval(timestamp) AS time, countIf(blocked = 0) AS allowed_queries, countIf(blocked = 1) AS blocked_queries FROM netsoldier.dns_queries WHERE $__timeFilter(timestamp) GROUP BY time ORDER BY time",
               "refId": "A"
             }
           ],
@@ -246,14 +246,14 @@ data:
             },
             "overrides": [
               {
-                "matcher": { "id": "byName", "options": "allowed" },
+                "matcher": { "id": "byName", "options": "allowed_queries" },
                 "properties": [
                   { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } },
                   { "id": "displayName", "value": "Allowed" }
                 ]
               },
               {
-                "matcher": { "id": "byName", "options": "blocked" },
+                "matcher": { "id": "byName", "options": "blocked_queries" },
                 "properties": [
                   { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } },
                   { "id": "displayName", "value": "Blocked" }
@@ -461,7 +461,8 @@ data:
         {
           "id": 12,
           "type": "stat",
-          "title": "Unacknowledged",
+          "title": "Suppressed by an Analyst",
+          "description": "Alerts recorded while an analyst's false-positive verdict applied: kept in the history, not delivered to the killswitch.",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${clickhouse}" },
           "gridPos": { "h": 4, "w": 8, "x": 16, "y": 25 },
           "targets": [
@@ -469,7 +470,7 @@ data:
               "editorType": "sql",
               "format": 1,
               "queryType": "sql",
-              "rawSql": "SELECT countIf(acknowledged = 0) AS unacked FROM netsoldier.alerts WHERE $__timeFilter(timestamp)",
+              "rawSql": "SELECT countIf(suppressed = 1) AS suppressed_alerts FROM netsoldier.alerts WHERE $__timeFilter(timestamp)",
               "refId": "A"
             }
           ],
@@ -478,8 +479,7 @@ data:
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
-                  { "color": "orange", "value": null },
-                  { "color": "red", "value": 5 }
+                  { "color": "text", "value": null }
                 ]
               }
             }
@@ -599,7 +599,7 @@ data:
               "editorType": "sql",
               "format": 1,
               "queryType": "sql",
-              "rawSql": "SELECT timestamp, client_ip, domain, matched_ioc, severity, source, if(acknowledged = 1, 'Yes', 'No') AS acked FROM netsoldier.alerts WHERE $__timeFilter(timestamp) ORDER BY timestamp DESC LIMIT 50",
+              "rawSql": "SELECT timestamp, client_ip, domain, matched_ioc, severity, source, if(suppressed = 1, 'Yes', 'No') AS silenced FROM netsoldier.alerts WHERE $__timeFilter(timestamp) ORDER BY timestamp DESC LIMIT 50",
               "refId": "A"
             }
           ],
@@ -648,9 +648,9 @@ data:
                 ]
               },
               {
-                "matcher": { "id": "byName", "options": "acked" },
+                "matcher": { "id": "byName", "options": "silenced" },
                 "properties": [
-                  { "id": "displayName", "value": "Acked" }
+                  { "id": "displayName", "value": "Suppressed" }
                 ]
               }
             ]
