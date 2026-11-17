@@ -66,7 +66,7 @@ http_bench() {
   local pids=()
 
   tmpdir=$(mktemp -d)
-  trap "rm -rf $tmpdir" RETURN
+  trap 'rm -rf "$tmpdir"' RETURN
 
   for c in $(seq 1 "$CONCURRENCY"); do
     (
