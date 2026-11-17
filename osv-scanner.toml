@@ -20,26 +20,9 @@
 # release; tests/e2e now pins golang.org/x/crypto v0.59.0, which is past it.
 
 # ── apps/web-ui ─────────────────────────────────────────────────────────
-# The four SvelteKit ones go away with the move to SvelteKit 3 (which also
-# needs adapter-node 6, vite 8 and TypeScript 6); re-check them when that
-# upgrade is done rather than extending the date. Two of them (one rated
-# high, one moderate) are in remote functions, an experimental feature that
-# is off unless svelte.config.js sets kit.experimental.remoteFunctions:
-# enabling it makes both entries false, so remove them first.
-
-[[IgnoredVulns]]
-id = "GHSA-27mw-82g8-phjj"
-ignoreUntil = 2027-02-15
-reason = """@sveltejs/kit: XSS through an untrusted cache-control header in a
-prerendered page. Fixed only in 3.0.0. The web UI prerenders nothing: the root
-layout disables SSR and no route sets prerender = true."""
-
-[[IgnoredVulns]]
-id = "GHSA-pfhg-q3qv-9q6r"
-ignoreUntil = 2027-02-15
-reason = """@sveltejs/kit: open redirect through enhanced form submissions.
-Fixed only in 3.0.0. The web UI has no form actions and never uses
-use:enhance; sign-in and every mutation are JSON requests to /api."""
+# The four SvelteKit entries (GHSA-27mw-82g8-phjj, GHSA-pfhg-q3qv-9q6r,
+# GHSA-3r8g-jcqq-3p5j, GHSA-6cf5-gc4q-fm3x) went away with the move to
+# SvelteKit 3.2 (step 125.22), which carries every one of their fixes.
 
 [[IgnoredVulns]]
 id = "GHSA-gcqx-w48m-w2h4"
@@ -48,19 +31,3 @@ reason = """deepmerge: prototype poisoning of the object mergeObject() returns.
 No fixed release exists. It is a build-time dependency only, pulled in by
 @rollup/plugin-node-resolve and @sveltejs/vite-plugin-svelte; nothing in the
 running server imports it and it never sees request data."""
-
-[[IgnoredVulns]]
-id = "GHSA-3r8g-jcqq-3p5j"
-ignoreUntil = 2027-02-15
-reason = """@sveltejs/kit: denial of service while parsing form data sent to a
-remote functions `form` (rated high). Fixed only in 3.1.1. It affects only
-applications that enable the experimental remote functions flag; svelte.config.js
-does not set kit.experimental.remoteFunctions and the web UI has no *.remote.*
-module, so the vulnerable parser is never reachable."""
-
-[[IgnoredVulns]]
-id = "GHSA-6cf5-gc4q-fm3x"
-ignoreUntil = 2027-02-15
-reason = """@sveltejs/kit: private `query.batch` remote functions could share a
-batch and receive each other's arguments (rated moderate). Fixed only in 3.1.1.
-Remote functions are not enabled and not used here, as for GHSA-3r8g-jcqq-3p5j."""
