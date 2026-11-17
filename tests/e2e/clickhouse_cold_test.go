@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,45 +90,6 @@ admin_token = "netsoldier-test-admin"
 	return path
 }
 
-// writeStorageXML mirrors the production storage.xml from
-// deploy/kustomize/base/clickhouse/configmap.yaml, with the endpoint
-// pointed at the `garage` network alias instead of garage.storage.svc.
-func writeStorageXML(t *testing.T) string {
-	t.Helper()
-	xml := `<clickhouse>
-    <storage_configuration>
-        <disks>
-            <s3_cold>
-                <type>s3</type>
-                <endpoint>http://garage:3900/netsoldier-cold/native/</endpoint>
-                <use_environment_credentials>true</use_environment_credentials>
-                <skip_access_check>true</skip_access_check>
-                <metadata_path>/var/lib/clickhouse/disks/s3_cold/</metadata_path>
-            </s3_cold>
-        </disks>
-        <policies>
-            <tiered>
-                <volumes>
-                    <default>
-                        <disk>default</disk>
-                    </default>
-                    <cold>
-                        <disk>s3_cold</disk>
-                        <perform_ttl_move_on_insert>false</perform_ttl_move_on_insert>
-                    </cold>
-                </volumes>
-            </tiered>
-        </policies>
-    </storage_configuration>
-</clickhouse>
-`
-	path := filepath.Join(t.TempDir(), "storage.xml")
-	if err := os.WriteFile(path, []byte(xml), 0o644); err != nil {
-		t.Fatalf("write storage.xml: %v", err)
-	}
-	return path
-}
-
 // startGarage brings up the S3 backend and bootstraps it: a fresh Garage
 // node holds no cluster layout and serves no S3 traffic until one is
 // applied, so the layout, the access key and the bucket are all created
@@ -145,9 +107,11 @@ func startGarage(t *testing.T, networkName string) garageCreds {
 				ContainerFilePath: "/etc/garage.toml",
 				FileMode:          0o644,
 			}},
-			ExposedPorts:   []string{"3900/tcp"},
-			Networks:       []string{networkName},
-			NetworkAliases: map[string][]string{networkName: {"garage"}},
+			ExposedPorts: []string{"3900/tcp"},
+			Networks:     []string{networkName},
+			// garage.storage.svc is the name the deployment's storage.xml
+			// points the cold disk at; the test runs that file unchanged.
+			NetworkAliases: map[string][]string{networkName: {"garage", "garage.storage.svc"}},
 			WaitingFor:     wait.ForLog("S3 API server listening"),
 		},
 		Started: true,
@@ -229,66 +193,71 @@ func TestClickHouseColdTier(t *testing.T) {
 
 	creds := startGarage(t, net.Name)
 
-	chURL := startClickHouseContainer(t, func(req *testcontainers.ContainerRequest) {
+	srv := startProdClickHouse(t, chOptions{customize: func(req *testcontainers.ContainerRequest) {
 		req.Networks = []string{net.Name}
 		req.Env["AWS_ACCESS_KEY_ID"] = creds.accessKey
 		req.Env["AWS_SECRET_ACCESS_KEY"] = creds.secretKey
-	})
-	runMigrations(t, chURL)
+	}})
+	// What the operator does by hand (moves, exports) runs as `default`, the
+	// local administrator; the rows themselves arrive as the Zeek sidecar.
+	admin := func(q string) (string, error) {
+		out, code := srv.containerExec(t, []string{"CLICKHOUSE_PASSWORD=" + srv.passwords["default"]},
+			"clickhouse-client", "--user", "default", "--query", q)
+		if code != 0 {
+			return out, fmt.Errorf("%s: exit %d: %s", q, code, out)
+		}
+		return strings.TrimSpace(withoutAllocatorNotes(out)), nil
+	}
 
 	t.Run("TieredPolicyApplied", func(t *testing.T) {
 		type row struct {
 			Policy string `json:"storage_policy"`
 		}
 		var rows []row
-		if err := chQueryRows(chURL, "netsoldier",
-			"SELECT storage_policy FROM system.tables WHERE database = 'netsoldier' AND name = 'network_flows'",
+		if err := srv.query("migrate",
+			"SELECT storage_policy FROM system.tables WHERE database = 'netsoldier' AND name = 'zeek_conn'",
 			&rows); err != nil {
 			t.Fatalf("query storage_policy: %v", err)
 		}
 		if len(rows) != 1 || rows[0].Policy != "tiered" {
-			t.Fatalf("network_flows storage_policy = %v, want tiered", rows)
+			t.Fatalf("zeek_conn storage_policy = %v, want tiered", rows)
 		}
 
-		type volRow struct {
-			Volume string `json:"volume_name"`
-		}
-		var vols []volRow
-		if err := chQueryRows(chURL, "netsoldier",
-			"SELECT volume_name FROM system.storage_policies WHERE policy_name = 'tiered' ORDER BY volume_priority",
-			&vols); err != nil {
+		// The system tables below are the administrator's to read.
+		out, err := admin("SELECT volume_name FROM system.storage_policies WHERE policy_name = 'tiered' ORDER BY volume_priority")
+		if err != nil {
 			t.Fatalf("query storage_policies: %v", err)
 		}
-		if len(vols) != 2 || vols[0].Volume != "default" || vols[1].Volume != "cold" {
+		if vols := strings.Fields(out); len(vols) != 2 || vols[0] != "default" || vols[1] != "cold" {
 			t.Fatalf("tiered policy volumes = %v, want [default cold]", vols)
 		}
 	})
 
 	// Merges could combine hot and aged parts before the move assertion runs.
-	if err := chExec(chURL, "SYSTEM STOP MERGES netsoldier.network_flows"); err != nil {
+	if _, err := admin("SYSTEM STOP MERGES netsoldier.zeek_conn"); err != nil {
 		t.Fatalf("stop merges: %v", err)
 	}
 
 	oldTS := time.Now().UTC().AddDate(0, 0, -45)
 	insertFlow := func(ts time.Time, dstIP string) {
 		t.Helper()
-		if err := chInsert(chURL, "netsoldier", "network_flows", map[string]any{
+		srv.mustInsert(t, "zeek", "zeek_conn", map[string]any{
 			"timestamp":   ts.Format("2006-01-02 15:04:05"),
+			"uid":         fmt.Sprintf("Ccold%d", ts.UnixNano()),
 			"src_ip":      "192.168.1.50",
 			"src_port":    40000,
 			"dst_ip":      dstIP,
 			"dst_port":    443,
-			"protocol":    6,
-			"bytes_in":    512,
-			"bytes_out":   2048,
-			"packets_in":  4,
-			"packets_out": 6,
+			"proto":       "tcp",
+			"service":     "ssl",
 			"duration_ms": 120,
-			"tcp_flags":   24,
-			"vlan_id":     0,
-		}); err != nil {
-			t.Fatalf("insert flow: %v", err)
-		}
+			"orig_bytes":  2048,
+			"resp_bytes":  512,
+			"conn_state":  "SF",
+			"local_orig":  1,
+			"orig_pkts":   6,
+			"resp_pkts":   4,
+		})
 	}
 
 	const oldRows, recentRows = 3, 2
@@ -301,8 +270,8 @@ func TestClickHouseColdTier(t *testing.T) {
 		// assert on the part placement, which both paths converge on.
 		var moveErr error
 		for attempt := 0; attempt < 3; attempt++ {
-			if moveErr = chExec(chURL,
-				"ALTER TABLE netsoldier.network_flows MOVE PARTITION ID 'all' TO VOLUME 'cold'"); moveErr == nil {
+			if _, moveErr = admin(
+				"ALTER TABLE netsoldier.zeek_conn MOVE PARTITION ID 'all' TO VOLUME 'cold'"); moveErr == nil {
 				break
 			}
 			time.Sleep(2 * time.Second)
@@ -315,21 +284,18 @@ func TestClickHouseColdTier(t *testing.T) {
 			insertFlow(time.Now().UTC(), "198.51.100.9")
 		}
 
-		type diskRow struct {
-			Disk string      `json:"disk_name"`
-			Rows json.Number `json:"total_rows"`
-		}
 		deadline := time.Now().Add(120 * time.Second)
 		for {
-			var disks []diskRow
-			if err := chQueryRows(chURL, "netsoldier",
-				"SELECT disk_name, sum(rows) AS total_rows FROM system.parts WHERE database = 'netsoldier' AND table = 'network_flows' AND active GROUP BY disk_name ORDER BY disk_name",
-				&disks); err != nil {
+			out, err := admin("SELECT disk_name, sum(rows) FROM system.parts WHERE database = 'netsoldier' " +
+				"AND table = 'zeek_conn' AND active GROUP BY disk_name ORDER BY disk_name")
+			if err != nil {
 				t.Fatalf("query parts: %v", err)
 			}
 			byDisk := map[string]string{}
-			for _, d := range disks {
-				byDisk[d.Disk] = d.Rows.String()
+			for _, line := range strings.Split(out, "\n") {
+				if f := strings.Fields(line); len(f) == 2 {
+					byDisk[f[0]] = f[1]
+				}
 			}
 			if byDisk["s3_cold"] == "3" && byDisk["default"] == "2" {
 				break
@@ -344,7 +310,8 @@ func TestClickHouseColdTier(t *testing.T) {
 			Count json.Number `json:"c"`
 		}
 		var counts []countRow
-		if err := chQueryRows(chURL, "netsoldier",
+		// Through the flow view, as the dashboards and the topology read it.
+		if err := srv.query("grafana",
 			"SELECT count() AS c FROM network_flows WHERE timestamp < now() - INTERVAL 40 DAY",
 			&counts); err != nil {
 			t.Fatalf("historical count: %v", err)
@@ -355,7 +322,7 @@ func TestClickHouseColdTier(t *testing.T) {
 			DstIP string `json:"dst_ip"`
 		}
 		var flows []flowRow
-		if err := chQueryRows(chURL, "netsoldier",
+		if err := srv.query("grafana",
 			"SELECT DISTINCT dst_ip FROM network_flows WHERE timestamp < now() - INTERVAL 40 DAY",
 			&flows); err != nil {
 			t.Fatalf("historical select: %v", err)
@@ -367,25 +334,20 @@ func TestClickHouseColdTier(t *testing.T) {
 
 	t.Run("ParquetArchiveRoundtrip", func(t *testing.T) {
 		day := oldTS.Format("2006-01-02")
-		dest := fmt.Sprintf("http://garage:3900/%s/cold/network_flows/year=%s/month=%s/day=%s/network_flows.parquet",
+		dest := fmt.Sprintf("http://garage:3900/%s/cold/zeek_conn/year=%s/month=%s/day=%s/zeek_conn.parquet",
 			coldBucket, oldTS.Format("2006"), oldTS.Format("01"), oldTS.Format("02"))
 
 		// Same query shape as export.sh in cold-export-cm.yaml.
-		if err := chExec(chURL, fmt.Sprintf(
-			"INSERT INTO FUNCTION s3('%s', '%s', '%s', 'Parquet') SELECT * FROM netsoldier.network_flows WHERE toDate(timestamp) = '%s'",
+		if _, err := admin(fmt.Sprintf(
+			"INSERT INTO FUNCTION s3('%s', '%s', '%s', 'Parquet') SELECT * FROM netsoldier.zeek_conn WHERE toDate(timestamp) = '%s'",
 			dest, creds.accessKey, creds.secretKey, day)); err != nil {
 			t.Fatalf("parquet export: %v", err)
 		}
-
-		type countRow struct {
-			Count json.Number `json:"c"`
-		}
-		var counts []countRow
-		if err := chQueryRows(chURL, "netsoldier", fmt.Sprintf(
-			"SELECT count() AS c FROM s3('%s', '%s', '%s', 'Parquet')",
-			dest, creds.accessKey, creds.secretKey), &counts); err != nil {
+		n, err := admin(fmt.Sprintf("SELECT count() FROM s3('%s', '%s', '%s', 'Parquet')",
+			dest, creds.accessKey, creds.secretKey))
+		if err != nil {
 			t.Fatalf("parquet read-back: %v", err)
 		}
-		assertEq(t, "parquet archive rows", "3", counts[0].Count.String())
+		assertEq(t, "parquet archive rows", "3", n)
 	})
 }

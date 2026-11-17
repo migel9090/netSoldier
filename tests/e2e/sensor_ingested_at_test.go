@@ -6,13 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/testcontainers/testcontainers-go"
 )
 
 // sensorTables are the tables detection-engine tails on (ingested_at, row
@@ -29,19 +26,15 @@ func TestSensorIngestedAtMigration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
-	chURL := startClickHouseContainer(t, func(req *testcontainers.ContainerRequest) {
-		req.Image = "clickhouse/clickhouse-server:24.3-alpine"
-	})
-	applyMigrationFiles(t, chURL, func(name string) bool { return name < "026" })
+	srv := startProdClickHouse(t, chOptions{noMigrate: true})
+	srv.migrateOnly(t, func(name string) bool { return name < "026" })
 
 	week := time.Now().UTC().Add(-7 * 24 * time.Hour).Truncate(time.Second)
 	for _, table := range sensorTables {
-		if err := chInsert(chURL, "netsoldier", table, sensorRow(table, week, "before")); err != nil {
-			t.Fatalf("insert into %s before 026: %v", table, err)
-		}
+		srv.mustInsert(t, sensorWriter[table], table, sensorRow(table, week, "before"))
 	}
 
-	applyMigrationFiles(t, chURL, func(name string) bool { return strings.HasPrefix(name, "026_") })
+	srv.migrateOnly(t, func(name string) bool { return name < "027" })
 
 	type row struct {
 		IA string `json:"ia"`
@@ -52,7 +45,7 @@ func TestSensorIngestedAtMigration(t *testing.T) {
 		var rows []row
 		q := fmt.Sprintf("SELECT toString(toUnixTimestamp64Milli(ingested_at)) AS ia, toString(toUnixTimestamp(timestamp)*1000) AS ts "+
 			"FROM netsoldier.%s WHERE %s", table, markerFilter(table, marker))
-		if err := chQueryRows(chURL, "netsoldier", q, &rows); err != nil {
+		if err := srv.query("migrate", q, &rows); err != nil {
 			t.Fatalf("%s: %v", table, err)
 		}
 		if len(rows) != 1 {
@@ -79,9 +72,7 @@ func TestSensorIngestedAtMigration(t *testing.T) {
 	// Written after the migration with the same week-old event time: the
 	// arrival time is now.
 	for _, table := range sensorTables {
-		if err := chInsert(chURL, "netsoldier", table, sensorRow(table, week, "after")); err != nil {
-			t.Fatalf("insert into %s after 026: %v", table, err)
-		}
+		srv.mustInsert(t, sensorWriter[table], table, sensorRow(table, week, "after"))
 		r := read(table, "after")
 		ia, _ := strconv.ParseInt(r.IA, 10, 64)
 		if d := time.Since(time.UnixMilli(ia)); d < -time.Minute || d > time.Minute {
@@ -89,20 +80,44 @@ func TestSensorIngestedAtMigration(t *testing.T) {
 		}
 	}
 
-	var idx []struct {
-		Table string `json:"table"`
-	}
-	if err := chQueryRows(chURL, "netsoldier",
-		"SELECT table FROM system.data_skipping_indices WHERE database = 'netsoldier' AND name = 'ingested_at_minmax' ORDER BY table",
-		&idx); err != nil {
-		t.Fatal(err)
-	}
+	// system.data_skipping_indices is for the administrator only.
+	idx := strings.Fields(srv.admin(t, "SELECT table FROM system.data_skipping_indices "+
+		"WHERE database = 'netsoldier' AND name = 'ingested_at_minmax' ORDER BY table"))
 	if len(idx) != len(sensorTables) {
 		t.Errorf("minmax index on %d tables (%v), want %d", len(idx), idx, len(sensorTables))
 	}
 
 	// The runner re-applies a file that failed part-way from the top.
-	applyMigrationFiles(t, chURL, func(name string) bool { return strings.HasPrefix(name, "026_") })
+	applyMigrationAgain(t, srv, "026_")
+}
+
+// sensorWriter is the account that writes each sensor table.
+var sensorWriter = map[string]string{
+	"suricata_alerts": "suricata", "zeek_intel": "zeek", "zeek_ssl": "zeek",
+	"ml_beacons": "ml_beacon", "ml_anomalies": "ml_flow",
+}
+
+// applyMigrationAgain runs the statements of the migration whose name starts
+// with prefix once more, as the migrate account: what the runner does with a
+// file that failed part-way. It must succeed and change nothing.
+func applyMigrationAgain(t *testing.T, srv *chServer, prefix string) {
+	t.Helper()
+	for _, name := range migrationFiles(t) {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(repoRoot(t), "deploy", "clickhouse", "migrations", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, stmt := range splitStatements(string(data)) {
+			if err := srv.exec("migrate", stmt); err != nil {
+				t.Fatalf("re-running %s: %v", name, err)
+			}
+		}
+		return
+	}
+	t.Fatalf("no migration %s*", prefix)
 }
 
 func sensorRow(table string, eventTime time.Time, marker string) map[string]any {
@@ -139,33 +154,5 @@ func markerFilter(table, marker string) string {
 		return fmt.Sprintf("dst_domain = '%s.example'", marker)
 	default:
 		return fmt.Sprintf("model_version = '%s'", marker)
-	}
-}
-
-// applyMigrationFiles applies the migration files keep selects, in order.
-func applyMigrationFiles(t *testing.T, chURL string, keep func(name string) bool) {
-	t.Helper()
-	dir := filepath.Join(repoRoot(t), "deploy", "clickhouse", "migrations")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var files []string
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".sql") && keep(e.Name()) {
-			files = append(files, e.Name())
-		}
-	}
-	sort.Strings(files)
-	for _, f := range files {
-		data, err := os.ReadFile(filepath.Join(dir, f))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, stmt := range splitStatements(string(data)) {
-			if err := chExec(chURL, stmt); err != nil {
-				t.Fatalf("migration %s: %v", f, err)
-			}
-		}
 	}
 }
