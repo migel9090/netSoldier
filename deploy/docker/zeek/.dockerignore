@@ -1,0 +1,4 @@
+# Allowlist: the image needs the site scripts, nothing else (in particular
+# not the test pcaps).
+*
+!scripts/

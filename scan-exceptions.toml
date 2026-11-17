@@ -442,10 +442,12 @@ tool = "hadolint"
 rule = "DL3008"
 files = ["deploy/docker/zeek/Dockerfile"]
 until = 2027-05-15
-reason = """git and libcap2-bin are build tools for zkg and setcap. Debian
-drops superseded patch versions between point releases, so exact pins break
-the build (the reason already given next to the line); the Zeek base image
-tag is fixed."""
+reason = """Two unpinned apt installs: libcap2-bin (setcap) in the build stage,
+and in the runtime the Debian shared libraries the upstream zeek binary links
+against. Debian keeps only the current version of a package in its archive,
+so an exact pin breaks the build at the next security update (the reason is
+also given next to the lines); the base images are pinned by digest, and the
+build fails if a library the binary needs is missing (ldd check)."""
 
 # ════════════════════════════════════════════════════════════════════════════
 # Semgrep (rule ids as the registry names them; scripts/ci/semgrep-rules.txt)
