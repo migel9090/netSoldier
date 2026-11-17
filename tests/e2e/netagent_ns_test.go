@@ -196,6 +196,12 @@ func runInsideNamespace(t *testing.T) {
 	}()
 
 	dev := waitForDevice(t, "http://"+invAddr, apiKey, strings.ToLower(devMAC.String()))
+	// The ARP announcement can be recorded before the DHCP request that
+	// carries the name; keep sending until both are in.
+	for deadline := time.Now().Add(10 * time.Second); dev.Hostname == "" && time.Now().Before(deadline); {
+		time.Sleep(100 * time.Millisecond)
+		dev = waitForDevice(t, "http://"+invAddr, apiKey, strings.ToLower(devMAC.String()))
+	}
 	close(stopSender)
 	if dev.IP != devIP {
 		t.Errorf("device IP = %q, want %q", dev.IP, devIP)
