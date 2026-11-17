@@ -4,6 +4,11 @@
 #
 #    pip-compile --generate-hashes --no-emit-index-url --output-file=infra/ansible/requirements.txt --strip-extras infra/ansible/requirements.in
 #
+# One entry is added by hand after compiling: typing-extensions, with a
+# marker. Below Python 3.13 `referencing` needs it, a lock compiled on a newer
+# Python leaves it out, and --require-hashes then refuses the whole install
+# (the lab's static checks run on 3.12 in CI). Keep it when regenerating.
+#
 ansible-compat==26.11.0 \
     --hash=sha256:35cbe829e0b5a9acb85d34b8d5da2eb45acaf767f6651f90e0ab2f3a96a060bb \
     --hash=sha256:c06a486b39ced440f9f6fb9a99583c73d9239c94ece822a27ea2242173462dda
@@ -707,6 +712,10 @@ subprocess-tee==0.4.2 \
     # via
     #   ansible-compat
     #   ansible-lint
+typing-extensions==4.16.0 ; python_version < "3.13" \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
+    --hash=sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5
+    # via referencing (below Python 3.13 only; added by hand, see the header)
 wcmatch==12.0.3 \
     --hash=sha256:7255aeae27423a2dfe5bbce9bab7e97369ecad16f0d0a5244f85239123daeaa5 \
     --hash=sha256:ccf83affafadc4286ffb335bc827ca2bffb0547fa5d5587600b585151bce4359
