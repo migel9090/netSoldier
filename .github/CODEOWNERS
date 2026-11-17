@@ -1,0 +1,20 @@
+# Cross review (roadmap section 3, rule 5): each maintainer reviews the
+# other's area. GitHub requests the owner listed here on every pull request
+# that touches the path; branch protection requires one approving review
+# (.github/branch-protection.json). Code-owner approval itself is not made
+# mandatory there, because a pull request touching its author's own area
+# would then need a second owner of that area, and there is none.
+#
+# The last matching pattern wins.
+
+# Deployment, infrastructure and CI: written by the devops engineer,
+# reviewed by the backend developer.
+/deploy/   @MagicCactus42
+/infra/    @MagicCactus42
+/.github/  @MagicCactus42
+
+# Services, shared libraries and tests: written by the backend developer,
+# reviewed by the devops engineer.
+/apps/     @migel9090
+/libs/     @migel9090
+/tests/    @migel9090

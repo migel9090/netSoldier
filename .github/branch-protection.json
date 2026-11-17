@@ -1,0 +1,80 @@
+{
+  "$comment": [
+    "Intended protection of main (roadmap 125.2, audit CI-2). The owners apply it",
+    "with scripts/ci/branch-protection.py --apply; --check compares it with the",
+    "live settings without changing anything (task ci:branch-protection).",
+    "",
+    "required_checks is the one list of check names. A check is named after its",
+    "job (its `name:` when set, e.g. 'Terraform validate'; 'job (value)' for a",
+    "matrix). When a workflow renames or splits a job, change the name here in the",
+    "same pull request, or the old name stays required and the merge blocks.",
+    "Apply a newly added check only after a pull request run shows it green.",
+    "",
+    "Squash-only merging is a repository setting, not part of this file: see",
+    "CONTRIBUTING.md and the owners' decision on merge methods."
+  ],
+  "branch": "main",
+  "required_checks": {
+    "github-actions": {
+      "app_id": 15368,
+      "step-125.2": [
+        "lint",
+        "test",
+        "web-ui",
+        "validate",
+        "e2e",
+        "integration",
+        "build",
+        "build-device-inventory",
+        "build-killswitch-controller",
+        "build-ml-anomaly",
+        "build-netagent",
+        "build-threat-intel-sync",
+        "build-web-ui",
+        "build-zeek",
+        "osv-scanner",
+        "grype",
+        "gitleaks",
+        "kics",
+        "checkov",
+        "Terraform validate"
+      ],
+      "step-125.3": [
+        "semgrep",
+        "codeql (go)",
+        "codeql (python)",
+        "codeql (javascript-typescript)",
+        "codeql (actions)",
+        "hadolint",
+        "sops-check",
+        "actionlint",
+        "shellcheck",
+        "quadlet",
+        "promtool",
+        "pcap-corpus",
+        "pcap-corpus-zeek-image",
+        "infra-lab-static"
+      ]
+    },
+    "github-code-scanning": {
+      "app_id": 57789,
+      "step-125.3": ["CodeQL"]
+    }
+  },
+  "protection": {
+    "required_status_checks": {
+      "strict": true
+    },
+    "enforce_admins": true,
+    "required_pull_request_reviews": {
+      "required_approving_review_count": 1,
+      "dismiss_stale_reviews": true,
+      "require_code_owner_reviews": false,
+      "require_last_push_approval": false
+    },
+    "restrictions": null,
+    "required_linear_history": false,
+    "allow_force_pushes": false,
+    "allow_deletions": false
+  }
+}
