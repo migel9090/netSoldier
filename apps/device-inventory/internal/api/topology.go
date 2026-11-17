@@ -131,6 +131,9 @@ func (h *TopologyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(topoResponse{Nodes: nodes, Edges: edges})
 }
 
+// queryFlows aggregates the flows of the last hours per address pair.
+// network_flows is a view over Zeek's conn.log (migration 028): bytes and
+// packets of both directions, src the side that opened the connection.
 func (h *TopologyHandler) queryFlows(ctx context.Context, hours int) ([]topoEdge, error) {
 	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

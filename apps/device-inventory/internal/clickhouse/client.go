@@ -185,6 +185,23 @@ func (u *UInt64) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// Bool decodes a ClickHouse flag column (UInt8 0/1, or Bool) and encodes as
+// a JSON boolean.
+type Bool bool
+
+// UnmarshalJSON accepts 0, 1, "0", "1", true and false.
+func (b *Bool) UnmarshalJSON(raw []byte) error {
+	switch string(raw) {
+	case "1", `"1"`, "true":
+		*b = true
+	case "0", `"0"`, "false", "null":
+		*b = false
+	default:
+		return fmt.Errorf("clickhouse flag: %s", raw)
+	}
+	return nil
+}
+
 // DeviceRecord is a snapshot row for the devices table
 // (ReplacingMergeTree(updated_at), one current row per MAC).
 type DeviceRecord struct {
