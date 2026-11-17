@@ -252,6 +252,23 @@ func TestAllRejectedIsNotJudged(t *testing.T) {
 	}
 }
 
+// TestFullStoreIsNotTheFeedsAnswer: when the store cap refuses every row of
+// a fetch, the fetch is not recorded as the feed's answer (it would start
+// the expiry of everything the feed listed before), as before the guard.
+func TestFullStoreIsNotTheFeedsAnswer(t *testing.T) {
+	s := ioc.NewStore(ioc.WithMaxIndicators(5))
+	m := New(s, DefaultLimits(), []string{"feed"}, 5)
+	m.Ingest("feed", domains("a", 5), true, time.Now().Add(-time.Hour))
+	before := s.FeedSuccess()["feed"]
+	out := m.Ingest("feed", domains("z", 5), true, time.Now())
+	if !out.Applied || out.Stats.Accepted != 0 || out.Stats.Dropped != 5 {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if !s.FeedSuccess()["feed"].Equal(before) || len(s.VolumeHistory("feed")) != 1 {
+		t.Error("a fetch the full store refused entirely was recorded as the feed's answer")
+	}
+}
+
 func TestHoldCap(t *testing.T) {
 	s := ioc.NewStore()
 	m := New(s, Limits{GrowthFactor: 3, ShrinkFactor: 4, MinChange: 0, FirstSyncMax: 10}, []string{"feed"}, 25)

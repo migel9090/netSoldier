@@ -13,6 +13,7 @@ import (
 
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/abusech"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/feedhttp"
+	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/guard"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/ioc"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/misp"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/spamhaus"
@@ -59,6 +60,33 @@ import (
 //	MISP_LOOKBACK            7d
 //	MISP_MAX_PAGES           20
 //	MISP_PAGE_SIZE           5000
+//
+// Volume guard (internal/guard; a fetch beyond these is held in
+// quarantine and the previous set keeps being served):
+//
+//	VOLUME_GROWTH_FACTOR     3       hold a fetch above 3 × the usual size;
+//	                                 above 1, at most 1000
+//	VOLUME_SHRINK_FACTOR     4       hold a complete fetch below usual / 4;
+//	                                 above 1, at most 1000
+//	VOLUME_MIN_CHANGE        500     ... only when it differs from usual by
+//	                                 at least this many; 0 – 10 000 000
+//	VOLUME_FIRST_SYNC_MAX    50000   hold a source's first fetch above this;
+//	                                 1 – 10 000 000
+//
+// Freshness and the operator API:
+//
+//	SOURCE_MAX_AGE           max(24h, 3 × SYNC_INTERVAL)  freshness objective
+//	                                 of every source: past it, the source is
+//	                                 stale (metric, /readyz); at least
+//	                                 2 × SYNC_INTERVAL
+//	SOURCE_MAX_AGE_<SOURCE>  SOURCE_MAX_AGE  per source (SPAMHAUS, THREATFOX,
+//	                                 URLHAUS, FEODO, MISP); at least
+//	                                 2 × max(SYNC_INTERVAL, the feed's own
+//	                                 minimum interval)
+//	THREAT_INTEL_API_KEY     ""      bearer token of the quarantine API; at
+//	                                 least 16 printable characters. Unset:
+//	                                 the API answers 403 (inspection and
+//	                                 release need it), everything else runs
 type config struct {
 	listenAddr    string
 	syncInterval  time.Duration
@@ -68,6 +96,9 @@ type config struct {
 	maxBodyBytes  int64
 	sourceTimeout time.Duration
 	commercial    bool
+	volume        guard.Limits
+	maxAge        time.Duration // default freshness objective
+	apiKey        string
 
 	sources  []source
 	disabled []disabledSource
@@ -80,7 +111,15 @@ type source struct {
 	// minInterval is the feed's own floor between downloads, honoured by
 	// retries too (Spamhaus: one hour).
 	minInterval time.Duration
+	// endpoint is where the feed is fetched from, for the start-up log and
+	// the pinning test. The client refuses any redirect off its origin.
+	endpoint string
+	// maxAge is the source's freshness objective; 0 means none.
+	maxAge time.Duration
 }
+
+// minAPIKeyLen keeps a placeholder ("changeme", "x") from being an API key.
+const minAPIKeyLen = 16
 
 type disabledSource struct {
 	name, reason string
@@ -131,6 +170,52 @@ func loadConfig(getenv func(string) string) (config, error) {
 	} else if cfg.syncInterval > 0 && cfg.sourceTimeout > cfg.syncInterval {
 		fatal("SOURCE_TIMEOUT=%s: must not exceed SYNC_INTERVAL (%s)", cfg.sourceTimeout, cfg.syncInterval)
 	}
+
+	cfg.volume = guard.DefaultLimits()
+	parseFactor := func(key string, dst *float64) {
+		if v := env(key, ""); v != "" {
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil || !(f > guard.MinFactor && f <= guard.MaxFactor) {
+				fatal("%s=%q: must be a number above %v and at most %v", key, v, guard.MinFactor, guard.MaxFactor)
+				return
+			}
+			*dst = f
+		}
+	}
+	parseCount := func(key string, dst *int, lo, hi int) {
+		if v := env(key, ""); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < lo || n > hi {
+				fatal("%s=%q: must be an integer from %d to %d", key, v, lo, hi)
+				return
+			}
+			*dst = n
+		}
+	}
+	parseFactor("VOLUME_GROWTH_FACTOR", &cfg.volume.GrowthFactor)
+	parseFactor("VOLUME_SHRINK_FACTOR", &cfg.volume.ShrinkFactor)
+	parseCount("VOLUME_MIN_CHANGE", &cfg.volume.MinChange, 0, guard.MaxMinChange)
+	parseCount("VOLUME_FIRST_SYNC_MAX", &cfg.volume.FirstSyncMax, 1, guard.MaxFirstSyncMax)
+	if err := cfg.volume.Validate(); err != nil {
+		fatal("volume guard: %v", err)
+	}
+
+	cfg.maxAge = max(24*time.Hour, 3*cfg.syncInterval)
+	if v := env("SOURCE_MAX_AGE", ""); v != "" {
+		if cfg.maxAge, err = time.ParseDuration(v); err != nil {
+			fatal("SOURCE_MAX_AGE: %v", err)
+		}
+	}
+	if cfg.syncInterval > 0 && cfg.maxAge < 2*cfg.syncInterval {
+		fatal("SOURCE_MAX_AGE=%s: must be at least twice SYNC_INTERVAL (%s), or every source "+
+			"would be stale between two cycles", cfg.maxAge, cfg.syncInterval)
+	}
+
+	cfg.apiKey = strings.TrimSpace(getenv("THREAT_INTEL_API_KEY"))
+	if cfg.apiKey != "" && !validAPIKey(cfg.apiKey) {
+		fatal("THREAT_INTEL_API_KEY: must be at least %d printable ASCII characters without spaces",
+			minAPIKeyLen)
+	}
 	if len(errs) > 0 {
 		return cfg, errors.Join(errs...)
 	}
@@ -152,8 +237,53 @@ func loadConfig(getenv func(string) string) (config, error) {
 		name:        "spamhaus",
 		fetch:       spClient.FetchAll,
 		minInterval: spamhaus.MinFetchInterval,
+		endpoint:    spamhaus.DROPURL,
 	})
+
+	// Freshness objectives, per source.
+	for i := range cfg.sources {
+		src := &cfg.sources[i]
+		src.maxAge = cfg.maxAge
+		key := "SOURCE_MAX_AGE_" + strings.ToUpper(src.name)
+		if v := env(key, ""); v != "" {
+			if src.maxAge, err = time.ParseDuration(v); err != nil {
+				fatal("%s: %v", key, err)
+				continue
+			}
+		}
+		if floor := 2 * max(cfg.syncInterval, src.minInterval); src.maxAge < floor {
+			fatal("%s=%s: must be at least %s (twice the source's interval)", key, src.maxAge, floor)
+		}
+	}
+	if len(errs) > 0 {
+		return cfg, errors.Join(errs...)
+	}
 	return cfg, nil
+}
+
+// validAPIKey: long enough, and printable ASCII without spaces, so it can
+// only ever be compared, never smuggle anything into a header or a log.
+func validAPIKey(k string) bool {
+	if len(k) < minAPIKeyLen {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		if k[i] <= 0x20 || k[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// freshnessObjectives returns every enabled source's objective.
+func (cfg config) freshnessObjectives() map[string]time.Duration {
+	out := make(map[string]time.Duration, len(cfg.sources))
+	for _, s := range cfg.sources {
+		if s.maxAge > 0 {
+			out[s.name] = s.maxAge
+		}
+	}
+	return out
 }
 
 func (cfg *config) disable(name, reason string, args ...any) {
@@ -204,7 +334,8 @@ func (cfg *config) configureMISP(env func(string, string) string) {
 	client := misp.NewClient(mispURL, key)
 	client.SetLimits(cfg.maxBodyBytes, maxPages, pageSize)
 	cfg.sources = append(cfg.sources, source{
-		name: "misp",
+		name:     "misp",
+		endpoint: u.Scheme + "://" + u.Host,
 		fetch: func(ctx context.Context) ([]ioc.Indicator, error) {
 			attrs, err := client.FetchAllAttributes(ctx, misp.SearchRequest{
 				Types: []string{
@@ -259,8 +390,9 @@ func (cfg *config) configureAbuseCH(env func(string, string) string) {
 		} else {
 			tfClient := abusech.NewThreatFoxClient(opts...)
 			cfg.sources = append(cfg.sources, source{
-				name:  "threatfox",
-				fetch: func(ctx context.Context) ([]ioc.Indicator, error) { return tfClient.Fetch(ctx, tfDays) },
+				name:     "threatfox",
+				endpoint: abusech.ThreatFoxURL,
+				fetch:    func(ctx context.Context) ([]ioc.Indicator, error) { return tfClient.Fetch(ctx, tfDays) },
 			})
 		}
 
@@ -271,14 +403,15 @@ func (cfg *config) configureAbuseCH(env func(string, string) string) {
 		} else {
 			uhClient := abusech.NewURLhausClient(opts...)
 			cfg.sources = append(cfg.sources, source{
-				name:  "urlhaus",
-				fetch: func(ctx context.Context) ([]ioc.Indicator, error) { return uhClient.Fetch(ctx, uhLimit) },
+				name:     "urlhaus",
+				endpoint: abusech.URLhausURL,
+				fetch:    func(ctx context.Context) ([]ioc.Indicator, error) { return uhClient.Fetch(ctx, uhLimit) },
 			})
 		}
 	}
 
 	feClient := abusech.NewFeodoClient(opts...)
-	cfg.sources = append(cfg.sources, source{name: "feodo", fetch: feClient.Fetch})
+	cfg.sources = append(cfg.sources, source{name: "feodo", endpoint: abusech.FeodoURL, fetch: feClient.Fetch})
 }
 
 // parseCommercialMode accepts the documented spellings. Anything else is an

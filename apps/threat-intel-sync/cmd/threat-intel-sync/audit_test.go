@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/guard"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/ioc"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -160,7 +161,7 @@ func TestAuditPartialAndEmptyAreSuccessOrLoss(t *testing.T) {
 	initSourceMetrics(cfg, nil)
 	results := map[string]sourceResult{}
 	for _, src := range sources {
-		results[src.name] = syncSource(context.Background(), store, src, time.Minute)
+		results[src.name] = syncSource(context.Background(), testGuard(store), store, src, time.Minute)
 	}
 
 	if !has(store, "198.51.100.0/24") {
@@ -196,7 +197,8 @@ func TestOutageAfterSuccessNeverExpiresIndicators(t *testing.T) {
 		return []ioc.Indicator{{Type: ioc.TypeDomain, Value: "apt.c2.example", Source: "misp"}}, nil
 	}}
 	initSourceMetrics(config{sources: []source{src}}, nil)
-	if !syncSource(context.Background(), store, src, time.Minute).success {
+	g := testGuard(store)
+	if !syncSource(context.Background(), g, store, src, time.Minute).success {
 		t.Fatal("fetch failed")
 	}
 	// The feed is now unreachable for longer than the TTL.
@@ -207,7 +209,7 @@ func TestOutageAfterSuccessNeverExpiresIndicators(t *testing.T) {
 	src.fetch = func(context.Context) ([]ioc.Indicator, error) {
 		return []ioc.Indicator{{Type: ioc.TypeDomain, Value: "other.example", Source: "misp"}}, nil
 	}
-	syncSource(context.Background(), store, src, time.Minute)
+	syncSource(context.Background(), g, store, src, time.Minute)
 	if n := store.PruneExpired(time.Now().Add(time.Hour)); n != 1 || has(store, "apt.c2.example") || !has(store, "other.example") {
 		t.Errorf("withdrawn indicator not expired, or the current one pruned (pruned %d)", n)
 	}
@@ -249,7 +251,7 @@ func TestAuditSourceMetricsPreinitialised(t *testing.T) {
 func TestExportsAnswer503UntilReady(t *testing.T) {
 	store := ioc.NewStore()
 	ready := newReadiness(store)
-	mux := routes(store, ready)
+	mux := testService(store, ready).routes()
 	exports := []string{"/export/json", "/export/zeek/intel.dat", "/export/csv", "/export/adguard",
 		"/export/suricata/domains", "/export/suricata/ips", "/export/suricata/domains.json",
 		"/export/suricata/ips.json", "/export/suricata/md5", "/export/suricata/sha256"}
@@ -317,7 +319,7 @@ func TestAuditRestartWhileOffline(t *testing.T) {
 		ready.trust()
 	}
 	rec := httptest.NewRecorder()
-	routes(store, ready).ServeHTTP(rec, httptest.NewRequest("GET", "/export/json", nil))
+	testService(store, ready).routes().ServeHTTP(rec, httptest.NewRequest("GET", "/export/json", nil))
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "198.51.100.0/24") {
 		t.Errorf("after restart: %d %q", rec.Code, rec.Body.String())
 	}
@@ -370,7 +372,7 @@ func TestSchedulerHonoursPersistedSuccess(t *testing.T) {
 	store.MarkFeedSuccess("spamhaus", time.Now().Add(-10*time.Minute))
 	cfg := config{syncInterval: time.Hour, indicatorTTL: 2 * time.Hour, sourceTimeout: time.Minute,
 		sources: []source{{name: "spamhaus", minInterval: time.Hour}, {name: "misp"}}}
-	s := newScheduler(cfg, store, newReadiness(store))
+	s := newScheduler(cfg, store, testGuard(store), newReadiness(store))
 	if d := time.Until(s.next["spamhaus"]); d < 45*time.Minute {
 		t.Errorf("spamhaus due in %s, want ~50m", d)
 	}
@@ -432,7 +434,19 @@ func TestMISPMapping(t *testing.T) {
 func testScheduler(store *ioc.Store, ready *readiness, sources ...source) *scheduler {
 	cfg := config{syncInterval: 6 * time.Hour, indicatorTTL: 720 * time.Hour, sourceTimeout: time.Minute, sources: sources}
 	initSourceMetrics(cfg, nil)
-	return newScheduler(cfg, store, ready)
+	return newScheduler(cfg, store, guard.New(store, guard.DefaultLimits(), cfg.sourceNames(), 0), ready)
+}
+
+// testGuard is a guard with the default limits over store, for tests that
+// exercise one source at a time.
+func testGuard(store *ioc.Store, feeds ...string) *guard.Manager {
+	return guard.New(store, guard.DefaultLimits(), feeds, 0)
+}
+
+// testService serves store with an empty configuration (no sources, no
+// API key), as the tests of the probes and exports need.
+func testService(store *ioc.Store, ready *readiness) *service {
+	return newService(config{}, store, testGuard(store), ready)
 }
 
 func seriesExists(name, source string) bool {

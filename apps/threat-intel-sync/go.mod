@@ -3,6 +3,7 @@ module github.com/migel9090/netSoldier/apps/threat-intel-sync
 go 1.27.4
 
 require (
+	github.com/migel9090/netSoldier/libs/events v0.0.0
 	github.com/migel9090/netSoldier/libs/indicator v0.0.0
 	github.com/prometheus/client_golang v1.24.1
 	modernc.org/sqlite v1.51.0
@@ -30,5 +31,7 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
+
+replace github.com/migel9090/netSoldier/libs/events v0.0.0 => ../../libs/events
 
 replace github.com/migel9090/netSoldier/libs/indicator v0.0.0 => ../../libs/indicator

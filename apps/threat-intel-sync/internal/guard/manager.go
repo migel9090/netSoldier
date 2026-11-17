@@ -101,7 +101,10 @@ func (m *Manager) Ingest(feed string, inds []ioc.Indicator, complete bool, start
 
 	out.Stats = m.store.Apply(b)
 	out.Applied = true
-	if !complete {
+	if !complete || (b.Stats.Rows > 0 && out.Stats.Accepted == 0) {
+		// Partial, or every row refused by the store cap: what was applied
+		// stays, but it is not the feed's answer (the caller counts the
+		// latter as a failure, as before the guard existed).
 		return out
 	}
 	var errs []error
