@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { fetchTopology } from '$lib/api'
-  import type { TopologyNode, TopologyEdge } from '$lib/types'
+  import { fetchTopology } from '#lib/api.ts'
+  import type { TopologyNode, TopologyEdge } from '#lib/types.ts'
 
   let loading: boolean = $state(true)
   let error: string = $state('')

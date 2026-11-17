@@ -20,7 +20,7 @@
     suppressionFor,
     suppressionPeriod,
     suppressionScope,
-  } from '$lib/alerts'
+  } from '#lib/alerts.ts'
   import {
     ALERTS_LIMIT,
     ALERTS_MAX_LIMIT,
@@ -31,9 +31,9 @@
     liftSuppression,
     normaliseMac,
     submitFeedback,
-  } from '$lib/api'
-  import { newestFirst } from '$lib/order'
-  import type { Alert, Suppression } from '$lib/types'
+  } from '#lib/api.ts'
+  import { newestFirst } from '#lib/order.ts'
+  import type { Alert, Suppression } from '#lib/types.ts'
 
   const SEVERITIES = ['critical', 'high', 'medium', 'low'] as const
 

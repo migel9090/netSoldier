@@ -1,9 +1,8 @@
-import { json } from '@sveltejs/kit'
 import type { RequestHandler } from './$types'
-import { revokeSession } from '$lib/server/auth'
-import { readConfig } from '$lib/server/config'
-import { clearSessionCookies } from '$lib/server/cookies'
-import { log } from '$lib/server/log'
+import { revokeSession } from '#lib/server/auth.ts'
+import { readConfig } from '#lib/server/config.ts'
+import { clearSessionCookies } from '#lib/server/cookies.ts'
+import { log } from '#lib/server/log.ts'
 
 /**
  * POST /api/logout — ends the session.
@@ -14,12 +13,12 @@ import { log } from '$lib/server/log'
  */
 export const POST: RequestHandler = async ({ cookies, locals, getClientAddress }) => {
   const result = readConfig()
-  if (!result.ok) return json({ error: 'web-ui is not configured' }, { status: 503 })
+  if (!result.ok) return Response.json({ error: 'web-ui is not configured' }, { status: 503 })
 
   if (locals.session) {
     revokeSession(locals.session)
     log('INFO', 'signed out', { client: getClientAddress(), actor: locals.session.actor })
   }
   clearSessionCookies(cookies, result.config)
-  return json({ status: 'signed out' })
+  return Response.json({ status: 'signed out' })
 }

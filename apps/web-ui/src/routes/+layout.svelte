@@ -1,6 +1,6 @@
 <script lang="ts">
   import { page } from '$app/state'
-  import { signOut } from '$lib/api'
+  import { signOut } from '#lib/api.ts'
   import type { LayoutProps } from './$types'
   import '../app.css'
 

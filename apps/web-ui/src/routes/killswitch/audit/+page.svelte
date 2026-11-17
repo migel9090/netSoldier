@@ -1,16 +1,16 @@
 <script lang="ts">
   import { page } from '$app/state'
   import { onMount, untrack } from 'svelte'
-  import { fetchAudit, fetchDevices, formatActionType, formatTime, isActionId } from '$lib/api'
-  import KillswitchNav from '$lib/components/KillswitchNav.svelte'
+  import { fetchAudit, fetchDevices, formatActionType, formatTime, isActionId } from '#lib/api.ts'
+  import KillswitchNav from '#lib/components/KillswitchNav.svelte'
   import {
     describeActor,
     describeBlock,
     describeTransition,
     deviceOf,
     isSystemActor,
-  } from '$lib/killswitch'
-  import type { AuditEntry } from '$lib/types'
+  } from '#lib/killswitch.ts'
+  import type { AuditEntry } from '#lib/types.ts'
 
   const PAGE = 50
 

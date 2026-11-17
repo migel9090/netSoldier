@@ -1,18 +1,19 @@
-import type { Handle, RequestEvent, ServerInit } from '@sveltejs/kit'
-import { building } from '$app/environment'
-import { env } from '$env/dynamic/private'
-import { SESSION_COOKIE, csrfOk, originOk, verifySession, type Session } from '$lib/server/auth'
-import { readConfig, type Config } from '$lib/server/config'
-import { log } from '$lib/server/log'
-import { countUpstreamError, type UpstreamErrorKind } from '$lib/server/metrics'
-import { startMetricsListener } from '$lib/server/metrics-listener'
+import type { RequestEvent } from '@sveltejs/kit'
+import type { Handle, ServerInit } from '@sveltejs/kit/hooks'
+import { building } from '$app/env'
+import { SESSION_COOKIE, csrfOk, originOk, verifySession, type Session } from '#lib/server/auth.ts'
+import { env } from '#lib/server/env.ts'
+import { readConfig, type Config } from '#lib/server/config.ts'
+import { log } from '#lib/server/log.ts'
+import { countUpstreamError, type UpstreamErrorKind } from '#lib/server/metrics.ts'
+import { startMetricsListener } from '#lib/server/metrics-listener.ts'
 import {
   PASSED_RESPONSE_HEADERS,
   callUpstream,
   matchRoute,
   upstreamQuery,
   type Service,
-} from '$lib/server/upstream'
+} from '#lib/server/upstream.ts'
 
 /**
  * Request pipeline for the household UI.
@@ -204,7 +205,7 @@ async function proxy(event: RequestEvent, session: Session, config: Config): Pro
 /**
  * An error the proxy produced itself — the backend never answered, or
  * refused the UI's key. The header tells the page this was not the
- * backend's verdict on the request (see UPSTREAM_ERROR_HEADER in $lib/api).
+ * backend's verdict on the request (see UPSTREAM_ERROR_HEADER in #lib/api.ts).
  */
 function upstreamError(
   error: string,
@@ -244,8 +245,8 @@ function json(payload: unknown, status: number): Response {
   })
 }
 
-// Pages get their Content-Security-Policy from SvelteKit (`kit.csp` in
-// svelte.config.js), which adds a nonce to the inline script that boots the
+// Pages get their Content-Security-Policy from SvelteKit (`csp` in
+// vite.config.ts), which adds a nonce to the inline script that boots the
 // client. A fixed `script-src 'self'` header used to block that script and
 // leave every page blank. Responses that are not pages get this policy.
 const NON_PAGE_CSP =

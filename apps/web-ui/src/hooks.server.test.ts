@@ -5,9 +5,9 @@ import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it, vi } 
 import { handle } from './hooks.server'
 import * as loginEndpoint from './routes/api/login/+server'
 import * as logoutEndpoint from './routes/api/logout/+server'
-import { issueDeviceToken } from '$lib/server/device'
-import { renderMetrics, resetMetrics } from '$lib/server/metrics'
-import { loginLimiter } from '$lib/server/ratelimit'
+import { issueDeviceToken } from '#lib/server/device.ts'
+import { renderMetrics, resetMetrics } from '#lib/server/metrics.ts'
+import { loginLimiter } from '#lib/server/ratelimit.ts'
 import { env } from './testing/env'
 import { PAGE_CSP, TestBrowser, parseSetCookie, type Endpoints } from './testing/kit'
 

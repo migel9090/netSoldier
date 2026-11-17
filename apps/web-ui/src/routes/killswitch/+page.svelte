@@ -14,8 +14,8 @@
     formatTime,
     formatActionType,
     type ActionResult,
-  } from '$lib/api'
-  import KillswitchNav from '$lib/components/KillswitchNav.svelte'
+  } from '#lib/api.ts'
+  import KillswitchNav from '#lib/components/KillswitchNav.svelte'
   import {
     actionTypeChoices,
     approveQuestion,
@@ -37,9 +37,9 @@
     type ActionTypeChoice,
     type Outcome,
     type Verb,
-  } from '$lib/killswitch'
-  import { newestFirst, oldestFirst } from '$lib/order'
-  import type { EnforcementAction, KillswitchPolicy } from '$lib/types'
+  } from '#lib/killswitch.ts'
+  import { newestFirst, oldestFirst } from '#lib/order.ts'
+  import type { EnforcementAction, KillswitchPolicy } from '#lib/types.ts'
 
   let pendingRaw: EnforcementAction[] = $state([])
   let activeRaw: EnforcementAction[] = $state([])

@@ -1,4 +1,4 @@
-import { env } from '$env/dynamic/private'
+import { env } from '#lib/server/env.ts'
 import type { Service } from './upstream'
 
 /**

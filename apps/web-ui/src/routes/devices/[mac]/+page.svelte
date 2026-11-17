@@ -9,17 +9,17 @@
     fetchDeviceAlerts,
     formatTime,
     normaliseMac,
-  } from '$lib/api'
-  import { alertHeadline, alertObservedDomain } from '$lib/alerts'
+  } from '#lib/api.ts'
+  import { alertHeadline, alertObservedDomain } from '#lib/alerts.ts'
   import {
     CONFLICTS_SHOWN,
     bindingWords,
     conflictCount,
     describeConflict,
     sourceName,
-  } from '$lib/devices'
-  import { newestFirst } from '$lib/order'
-  import type { Device, DeviceConnection, DeviceDNS, DeviceAlert } from '$lib/types'
+  } from '#lib/devices.ts'
+  import { newestFirst } from '#lib/order.ts'
+  import type { Device, DeviceConnection, DeviceDNS, DeviceAlert } from '#lib/types.ts'
 
   let device: Device | null = $state(null)
   let connections: DeviceConnection[] = $state([])

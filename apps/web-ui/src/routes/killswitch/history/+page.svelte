@@ -6,10 +6,10 @@
     fetchDevices,
     formatActionType,
     formatTime,
-  } from '$lib/api'
-  import KillswitchNav from '$lib/components/KillswitchNav.svelte'
-  import { describeActor, describeBlock, deviceOf, endedBy, stateWords } from '$lib/killswitch'
-  import type { EnforcementAction } from '$lib/types'
+  } from '#lib/api.ts'
+  import KillswitchNav from '#lib/components/KillswitchNav.svelte'
+  import { describeActor, describeBlock, deviceOf, endedBy, stateWords } from '#lib/killswitch.ts'
+  import type { EnforcementAction } from '#lib/types.ts'
 
   const PAGE = 50
 
