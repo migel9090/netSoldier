@@ -25,9 +25,38 @@ LAB_KNOWN_HOSTS=$LAB_STATE/known_hosts
 # whitespace; empty by default.
 LAB_SSH_EXTRA_OPTS=${LAB_SSH_EXTRA_OPTS:-}
 
+# Optional build host. With LAB_BUILD_HOST (an ssh destination) set, images.sh
+# builds the lab images there instead of on this machine, pushes them to a
+# registry on that host and has the lab node pull from it; this machine only
+# copies the checkout over. LAB_BUILD_REGISTRY is that registry as the lab
+# node reaches it (host:port). It is spoken to over plain HTTP: a lab
+# convenience on a trusted segment, not a way to ship images.
+LAB_BUILD_HOST=${LAB_BUILD_HOST:-}
+LAB_BUILD_REGISTRY=${LAB_BUILD_REGISTRY:-}
+LAB_BUILD_KNOWN_HOSTS=${LAB_BUILD_KNOWN_HOSTS:-$LAB_CONFIG/known_hosts_build}
+
 lab_die() {
   echo "error: $*" >&2
   exit 1
+}
+
+# lab_build_ssh_opts: prints the ssh options for the build host, one per line
+# (the host key must already be in $LAB_BUILD_KNOWN_HOSTS).
+lab_build_ssh_opts() {
+  local -a extra
+  read -ra extra <<<"$LAB_SSH_EXTRA_OPTS"
+  printf '%s\n' -i "$LAB_SSH_KEY" -o IdentitiesOnly=yes \
+    -o "UserKnownHostsFile=$LAB_BUILD_KNOWN_HOSTS" -o StrictHostKeyChecking=yes \
+    -o BatchMode=yes -o ConnectTimeout=10 "${extra[@]}"
+}
+
+# lab_build_ssh ARGS...: ssh to the build host.
+lab_build_ssh() {
+  local -a opts
+  mapfile -t opts < <(lab_build_ssh_opts)
+  # The command is meant to be expanded here, like lab_ssh's.
+  # shellcheck disable=SC2029
+  ssh "${opts[@]}" "$LAB_BUILD_HOST" "$@"
 }
 
 # lab_target: prints "user host port" of the single lab host in the

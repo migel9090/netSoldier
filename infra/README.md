@@ -76,6 +76,15 @@ the SSH key defaults to `~/.ssh/id_ed25519`. Terraform variables
 (address, VM id, sizes, allowed sources) are listed in `terraform/variables.tf`
 and `terraform/terraform.tfvars.example`; set them in `lab.auto.tfvars`.
 
+**Building the lab images elsewhere.** `lab/images.sh` builds with this
+machine's Docker and pipes the images to the node. With `LAB_BUILD_HOST` (an ssh
+destination that has Docker and a registry) and `LAB_BUILD_REGISTRY` (that
+registry as the lab node reaches it, `host:port`) it mirrors the checkout to the
+build host, builds and pushes there, and the node pulls; this machine only
+copies files. The registry is spoken to over plain HTTP, which is acceptable for
+a lab segment and nothing else. The build host's SSH key must be in
+`$LAB_CONFIG/known_hosts_build` (`LAB_BUILD_KNOWN_HOSTS`).
+
 **More than one lab VM.** A lab instance is a state directory. For a second VM
 point `LAB_STATE` and `LAB_KUBECONFIG` at new locations and put that instance's
 values (`vm_id`, `vm_name`, `ipv4_address`) in `$LAB_STATE/lab.tfvars`; `tf.sh`
