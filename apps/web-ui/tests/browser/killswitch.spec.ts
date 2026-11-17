@@ -474,9 +474,15 @@ test.describe('history and audit log', () => {
     await expect(h1.getByTestId('ended-by')).toHaveText('the TTL reaper (automatic)')
     await expect(h1).toContainText('kids-tablet')
 
-    await page.getByRole('button', { name: 'Show 50 more' }).click()
-    await expect(rows).toHaveCount(62)
-    await expect(page.getByRole('button', { name: 'Show 50 more' })).toHaveCount(0)
+    await expect(page.getByTestId('history-range')).toHaveText('1–50 of 50+')
+    // The controller pages by ?limit= only: the second page asks for 100.
+    await page.getByRole('button', { name: 'Older' }).click()
+    await expect(rows).toHaveCount(12)
+    await expect(rows.first()).toHaveAttribute('data-action-id', 'ACT-e2e-old-49')
+    await expect(page.getByTestId('history-range')).toHaveText('51–62 of 62')
+    await expect(page.getByRole('button', { name: 'Older' })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Newer' }).click()
+    await expect(rows).toHaveCount(50)
     const searches = (await stub.seen())
       .filter((s) => s.path === '/actions/history')
       .map((s) => s.search)

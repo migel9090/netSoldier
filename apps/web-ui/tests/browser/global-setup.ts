@@ -31,7 +31,9 @@ import { KEYS, startStubs } from './stub/backends'
  *   - "real": plain HTTP in front of the real backends, for real-backends.spec.ts.
  *
  * Only "lan-http" has a metrics listener (METRICS_ADDR, on a port of its
- * own); the others run with METRICS_ADDR=off.
+ * own); the others run with METRICS_ADDR=off. "lan-http" and "real" also
+ * read threat-intel-sync (THREAT_INTEL_URL) for the status page; "tls" and
+ * "lockout" run without it, as a deployment that does not set it.
  *
  * The browser resolves netsoldier.lan to 127.0.0.1 (see playwright.config.ts).
  * A real host name matters: Chromium treats http://127.0.0.1 as a secure
@@ -236,6 +238,8 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     const metricsPort = await freePort()
     const httpApp = startApp('lan-http', httpPort, `http://${LAN_HOST}:${httpPort}`, upstreams, {
       METRICS_ADDR: `127.0.0.1:${metricsPort}`,
+      // The optional upstream, for the status page; the other instances run without it.
+      THREAT_INTEL_URL: stubs.urls['threat-intel-sync'],
     })
     children.push(httpApp)
     await waitHealthy(`http://127.0.0.1:${httpPort}/healthz`, httpApp, 'lan-http')
@@ -282,7 +286,15 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     if (realStarting) {
       const stack = await realStarting
       const realPort = await freePort()
-      const realApp = startApp('real', realPort, `http://${LAN_HOST}:${realPort}`, stack.upstreams)
+      const realApp = startApp(
+        'real',
+        realPort,
+        `http://${LAN_HOST}:${realPort}`,
+        stack.upstreams,
+        {
+          THREAT_INTEL_URL: stack.threatIntel,
+        },
+      )
       children.push(realApp)
       await waitHealthy(`http://127.0.0.1:${realPort}/healthz`, realApp, 'real')
       process.env.E2E_REAL_URL = `http://${LAN_HOST}:${realPort}`

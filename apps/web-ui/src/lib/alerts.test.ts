@@ -4,13 +4,18 @@ import {
   alertClient,
   alertClientText,
   alertHeadline,
+  alertById,
   alertObservedDomain,
   falsePositiveQuestion,
   falsePositiveVerdict,
+  isComposite,
   isSilenced,
+  liftNote,
   liftQuestion,
   liftRequest,
+  signalBreakdown,
   signalClasses,
+  sortSuppressions,
   suppressionAnchor,
   suppressionDays,
   suppressionEnds,
@@ -220,5 +225,108 @@ describe('false-positive feedback', () => {
     )
     expect(suppressionAnchor(suppression({ client_ip: '' }))).not.toBe(suppressionAnchor(s))
     expect(alertAnchor({ id: 'DET "x" <y>' })).toMatch(/^alert-[0-9a-f]{8}$/)
+  })
+})
+
+describe('signal breakdown', () => {
+  const composite: Alert = {
+    id: 'DET-c1',
+    timestamp: '2026-11-16T12:00:00Z',
+    severity: 'critical',
+    signal_class: 'composite',
+    confidence: 95,
+    signals: [
+      {
+        class: 'ioc',
+        confidence: 90,
+        indicator: 'evil.example',
+        indicator_type: 'domain',
+        source: 'threatfox',
+      },
+      {
+        class: 'beacon',
+        confidence: 70,
+        indicator: '203.0.113.9',
+        indicator_type: 'ip',
+        source: 'rita',
+      },
+      { class: 'tls', confidence: 60, source: 'zeek' },
+    ],
+  }
+
+  it('lists each signal with its own class, confidence, indicator and source', () => {
+    expect(isComposite(composite)).toBe(true)
+    expect(signalBreakdown(composite)).toEqual([
+      {
+        class: 'ioc',
+        confidence: 90,
+        indicator: 'evil.example',
+        indicatorType: 'domain',
+        source: 'threatfox',
+      },
+      {
+        class: 'beacon',
+        confidence: 70,
+        indicator: '203.0.113.9',
+        indicatorType: 'ip',
+        source: 'rita',
+      },
+      { class: 'tls', confidence: 60, indicator: '', indicatorType: '', source: 'zeek' },
+    ])
+  })
+
+  it('takes the plain class names of older engines, and skips what is not a signal', () => {
+    const old = {
+      signal_class: 'ioc',
+      signals: ['ioc', '', { class: '' }, null, { class: 'tls', confidence: Number.NaN }],
+    } as unknown as Alert
+    expect(isComposite(old)).toBe(false)
+    expect(signalBreakdown(old)).toEqual([
+      { class: 'ioc', confidence: null, indicator: '', indicatorType: '', source: '' },
+      { class: 'tls', confidence: null, indicator: '', indicatorType: '', source: '' },
+    ])
+    expect(signalBreakdown({ signals: undefined } as Alert)).toEqual([])
+  })
+
+  it('finds a detection by id', () => {
+    expect(alertById([composite], 'DET-c1')).toBe(composite)
+    expect(alertById([composite], 'DET-x')).toBeUndefined()
+    expect(alertById([composite], '')).toBeUndefined()
+  })
+})
+
+describe('lifting in words', () => {
+  const s: Suppression = {
+    matched_ioc: 'evil.example',
+    client_ip: '192.168.1.77',
+    signal_class: 'ioc',
+    verdict: 'false_positive',
+    analyst: 'Anna',
+    timestamp: '2026-11-16T12:00:00Z',
+    expires_at: '2026-12-16T12:00:00Z',
+  }
+
+  it('says whether it was lifted, saved, or not there any more', () => {
+    expect(liftNote(s, { inForce: true, persisted: true })).toEqual({
+      tone: 'ok',
+      text: 'Lifted the suppression of evil.example (ioc) on 192.168.1.77. Saved.',
+    })
+    expect(liftNote(s, { inForce: true, persisted: null }).text).toBe(
+      'Lifted the suppression of evil.example (ioc) on 192.168.1.77.',
+    )
+    const unsaved = liftNote(s, { inForce: true, persisted: false })
+    expect(unsaved.tone).toBe('warn')
+    expect(unsaved.text).toContain('was NOT saved')
+    expect(liftNote({ ...s, client_ip: undefined }, { inForce: false })).toEqual({
+      tone: 'warn',
+      text: 'Nothing to lift: the suppression of evil.example (ioc) on every device was no longer in force (lifted already, or it expired).',
+    })
+  })
+
+  it('orders suppressions newest first, stably', () => {
+    const older = { ...s, timestamp: '2026-11-15T12:00:00Z' }
+    const b = { ...s, matched_ioc: 'b.example' }
+    const wide = { ...s, client_ip: undefined }
+    expect(sortSuppressions([older, s, b, wide])).toEqual([b, wide, s, older])
   })
 })

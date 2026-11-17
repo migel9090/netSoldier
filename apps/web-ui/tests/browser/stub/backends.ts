@@ -5,7 +5,8 @@ import type { AddressInfo } from 'node:net'
  * Stub backends for the browser tests: the killswitch-controller,
  * device-inventory and detection-engine HTTP APIs as the real services on
  * this branch serve them, each on its own 127.0.0.1 port and each demanding
- * its own bearer token, plus a control port the tests use to pick a
+ * its own bearer token, threat-intel-sync's probes and metrics (no token, as
+ * the real one), plus a control port the tests use to pick a
  * scenario. tests/browser/real-backends.spec.ts runs the same UI against the
  * real services; this stub exists for the cases those cannot be made to
  * produce on demand (a driver that fails or answers late, conflicts,
@@ -35,6 +36,11 @@ import type { AddressInfo } from 'node:net'
  *   GET /feedback lists them with `expires_at`.
  * - device inventory: provenance, binding state, `conflict_count` on lists,
  *   `conflicts` on single reads, X-Total-Count.
+ * - for the status page: each service's /healthz or /readyz (device-inventory
+ *   and threat-intel-sync answer 503 with their readiness body while not
+ *   ready) and the /metrics series the UI reads, under the names the
+ *   services export them; killswitch GET /allowlist and the full GET /policy
+ *   (`unavailable_action_types`, thresholds, `auto_block`).
  */
 
 export const KEYS = {
@@ -44,6 +50,8 @@ export const KEYS = {
 } as const
 
 export type Service = keyof typeof KEYS
+/** threat-intel-sync has no API key; the UI reads it for the status page only. */
+export type AnyService = Service | 'threat-intel-sync'
 
 export interface Scenario {
   /** Return list endpoints in a different order on every call. */
@@ -63,7 +71,7 @@ export interface Scenario {
   /** Services that refuse the web UI's key (401) whatever it sends. */
   rejectKey: Service[]
   /** Services answering 503. */
-  down: Service[]
+  down: AnyService[]
   /** GET /alerts shape: contract v2 (default) or the engine's older one. */
   alertsShape: 'v2' | 'v1'
   /** POST /feedback `persisted`: false when the engine's ClickHouse is down. */
@@ -87,6 +95,23 @@ export interface Scenario {
   suppressionExpiry: boolean
   /** The engine's suppression TTL. */
   suppressionTtlDays: number
+  /**
+   * At reset: detection DET-e2e-c1, a composite of three signals, among the
+   * alerts, and ACT-e2e-p3 proposed from it.
+   */
+  composite: boolean
+  /** device-inventory /readyz: the network agent healthy, gone quiet, or none expected. */
+  agent: 'ok' | 'gone' | 'none'
+  /** threat-intel-sync: its feeds synced an hour ago, or none has synced yet. */
+  intel: 'ok' | 'not-ready'
+  /** Every poll of AdGuard's query log fails. */
+  dnsFailing: boolean
+  /** Sensor sources the engine reports: two keeping up, one far behind, or none (no ClickHouse). */
+  sensors: 'ok' | 'behind' | 'none'
+  /** GET /allowlist. */
+  allowlist: { macs: string[]; ips: string[] }
+  /** GET /policy rejected_protection_entries. */
+  rejectedProtection: number
 }
 
 /** A suppression put in place through the control port, `ageMinutes` old. */
@@ -100,7 +125,7 @@ export interface SeededSuppression {
 }
 
 export interface Seen {
-  service: Service
+  service: AnyService
   method: string
   path: string
   search: string
@@ -164,6 +189,13 @@ const DEFAULT_SCENARIO: Scenario = {
   silenced: [],
   suppressionExpiry: true,
   suppressionTtlDays: 30,
+  composite: false,
+  agent: 'ok',
+  intel: 'ok',
+  dnsFailing: false,
+  sensors: 'ok',
+  allowlist: { macs: ['02:00:5e:00:53:01'], ips: ['192.168.1.2', '10.9.0.0/30'] },
+  rejectedProtection: 0,
 }
 
 export const INTRUDER_MAC = '02:de:ad:be:ef:01'
@@ -217,13 +249,149 @@ export const PRINTER_CONFLICTS = [
 ]
 
 const RESERVED = new Set(['auto-policy', 'ttl', 'reconcile', 'netagent', 'system'])
+
+/** Why each action type is not offered when the scenario leaves it out (engine.Unavailable). */
+const UNAVAILABLE: Record<string, string> = {
+  dns_sinkhole: 'ADGUARD_URL not set',
+  arp_isolate: 'NETAGENT_KILLSWITCH_TOKEN not set: no netagent can carry out an isolation',
+  switch_acl: 'SWITCH_WEBHOOK_URL not set',
+}
+
+const METRICS_TYPE = 'text/plain; version=0.0.4; charset=utf-8'
+const unixNow = () => Math.floor(Date.now() / 1000)
+
+/** The killswitch's /metrics, the series the status page reads (enforce/metrics.go and friends). */
+function killswitchMetrics(state: State): string {
+  const count = (st: string) => [...state.actions.values()].filter((a) => a.state === st).length
+  return [
+    '# HELP killswitch_actions_pending Pending actions.',
+    '# TYPE killswitch_actions_pending gauge',
+    `killswitch_actions_pending ${count('pending')}`,
+    `killswitch_actions_active ${count('active') + count('revert_failed')}`,
+    `killswitch_actions_revert_failed ${count('revert_failed')}`,
+    `killswitch_actions_awaiting_confirmation ${count('approved')}`,
+    'killswitch_agent_last_poll_timestamp_seconds 0',
+    'killswitch_audit_outbox_pending 0',
+    'killswitch_audit_outbox_oldest_age_seconds 0',
+    'go_goroutines 17',
+    '',
+  ].join('\n')
+}
+
+/** The detection engine's /metrics; its counters move on every read, as a busy engine's do. */
+function detectionMetrics(state: State): string {
+  const n = ++state.scrapes
+  const { dnsFailing, sensors } = state.scenario
+  const lines = [
+    '# TYPE detection_engine_querylog_pages_total counter',
+    `detection_engine_querylog_pages_total ${dnsFailing ? 0 : 100 + n * 3}`,
+    `detection_engine_poll_errors_total ${dnsFailing ? 20 + n * 3 : 0}`,
+    'detection_engine_querylog_gaps_total 0',
+    `detection_engine_queries_checked_total ${dnsFailing ? 0 : 5000 + n * 40}`,
+    'detection_engine_threatlist_domains_total 4100',
+    `detection_engine_ioc_sync_last_success_timestamp_seconds ${unixNow() - 120}`,
+    'detection_engine_ioc_sync_indicators 4100',
+    'detection_engine_store_durable 1',
+    'detection_engine_outbox_backlog 0',
+    'detection_engine_outbox_oldest_age_seconds 0',
+    `detection_engine_active_suppressions ${state.suppressions.length}`,
+  ]
+  if (sensors !== 'none') {
+    lines.push(
+      'detection_engine_sensor_cursor_lag_seconds{source="suricata_alerts"} 31',
+      `detection_engine_sensor_cursor_lag_seconds{source="zeek_ssl"} ${sensors === 'behind' ? 5400 : 29}`,
+      `detection_engine_sensor_rows_ingested_total{source="suricata_alerts"} ${200 + n}`,
+      `detection_engine_sensor_rows_ingested_total{source="zeek_ssl"} ${900 + n}`,
+      `detection_engine_sensor_ingest_errors_total{source="zeek_ssl"} ${sensors === 'behind' ? 7 : 0}`,
+    )
+  }
+  return lines.join('\n') + '\n'
+}
+
+/** device-inventory /readyz (readyzHandler): 503 while the expected agent is not healthy. */
+function inventoryReadyz(state: State): Reply {
+  const { agent } = state.scenario
+  if (agent === 'none') {
+    return [
+      200,
+      {
+        status: 'ready',
+        agent: {
+          ready: false,
+          age_seconds: 0,
+          dropped: 0,
+          reason: 'no heartbeat from the agent yet',
+        },
+      },
+    ]
+  }
+  const body = {
+    ready: agent === 'ok',
+    agent: 'netagent-lab',
+    interface: 'eth0',
+    last_seen: new Date(Date.now() - (agent === 'gone' ? 600_000 : 2_000)).toISOString(),
+    age_seconds: agent === 'gone' ? 600 : 2,
+    capture: { arp: true, dhcp: true, mdns: true },
+    dropped: 0,
+    ...(agent === 'gone' ? { reason: 'no heartbeat within the timeout' } : {}),
+  }
+  return agent === 'ok'
+    ? [200, { status: 'ready', agent: body }]
+    : [503, { status: 'not ready', agent: body }]
+}
+
+function inventoryMetrics(state: State): string {
+  const expected = state.scenario.agent === 'none' ? [] : ['arp', 'dhcp', 'mdns']
+  const up = state.scenario.agent === 'ok' ? 1 : 0
+  return [
+    ...expected.map((p) => `device_inventory_capture_up{proto="${p}"} ${up}`),
+    `device_inventory_known_devices ${DEVICES.length}`,
+    `device_inventory_last_device_event_timestamp_seconds ${unixNow() - 30}`,
+    `device_inventory_frames_received_total{proto="arp"} ${1000 + state.scrapes}`,
+    '',
+  ].join('\n')
+}
+
+/** threat-intel-sync's probes and metrics (cmd/threat-intel-sync main.go, sync.go). */
+function threatIntel(state: State, path: string): Reply {
+  const ok = state.scenario.intel === 'ok'
+  if (path === '/healthz') return [200, { status: 'ok' }]
+  if (path === '/readyz') {
+    return ok
+      ? [200, { status: 'ready', indicators: 1340 }]
+      : [503, { status: 'not ready', indicators: 0, reason: 'no source has delivered a set yet' }]
+  }
+  if (path !== '/metrics') return [404, { error: 'not found' }]
+  const last = ok ? unixNow() - 3600 : 0
+  return [
+    200,
+    [
+      'threat_intel_source_enabled{source="spamhaus"} 1',
+      'threat_intel_source_enabled{source="feodo"} 1',
+      'threat_intel_source_enabled{source="threatfox"} 0',
+      `threat_intel_source_last_success_timestamp_seconds{source="spamhaus"} ${last}`,
+      `threat_intel_source_last_success_timestamp_seconds{source="feodo"} ${last}`,
+      `threat_intel_source_indicators{source="spamhaus"} ${ok ? 1300 : 0}`,
+      `threat_intel_source_indicators{source="feodo"} ${ok ? 40 : 0}`,
+      `threat_intel_source_failures_total{source="spamhaus"} ${ok ? 0 : 4}`,
+      `threat_intel_source_failures_total{source="feodo"} ${ok ? 0 : 4}`,
+      `threat_intel_store_indicators ${ok ? 1340 : 0}`,
+      'threat_intel_store_capacity 100000',
+      'threat_intel_store_persistent 1',
+      `threat_intel_sync_cycle_last_complete_timestamp_seconds ${last}`,
+      `threat_intel_ready ${ok ? 1 : 0}`,
+      '',
+    ].join('\n'),
+    METRICS_TYPE,
+  ]
+}
 const TERMINAL = ['reverted', 'rejected', 'expired', 'apply_failed']
 
 function iso(base: number, minutes: number): string {
   return new Date(base + minutes * 60_000).toISOString()
 }
 
-function seedActions(now: number, finished: number): Action[] {
+function seedActions(now: number, finished: number, composite = false): Action[] {
   const common = {
     schema_version: '2.0',
     policy_rule: 'pending: confidence=80 severity=high signals=1',
@@ -260,8 +428,8 @@ function seedActions(now: number, finished: number): Action[] {
       ...common,
       id: 'ACT-e2e-p3',
       timestamp: iso(now, -10),
-      detection_id: 'DET-e2e-3',
-      detection_summary: 'Suricata: ET MALWARE known C2 domain',
+      detection_id: composite ? COMPOSITE_ID : 'DET-e2e-3',
+      detection_summary: composite ? COMPOSITE_SUMMARY : 'Suricata: ET MALWARE known C2 domain',
       action_type: 'dns_sinkhole',
       state: 'pending',
       target_mac: 'aa:bb:cc:00:00:03',
@@ -335,6 +503,54 @@ function seedActions(now: number, finished: number): Action[] {
 }
 
 export const IDS_SUMMARY = 'Suricata: ET MALWARE Mozi botnet C2 traffic'
+export const COMPOSITE_ID = 'DET-e2e-c1'
+export const COMPOSITE_SUMMARY = 'Combined: known C2 domain, beaconing and a rare TLS client'
+
+/** A composite as internal/composite emits it: its own confidence, each signal its own. */
+function compositeAlert(base: number) {
+  return {
+    id: COMPOSITE_ID,
+    timestamp: new Date(base - 60_000).toISOString(),
+    summary: COMPOSITE_SUMMARY,
+    domain: 'update.malware.example',
+    matched_ioc: 'update.malware.example',
+    ioc_type: 'domain',
+    client_ip: '192.168.1.79',
+    client_mac: 'aa:bb:cc:00:00:03',
+    client_name: 'printer',
+    query_type: 'A',
+    severity: 'critical',
+    source: 'composite',
+    confidence: 95,
+    threat: 'Mozi',
+    tags: [],
+    signal_class: 'composite',
+    signals: [
+      {
+        class: 'ioc',
+        confidence: 90,
+        indicator: 'update.malware.example',
+        indicator_type: 'domain',
+        source: 'threatfox',
+      },
+      {
+        class: 'beacon',
+        confidence: 70,
+        indicator: '203.0.113.50',
+        indicator_type: 'ip',
+        source: 'rita',
+      },
+      {
+        class: 'tls',
+        confidence: 60,
+        indicator: 't13d1516h2_8daaf6152771',
+        indicator_type: 'ja4',
+        source: 'zeek',
+      },
+    ],
+    target: { type: 'domain', value: 'update.malware.example' },
+  }
+}
 
 /** GET /alerts in the contract v2 shape, newest first: an IDS alert, then seven DNS IoC alerts. */
 function alertsV2(base: number) {
@@ -435,6 +651,8 @@ class State {
   base = Date.now()
   seen: Seen[] = []
   clock = 0
+  /** /metrics reads of the detection engine: its counters move on each. */
+  scrapes = 0
 
   constructor() {
     this.reset()
@@ -443,6 +661,7 @@ class State {
   get alerts() {
     const list: Record<string, unknown>[] =
       this.scenario.alertsShape === 'v1' ? alertsV1(this.base) : alertsV2(this.base)
+    if (this.scenario.composite) list.unshift(compositeAlert(this.base))
     const silenced = new Set(this.scenario.silenced)
     return list.map((a) => (silenced.has(String(a.id)) ? { ...a, suppressed: true } : a))
   }
@@ -476,7 +695,8 @@ class State {
     this.seen = []
     this.clock = 0
     // Oldest first, so sequence numbers grow with time like the controller's.
-    const seeded = seedActions(this.base, this.scenario.finished).sort(
+    this.scrapes = 0
+    const seeded = seedActions(this.base, this.scenario.finished, this.scenario.composite).sort(
       (a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp),
     )
     for (const a of seeded) this.seed(a)
@@ -634,6 +854,9 @@ function killswitch(
       .filter((e) => (!before || e.seq < before) && (!id || e.action_id === id))
     return [200, entries.slice(0, limit)]
   }
+  if (method === 'GET' && path === '/healthz') return [200, { status: 'ok' }]
+  if (method === 'GET' && path === '/metrics') return [200, killswitchMetrics(state), METRICS_TYPE]
+  if (method === 'GET' && path === '/allowlist') return [200, state.scenario.allowlist]
   if (method === 'GET' && path === '/policy' && state.scenario.policyDown) {
     return [500, { error: 'internal error' }]
   }
@@ -643,11 +866,23 @@ function killswitch(
       {
         auto_min_confidence: 90,
         auto_min_severity: 'critical',
+        auto_min_signals: 2,
+        auto_require_known_bad: true,
+        auto_action_type: 'dns_sinkhole',
+        pend_min_confidence: 50,
+        pend_min_severity: 'medium',
         default_action: 'dns_sinkhole',
         default_ttl: 3600,
+        auto_block: /POLICY_AUTO_BLOCK/.test(state.scenario.autoBlockReason) ? 'off' : 'on',
         auto_block_allowed: state.scenario.autoBlockReason === '',
         auto_block_disabled_reason: state.scenario.autoBlockReason,
+        allowlist_entries:
+          state.scenario.allowlist.macs.length + state.scenario.allowlist.ips.length,
+        rejected_protection_entries: state.scenario.rejectedProtection,
         available_action_types: state.scenario.available,
+        unavailable_action_types: Object.fromEntries(
+          Object.entries(UNAVAILABLE).filter(([t]) => !state.scenario.available.includes(t)),
+        ),
         pending_ttl_seconds: 86400,
       },
     ]
@@ -818,6 +1053,8 @@ function settle(state: State, id: string, to?: string): boolean {
 
 function deviceInventory(method: string, path: string, state: State): Reply {
   if (method !== 'GET') return [405, { error: 'method not allowed' }]
+  if (path === '/readyz') return inventoryReadyz(state)
+  if (path === '/metrics') return [200, inventoryMetrics(state), METRICS_TYPE]
   if (path === '/devices') {
     const many = state.scenario.manyConflicts
     return [200, DEVICES.map((d) => (many && d.conflict_count ? { ...d, conflict_count: 15 } : d))]
@@ -979,7 +1216,7 @@ function listen(server: http.Server): Promise<string> {
 }
 
 export interface Stubs {
-  urls: Record<Service, string>
+  urls: Record<AnyService, string>
   control: string
   close(): Promise<void>
 }
@@ -1030,6 +1267,10 @@ export async function startStubs(): Promise<Stubs> {
           url.pathname === '/devices' ? { 'X-Total-Count': total } : {}
         return send(res, status, payload, type, headers)
       }
+      if (method === 'GET' && url.pathname === '/healthz') return send(res, 200, { status: 'ok' })
+      if (method === 'GET' && url.pathname === '/metrics') {
+        return send(res, 200, detectionMetrics(state), METRICS_TYPE)
+      }
       if (method === 'GET' && url.pathname === '/alerts') {
         const limit = limitOf(url.searchParams, 1000, 5000)
         if (limit === null) return send(res, 400, { error: 'limit must be a positive integer' })
@@ -1048,6 +1289,27 @@ export async function startStubs(): Promise<Stubs> {
       }
       return send(res, 404, { error: 'not found' })
     })
+
+  // threat-intel-sync serves its probes and metrics without a key.
+  const tis = http.createServer(async (req, res) => {
+    const body = await readBody(req)
+    const url = new URL(req.url ?? '/', 'http://stub')
+    state.seen.push({
+      service: 'threat-intel-sync',
+      method: req.method ?? '',
+      path: url.pathname,
+      search: url.search,
+      authorization: req.headers.authorization ?? null,
+      actor: (req.headers['x-netsoldier-actor'] as string | undefined) ?? null,
+      body,
+    })
+    if (state.scenario.down.includes('threat-intel-sync')) {
+      return send(res, 503, { error: 'unavailable' })
+    }
+    if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed' })
+    const [status, payload, type] = threatIntel(state, url.pathname)
+    send(res, status, payload, type)
+  })
 
   const control = http.createServer(async (req, res) => {
     const body = await readBody(req)
@@ -1095,11 +1357,13 @@ export async function startStubs(): Promise<Stubs> {
     killswitch: serve('killswitch'),
     'device-inventory': serve('device-inventory'),
     'detection-engine': serve('detection-engine'),
+    'threat-intel-sync': tis,
   }
   const urls = {
     killswitch: await listen(servers.killswitch),
     'device-inventory': await listen(servers['device-inventory']),
     'detection-engine': await listen(servers['detection-engine']),
+    'threat-intel-sync': await listen(servers['threat-intel-sync']),
   }
   const controlUrl = await listen(control)
 
