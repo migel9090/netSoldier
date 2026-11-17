@@ -63,11 +63,20 @@ lab_build_ssh() {
 # generated inventory.
 lab_target() {
   [[ -s $LAB_INVENTORY ]] || lab_die "no inventory at $LAB_INVENTORY (run: task lab:inventory)"
-  "$LAB_VENV/bin/ansible-inventory" -i "$LAB_INVENTORY" --list 2>/dev/null |
+  # ansible-inventory costs about a second of CPU and the scripts ssh dozens
+  # of times: its answer is kept until the inventory file changes.
+  local cache=$LAB_STATE/.target target
+  if [[ -s $cache && $cache -nt $LAB_INVENTORY ]]; then
+    cat "$cache"
+    return
+  fi
+  target=$("$LAB_VENV/bin/ansible-inventory" -i "$LAB_INVENTORY" --list 2>/dev/null |
     jq -er '._meta.hostvars | to_entries
             | if length == 1 then .[0].value else error("expected exactly one lab host") end
-            | "\(.ansible_user) \(.ansible_host) \(.ansible_port // 22)"' ||
+            | "\(.ansible_user) \(.ansible_host) \(.ansible_port // 22)"') ||
     lab_die "the inventory does not hold exactly one lab host (is the VM up?)"
+  printf '%s\n' "$target" >"$cache.$$" && mv "$cache.$$" "$cache"
+  printf '%s\n' "$target"
 }
 
 # lab_ssh ARGS...: ssh to the lab host, trusting only the lab's known_hosts.
