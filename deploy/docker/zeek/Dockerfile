@@ -70,13 +70,20 @@ RUN mkdir -p /rootfs/usr/local/zeek/lib/zeek/plugins /rootfs/usr/local/zeek/shar
     && cp -aL /usr/local/zeek/share/zeek /rootfs/usr/local/zeek/share/zeek \
     && install -d -o 65534 -g 65534 /rootfs/var/log/zeek /rootfs/var/spool/zeek
 
-# Bake the capture capabilities into the binary as *file capabilities*: a
+# Bake the capture capability into the binary as a *file capability*: a
 # non-root process gets a capability only from file caps that are also in
 # the container's bounding set (securityContext.capabilities.add); a plain
-# capabilities.add does nothing for it (audit DP-7). setcap only writes an
-# extended attribute, so it works on the target platform's binary here;
-# COPY --from carries the attribute into the runtime image.
-RUN setcap cap_net_raw,cap_net_admin+ep /rootfs/usr/local/zeek/bin/zeek \
+# capabilities.add does nothing for it (audit DP-7). With
+# allowPrivilegeEscalation: false (no_new_privs) the kernel still grants
+# it, but only to a binary the runtime executes directly: the container's
+# command must be zeek itself, not a shell that starts it (test/run.sh
+# shows both). AF_PACKET capture needs CAP_NET_RAW alone: promiscuous mode
+# is a packet-socket membership, fanout a socket option, and hardware
+# timestamping (the one AF_Packet option that would need CAP_NET_ADMIN) is
+# off. setcap only writes an extended attribute, so it works on the target
+# platform's binary here; COPY --from carries the attribute into the
+# runtime image.
+RUN setcap cap_net_raw+ep /rootfs/usr/local/zeek/bin/zeek \
     && getcap /rootfs/usr/local/zeek/bin/zeek
 
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
@@ -112,4 +119,5 @@ WORKDIR /var/log/zeek
 USER 65534:65534
 
 # The manifests set the command (zeek -i af_packet::<iface> <site policy>).
+# It must stay zeek itself for the file capability to apply (see above).
 ENTRYPOINT ["/usr/local/zeek/bin/zeek"]
