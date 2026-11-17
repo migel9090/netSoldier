@@ -1,10 +1,10 @@
 # Build context is the repository ROOT (see the `build-threat-intel-sync` job
 # in .github/workflows/ci.yml and /.dockerignore for what the context
-# carries). go.mod replaces libs/indicator with the in-tree copy, so that
-# module has to be inside the context or `go mod download` cannot resolve the
-# graph. libs/events is not copied: this service does not use the event
-# contract, and copying it would invalidate the dependency layer whenever the
-# contract changed, for no reason.
+# carries). go.mod replaces libs/indicator and libs/events with the in-tree
+# copies, so both modules have to be inside the context or `go mod download`
+# cannot resolve the graph. libs/events supplies the operator-identity rules
+# (X-Netsoldier-Actor) of the quarantine API, shared with the killswitch and
+# the detection-engine.
 FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
 
 ARG TARGETOS
@@ -13,6 +13,7 @@ ARG TARGETARCH
 WORKDIR /src
 
 # Module graph first so dependency download caches independently of sources.
+COPY libs/events/ libs/events/
 COPY libs/indicator/ libs/indicator/
 COPY apps/threat-intel-sync/go.mod apps/threat-intel-sync/go.sum apps/threat-intel-sync/
 WORKDIR /src/apps/threat-intel-sync
