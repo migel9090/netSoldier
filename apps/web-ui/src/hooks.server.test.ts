@@ -5,9 +5,10 @@ import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it, vi } 
 import { handle } from './hooks.server'
 import * as loginEndpoint from './routes/api/login/+server'
 import * as logoutEndpoint from './routes/api/logout/+server'
-import { issueDeviceToken } from '$lib/server/device'
-import { renderMetrics, resetMetrics } from '$lib/server/metrics'
-import { loginLimiter } from '$lib/server/ratelimit'
+import * as statusEndpoint from './routes/api/status/+server'
+import { issueDeviceToken } from '#lib/server/device.ts'
+import { renderMetrics, resetMetrics } from '#lib/server/metrics.ts'
+import { loginLimiter } from '#lib/server/ratelimit.ts'
 import { env } from './testing/env'
 import { PAGE_CSP, TestBrowser, parseSetCookie, type Endpoints } from './testing/kit'
 
@@ -21,6 +22,7 @@ import { PAGE_CSP, TestBrowser, parseSetCookie, type Endpoints } from './testing
 const endpoints: Endpoints = {
   '/api/login': loginEndpoint as Endpoints[string],
   '/api/logout': logoutEndpoint as Endpoints[string],
+  '/api/status': statusEndpoint as Endpoints[string],
 }
 
 const SECRET = 'test-session-secret-that-is-long-enough-0123456789'
@@ -627,6 +629,20 @@ describe('API proxy', () => {
     ])
   })
 
+  it('reaches the never-enforce list, read-only', async () => {
+    const b = await signedIn()
+    expect((await b.fetch('/api/killswitch/allowlist')).status).toBe(200)
+    expect(seen.map((s) => s.url)).toEqual(['/allowlist'])
+    // Not the {id} route: there is no action called "allowlist" to approve.
+    const post = await b.fetch('/api/killswitch/allowlist', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': b.csrf() },
+      body: '{}',
+    })
+    expect(post.status).toBe(404)
+    expect(seen).toHaveLength(1)
+  })
+
   it('passes ?limit= on to the detection engine', async () => {
     const b = await signedIn()
     expect((await b.fetch('/api/alerts?limit=500')).status).toBe(200)
@@ -746,5 +762,90 @@ describe('API proxy', () => {
     b.jar.set('netsoldier_session', token)
     expect((await b.fetch('/api/killswitch/pending')).status).toBe(401)
     expect(seen).toHaveLength(0)
+  })
+})
+
+describe('system status', () => {
+  it('needs a session and is never a proxy route', async () => {
+    const anonymous = browser()
+    expect((await anonymous.fetch('/api/status')).status).toBe(401)
+    expect(seen).toHaveLength(0)
+
+    const b = browser()
+    await b.signIn(PASSWORD)
+    // Mutations are refused before anything is called, CSRF or not.
+    expect((await b.fetch('/api/status', { method: 'POST', body: '{}' })).status).toBe(403)
+    const post = await b.fetch('/api/status', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': b.csrf() },
+      body: '{}',
+    })
+    expect(post.status).toBe(405)
+    // Nothing below the route reaches a backend through the proxy either.
+    expect((await b.fetch('/api/status/metrics')).status).toBe(404)
+    expect(seen).toHaveLength(0)
+  })
+
+  it('reads the probes and metrics with each service’s own key, and passes none of it on', async () => {
+    reply = (req) =>
+      req.url === '/metrics'
+        ? { status: 200, body: 'killswitch_actions_pending 3\n', type: 'text/plain' }
+        : { status: 200, body: '{"status":"ok"}' }
+    const b = browser()
+    await b.signIn(PASSWORD, 'anna')
+    const res = await b.fetch('/api/status')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toMatch(/^application\/json/)
+    expect(res.headers.get('cache-control')).toBe('no-store')
+    const body = await res.json()
+    expect(body.services.map((s: { service: string }) => s.service)).toEqual([
+      'killswitch',
+      'detection-engine',
+      'device-inventory',
+      'threat-intel-sync',
+    ])
+    expect(body.enforcement.pending).toBe(3)
+    const text = JSON.stringify(body)
+    for (const key of ['killswitch-operator-token', 'device-key', 'detection-key']) {
+      expect(text).not.toContain(key)
+    }
+    expect(text).not.toContain('killswitch_actions_pending')
+
+    const byPath = (path: string) => seen.filter((s) => s.url === path)
+    expect(
+      byPath('/metrics')
+        .map((s) => s.headers.authorization)
+        .sort(),
+    ).toEqual(['Bearer detection-key', 'Bearer device-key', 'Bearer killswitch-operator-token'])
+    expect(byPath('/healthz')).toHaveLength(2)
+    expect(byPath('/readyz')).toHaveLength(1)
+    for (const s of seen) {
+      expect(s.method).toBe('GET')
+      expect(s.headers['x-netsoldier-actor']).toBe('anna')
+      expect(s.headers.cookie).toBeUndefined()
+    }
+  })
+
+  it('reads threat-intel-sync only when THREAT_INTEL_URL is set, without a key', async () => {
+    configure({ THREAT_INTEL_URL: `${upstreamUrl}/tis` })
+    const b = browser()
+    await b.signIn(PASSWORD)
+    const body = await (await b.fetch('/api/status')).json()
+    expect(body.services.at(-1)).toMatchObject({ service: 'threat-intel-sync', configured: true })
+    const tis = seen.filter((s) => s.url.startsWith('/tis/'))
+    expect(tis.map((s) => s.url).sort()).toEqual(['/tis/metrics', '/tis/readyz'])
+    for (const s of tis) expect(s.headers.authorization).toBeUndefined()
+  })
+
+  it('serves the approval pages with a malformed THREAT_INTEL_URL, and says so', async () => {
+    configure({ THREAT_INTEL_URL: 'threat-intel-sync:8083' })
+    expect((await browser().fetch('/healthz')).status).toBe(200)
+    const b = browser()
+    await b.signIn(PASSWORD)
+    const body = await (await b.fetch('/api/status')).json()
+    expect(body.notes).toEqual([
+      'THREAT_INTEL_URL must be an http:// or https:// URL; threat-intel-sync is not read',
+    ])
+    expect(body.services.at(-1).configured).toBe(false)
   })
 })

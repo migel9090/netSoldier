@@ -1,5 +1,5 @@
 /**
- * Stand-in for SvelteKit's `$app/environment` in unit tests (aliased in
+ * Stand-in for SvelteKit's `$app/env` in unit tests (aliased in
  * vitest.config.ts): a running server, not a build.
  */
 export const browser = false

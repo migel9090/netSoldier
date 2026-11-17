@@ -183,6 +183,7 @@ func TestTypedTargetEndToEnd(t *testing.T) {
 	ksAddr := startKillswitch(t, ksBin, ag.url, nil)
 	stopDet := startProc(t, detBin, map[string]string{
 		"LISTEN_ADDR":                 detAddr,
+		"DB_PATH":                     filepath.Join(t.TempDir(), "detection-engine.db"),
 		"ADGUARD_URL":                 ag.url,
 		"ADGUARD_USER":                "admin",
 		"ADGUARD_PASSWORD":            "test",
@@ -257,7 +258,11 @@ func TestDetectionIDsSurviveRestartE2E(t *testing.T) {
 		wh := startWebhookReceiver(t, e2eWebhookSecret, e2eAPIKey)
 		addr := freeAddr(t)
 		stop := startProc(t, detBin, map[string]string{
-			"LISTEN_ADDR":                 addr,
+			"LISTEN_ADDR": addr,
+			// Each boot starts from an empty store, as a fresh pod would;
+			// the default path is shared by every run on a host where it
+			// is writable.
+			"DB_PATH":                     filepath.Join(t.TempDir(), "detection-engine.db"),
 			"ADGUARD_URL":                 ag.url,
 			"ADGUARD_USER":                "admin",
 			"ADGUARD_PASSWORD":            "test",

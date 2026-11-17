@@ -150,6 +150,56 @@ func (a *Alerts) Recent(limit int) ([]detection.Alert, error) {
 	return out, rows.Err()
 }
 
+// StoredAlert is an alert with its place in the history: Seq orders the
+// history and never repeats, RecordedAt is when the engine recorded it.
+type StoredAlert struct {
+	Seq        int64
+	RecordedAt time.Time
+	Alert      detection.Alert
+}
+
+// After returns up to limit alerts recorded after seq, oldest first: the
+// order in which they are copied to ClickHouse. A row that cannot be decoded
+// is returned with a zero Alert (and counted) so the copy can step over it.
+func (a *Alerts) After(seq int64, limit int) ([]StoredAlert, error) {
+	if limit < 1 {
+		return nil, nil
+	}
+	rows, err := a.db.Query(`SELECT seq, recorded_at, body FROM alerts WHERE seq > ? ORDER BY seq LIMIT ?`,
+		seq, limit)
+	if err != nil {
+		storeErrors.WithLabelValues("alert_read").Inc()
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]StoredAlert, 0, min(limit, 64))
+	for rows.Next() {
+		var s StoredAlert
+		var at int64
+		var body []byte
+		if err := rows.Scan(&s.Seq, &at, &body); err != nil {
+			return nil, err
+		}
+		s.RecordedAt = fromMilli(at)
+		if err := json.Unmarshal(body, &s.Alert); err != nil {
+			storeErrors.WithLabelValues("alert_decode").Inc()
+			s.Alert = detection.Alert{}
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// CountAfter is how many alerts were recorded after seq.
+func (a *Alerts) CountAfter(seq int64) (int, error) {
+	var n int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM alerts WHERE seq > ?`, seq).Scan(&n); err != nil {
+		storeErrors.WithLabelValues("alert_read").Inc()
+		return 0, err
+	}
+	return n, nil
+}
+
 // ByID returns the stored alert with that id.
 func (a *Alerts) ByID(id string) (detection.Alert, bool) {
 	var body []byte

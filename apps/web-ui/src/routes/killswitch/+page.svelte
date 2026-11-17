@@ -14,15 +14,15 @@
     formatTime,
     formatActionType,
     type ActionResult,
-  } from '$lib/api'
-  import KillswitchNav from '$lib/components/KillswitchNav.svelte'
+  } from '#lib/api.ts'
+  import KillswitchNav from '#lib/components/KillswitchNav.svelte'
   import {
     actionTypeChoices,
     approveQuestion,
+    approverWords,
     autoBlockStatus,
     awaitingConfirmation,
     defaultChoice,
-    describeActor,
     describeBlock,
     describeDevice,
     describeOutcome,
@@ -37,9 +37,9 @@
     type ActionTypeChoice,
     type Outcome,
     type Verb,
-  } from '$lib/killswitch'
-  import { newestFirst, oldestFirst } from '$lib/order'
-  import type { EnforcementAction, KillswitchPolicy } from '$lib/types'
+  } from '#lib/killswitch.ts'
+  import { newestFirst, oldestFirst } from '#lib/order.ts'
+  import type { EnforcementAction, KillswitchPolicy } from '#lib/types.ts'
 
   let pendingRaw: EnforcementAction[] = $state([])
   let activeRaw: EnforcementAction[] = $state([])
@@ -341,11 +341,6 @@
     await act(a, 'revert', () => revertAction(a.id, reason))
   }
 
-  function approver(a: EnforcementAction): string {
-    if (a.approved_by) return describeActor(a.approved_by)
-    return a.auto_approved ? describeActor('auto-policy') : '—'
-  }
-
   onMount(() => {
     void load().finally(() => {
       loading = false
@@ -522,7 +517,10 @@
         <tbody>
           {#each pending as a (a.id)}
             <tr data-action-id={a.id} data-state={a.state}>
-              <td class="mono">{a.id}</td>
+              <td class="mono"
+                ><a class="id-link" href="/killswitch/actions/{encodeURIComponent(a.id)}">{a.id}</a
+                ></td
+              >
               <td>{formatTime(a.timestamp)}</td>
               <td class="mono" title={a.detection_summary}>{a.blocked_domain || a.detection_id}</td>
               {@render target(a)}
@@ -569,7 +567,10 @@
           {#each inProgress as t (t.action.id)}
             {@const a = t.action}
             <tr data-action-id={a.id} data-state={a.state} data-verb={t.verb}>
-              <td class="mono">{a.id}</td>
+              <td class="mono"
+                ><a class="id-link" href="/killswitch/actions/{encodeURIComponent(a.id)}">{a.id}</a
+                ></td
+              >
               <td>{t.since ? t.since.toLocaleTimeString() : '—'}</td>
               {@render target(a)}
               <td>{a.action_type ? formatActionType(a.action_type) : '—'}</td>
@@ -577,7 +578,7 @@
                 <span class="badge badge-medium">in progress</span>
                 {progressWords(a, t.verb)}
               </td>
-              <td>{approver(a)}</td>
+              <td>{approverWords(a)}</td>
             </tr>
           {/each}
         </tbody>
@@ -611,7 +612,11 @@
           <tbody>
             {#each failures as a (a.id)}
               <tr data-action-id={a.id} data-state={a.state}>
-                <td class="mono">{a.id}</td>
+                <td class="mono"
+                  ><a class="id-link" href="/killswitch/actions/{encodeURIComponent(a.id)}"
+                    >{a.id}</a
+                  ></td
+                >
                 {@render target(a)}
                 <td>{formatActionType(a.action_type)}</td>
                 <td>
@@ -661,7 +666,10 @@
               data-lifting={lifting ? 'true' : undefined}
               class:lifting
             >
-              <td class="mono">{a.id}</td>
+              <td class="mono"
+                ><a class="id-link" href="/killswitch/actions/{encodeURIComponent(a.id)}">{a.id}</a
+                ></td
+              >
               <td>{formatTime(enforcedSince(a))}</td>
               <td class="mono" title={a.detection_summary}>{a.blocked_domain || a.detection_id}</td>
               {@render target(a)}
@@ -681,7 +689,7 @@
                 {/if}
               </td>
               <td>{a.expires_at ? formatTime(a.expires_at) : 'never'}</td>
-              <td data-testid="approved-by">{approver(a)}</td>
+              <td data-testid="approved-by">{approverWords(a)}</td>
               <td class="actions-cell">
                 <button
                   class="btn-revert"
@@ -699,6 +707,13 @@
 {/if}
 
 <style>
+  .id-link {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .id-link:hover {
+    text-decoration: underline;
+  }
   .failed-section {
     border-left: 3px solid #c0392b;
     padding-left: 1rem;

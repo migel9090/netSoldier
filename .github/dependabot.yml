@@ -3,6 +3,11 @@ version: 2
 # Every manifest in the repository is covered. Auto-merge is deliberately
 # off: every update goes through review and the CI gates like any other PR.
 #
+# Every ecosystem waits seven days before proposing a newly published
+# version (`cooldown`): most malicious releases are found and pulled within
+# days. Security updates are not delayed; the cooldown applies to version
+# updates only.
+#
 # No `labels:` keys on purpose. Custom labels that do not exist in the
 # repository make Dependabot post an error on every PR; without the key it
 # applies its default `dependencies` + ecosystem labels and creates them if
@@ -24,6 +29,8 @@ updates:
       - /tests/e2e
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "build(deps)"
     open-pull-requests-limit: 5
@@ -40,6 +47,8 @@ updates:
       - /scripts/ci
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "build(deps)"
     open-pull-requests-limit: 5
@@ -53,6 +62,8 @@ updates:
     directory: /apps/web-ui
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "build(deps)"
     open-pull-requests-limit: 5
@@ -65,8 +76,9 @@ updates:
   # The golang: tag is one of the places that carry the single project Go
   # version (go.work is the source of truth; every go.mod matches). A PR
   # bumping it must also bump `go` in go.work and every go.mod. Base images
-  # are pinned by digest (tag@sha256); Dependabot moves both. A node:22
-  # bump must also move node-version in the web-ui job of ci.yml.
+  # are pinned by digest (tag@sha256); Dependabot moves both. A node: bump
+  # must also move node-version in the web-ui job of ci.yml, and a python:
+  # bump the python-version of the jobs that test ml-anomaly.
   - package-ecosystem: docker
     directories:
       - /apps/detection-engine
@@ -77,8 +89,11 @@ updates:
       - /apps/ml-anomaly
       - /apps/web-ui
       - /deploy/docker/zeek
+      - /deploy/docker/suricata
     schedule:
       interval: monthly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "build(deps)"
     open-pull-requests-limit: 5
@@ -92,15 +107,24 @@ updates:
     directory: /infra/terraform
     schedule:
       interval: monthly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "build(deps)"
     open-pull-requests-limit: 5
 
   # ── GitHub Actions ────────────────────────────────────────────
+  # The workflows (/) and the local composite actions they use. Dependabot
+  # moves an action's SHA, not values derived from it: the TruffleHog image
+  # digest in secret-scan.yml is bumped by hand with its action.
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - /.github/actions/*
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "ci(deps)"
     groups:

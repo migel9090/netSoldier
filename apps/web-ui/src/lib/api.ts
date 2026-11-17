@@ -1,4 +1,6 @@
+import type { SystemStatus } from './status'
 import type {
+  Allowlist,
   Device,
   Alert,
   AuditEntry,
@@ -234,13 +236,47 @@ export async function fetchAudit(q: AuditQuery = {}): Promise<AuditEntry[]> {
 
 export async function fetchPolicy(): Promise<KillswitchPolicy> {
   const body = await getJSON<Record<string, unknown>>('/api/killswitch/policy', 'Killswitch policy')
+  return normalisePolicy(body)
+}
+
+/** GET /policy with its two lists in a shape the pages can rely on. */
+export function normalisePolicy(body: Record<string, unknown>): KillswitchPolicy {
   const types = body.available_action_types
+  const raw = body.unavailable_action_types
+  const unavailable: Record<string, string> = {}
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [t, why] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof why === 'string') unavailable[t] = why
+    }
+  }
   return {
     ...body,
     available_action_types: Array.isArray(types)
       ? types.filter((t): t is string => typeof t === 'string')
       : [],
+    unavailable_action_types: unavailable,
   } as KillswitchPolicy
+}
+
+/** GET /allowlist; lists that are missing or malformed are an error, not "nothing protected". */
+export async function fetchAllowlist(): Promise<Allowlist> {
+  const body = await getJSON<Record<string, unknown>>(
+    '/api/killswitch/allowlist',
+    'Killswitch allowlist',
+  )
+  const list = (v: unknown) =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : null
+  const macs = body.macs === null ? [] : list(body.macs)
+  const ips = body.ips === null ? [] : list(body.ips)
+  if (!macs || !ips) throw new ApiError(502, 'Killswitch allowlist: unexpected response')
+  return { macs: [...macs].sort(), ips: [...ips].sort() }
+}
+
+/** The services' own health, composed by the UI's server (GET /api/status). */
+export async function fetchStatus(): Promise<SystemStatus> {
+  const body = await getJSON<SystemStatus>('/api/status', 'System status')
+  if (!Array.isArray(body.services)) throw new ApiError(502, 'System status: unexpected response')
+  return body
 }
 
 /** One action by id; `null` when the controller does not know it. */

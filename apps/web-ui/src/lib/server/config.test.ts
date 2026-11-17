@@ -56,6 +56,28 @@ describe('readConfig', () => {
     expect(readConfig({ ...BASE, WEB_UI_PASSWORD: 'zażółć gęślą' }).ok).toBe(true)
   })
 
+  it('takes THREAT_INTEL_URL as optional, and a bad one as a note rather than a 503', () => {
+    const none = readConfig(BASE)
+    expect(none.ok && none.config.threatIntel).toBeNull()
+    expect(none.ok && none.config.notes).toEqual([])
+
+    const set = readConfig({ ...BASE, THREAT_INTEL_URL: ' http://threat-intel-sync:8083/ ' })
+    expect(set.ok && set.config.threatIntel).toEqual({
+      url: 'http://threat-intel-sync:8083',
+      urlVar: 'THREAT_INTEL_URL',
+    })
+
+    for (const bad of ['threat-intel-sync:8083', 'ftp://x', 'http://user:pw@tis:8083']) {
+      const r = readConfig({ ...BASE, THREAT_INTEL_URL: bad })
+      expect(r.ok, bad).toBe(true)
+      if (!r.ok) continue
+      expect(r.config.threatIntel).toBeNull()
+      expect(r.config.notes).toEqual([
+        'THREAT_INTEL_URL must be an http:// or https:// URL; threat-intel-sync is not read',
+      ])
+    }
+  })
+
   it('refuses a password equal to SESSION_SECRET', () => {
     const secret = 'x'.repeat(40)
     const r = readConfig({ ...BASE, SESSION_SECRET: secret, WEB_UI_PASSWORD: secret })

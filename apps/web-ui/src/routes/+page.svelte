@@ -6,10 +6,10 @@
     alertHeadline,
     alertObservedDomain,
     isSilenced,
-  } from '$lib/alerts'
-  import { fetchDevices, fetchAlerts, formatTime } from '$lib/api'
-  import { newestFirst } from '$lib/order'
-  import type { Alert } from '$lib/types'
+  } from '#lib/alerts.ts'
+  import { fetchDevices, fetchAlerts, formatTime } from '#lib/api.ts'
+  import { newestFirst } from '#lib/order.ts'
+  import type { Alert } from '#lib/types.ts'
 
   // The detection engine reports no total; the count is of this many at most.
   const ALERT_COUNT_LIMIT = 1000

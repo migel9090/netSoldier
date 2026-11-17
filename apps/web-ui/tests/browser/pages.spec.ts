@@ -15,6 +15,10 @@ test('every page renders without CSP violations or console errors', async ({ pag
     ['/killswitch', 'Killswitch'],
     ['/killswitch/history', 'Killswitch History'],
     ['/killswitch/audit', 'Killswitch Audit Log'],
+    ['/killswitch/policy', 'Killswitch Policy'],
+    ['/killswitch/actions/ACT-e2e-a1', 'Action ACT-e2e-a1'],
+    ['/suppressions', 'Suppressions'],
+    ['/health', 'System Health'],
   ]
   for (const [path, heading] of pages) {
     await page.goto(path)

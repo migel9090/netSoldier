@@ -1,12 +1,17 @@
-# Pre-commit hooks — security scanners + formatters.
+# Pre-commit hooks: the CI gates, early.
 #
-# Install:  pip install pre-commit && pre-commit install
-# Run all:  pre-commit run --all-files
-# Update:   pre-commit autoupdate
+# Install:  pip install pre-commit && pre-commit install --hook-type pre-commit --hook-type pre-push
+#           task ci:deps          (the hash-pinned ruff, PyYAML, jsonschema)
+#           npm ci --prefix apps/web-ui   (prettier, for the web UI hook)
+# Run all:  pre-commit run --all-files  (pre-push hooks: --hook-stage pre-push)
 #
-# Heavy hooks (semgrep, checkov) also run in CI (steps 15–17).
-# To skip them locally for a quick commit:
-#   SKIP=semgrep,checkov git commit -m "..."
+# The hooks call the same scripts and pinned tools as the workflows
+# (scripts/ci/tools.sh, scripts/ci/requirements.txt), so a hook and its CI
+# job cannot disagree; the third-party hook repositories they replaced ran
+# other versions and other rules (Semgrep's `--config auto`, a ruff that
+# was not CI's, a prettier mirror over the whole tree). The slow, Docker-based
+# gates (Semgrep, Checkov, KICS) run at pre-push; skip one locally with
+#   SKIP=semgrep git push
 
 default_language_version:
   python: python3
@@ -14,13 +19,14 @@ default_language_version:
 repos:
   # ── Standard checks ──────────────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
     hooks:
       - id: trailing-whitespace
         exclude: '\.md$'
       - id: end-of-file-fixer
       - id: check-yaml
         args: [--allow-multiple-documents]
+        exclude: '/templates/'
       - id: check-json
       - id: check-merge-conflict
       - id: check-added-large-files
@@ -29,53 +35,82 @@ repos:
       - id: check-symlinks
       - id: check-executables-have-shebangs
 
-  # ── Secrets — gitleaks ───────────────────────────────────────────
-  - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.21.2
+  - repo: local
     hooks:
+      # ── Secrets ────────────────────────────────────────────────
       - id: gitleaks
+        name: gitleaks (pinned, staged changes)
+        language: system
+        entry: bash -c '"$(scripts/ci/tools.sh install gitleaks)/gitleaks" git --pre-commit --staged --redact --no-banner --exit-code 1 .'
+        pass_filenames: false
+      - id: sops-check
+        name: no readable Secret, real SOPS recipients
+        language: system
+        entry: scripts/sops-check.sh
+        files: '\.(ya?ml|json)$|^\.sops\.yaml$|^scan-exceptions\.toml$'
+        pass_filenames: false
 
-  # ── SAST — semgrep ──────────────────────────────────────────────
-  # Requires network on first run (downloads rule packs).
-  - repo: https://github.com/semgrep/semgrep
-    rev: v1.96.0
-    hooks:
-      - id: semgrep
-        args: ['--config', 'auto', '--error', '--metrics', 'off']
-
-  # ── IaC — checkov ───────────────────────────────────────────────
-  - repo: https://github.com/bridgecrewio/checkov
-    rev: 3.2.312
-    hooks:
-      - id: checkov
-        args: ['--quiet', '--compact']
-
-  # ── Dockerfile — hadolint ───────────────────────────────────────
-  - repo: https://github.com/hadolint/hadolint
-    rev: v2.12.0
-    hooks:
-      - id: hadolint-docker
-
-  # ── Go — gofmt + goimports ──────────────────────────────────────
-  - repo: https://github.com/dnephin/pre-commit-golang
-    rev: v0.5.1
-    hooks:
-      - id: go-fmt
-      - id: go-imports
-
-  # ── Python — ruff (lint + format, replaces black + isort + flake8)
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.6
-    hooks:
+      # ── Formatting and lint ────────────────────────────────────
+      - id: gofmt
+        name: gofmt
+        language: system
+        entry: gofmt -l -w
+        types: [go]
+      # Where CI runs ruff (the lint job: apps/ml-anomaly) and the gate scripts.
       - id: ruff
-        args: [--fix]
+        name: ruff (the hash-pinned one)
+        language: system
+        entry: ruff check --fix
+        types: [python]
+        files: '^(apps/ml-anomaly|scripts)/'
       - id: ruff-format
+        name: ruff format
+        language: system
+        entry: ruff format
+        types: [python]
+        files: '^(apps/ml-anomaly|scripts)/'
+      - id: prettier-web-ui
+        name: prettier (web UI, its own locked version)
+        language: system
+        entry: bash -c 'cd apps/web-ui && npx --no-install prettier --write --ignore-unknown "${@#apps/web-ui/}"' --
+        files: '^apps/web-ui/'
+      - id: shellcheck
+        name: ShellCheck (pinned)
+        language: system
+        entry: scripts/ci/lint-shell.sh
+        types: [shell]
+        exclude: '\.j2$'
+      - id: actionlint
+        name: actionlint (pinned)
+        language: system
+        entry: bash -c 'b=$(scripts/ci/tools.sh install actionlint shellcheck) && "$b/actionlint" -shellcheck "$b/shellcheck" -pyflakes='
+        files: '^\.github/'
+        pass_filenames: false
+      - id: hadolint
+        name: hadolint (pinned, against scan-exceptions.toml)
+        language: system
+        entry: python3 scripts/ci/iac-gate.py hadolint
+        files: '(Dockerfile|Containerfile)'
+        pass_filenames: false
 
-  # ── JS/TS/Svelte — prettier ─────────────────────────────────────
-  - repo: https://github.com/pre-commit/mirrors-prettier
-    rev: v4.0.0-alpha.8
-    hooks:
-      - id: prettier
-        types_or: [javascript, typescript, css, json, yaml, markdown]
-        additional_dependencies:
-          - prettier-plugin-svelte
+      # ── Deploy configuration ───────────────────────────────────
+      - id: validate-configs
+        name: deploy configs, migration list, home-network values
+        language: system
+        entry: python3 scripts/validate-configs.py
+        pass_filenames: false
+        files: '^(deploy|infra|docs|apps)/|^scan-exceptions\.toml$'
+
+      # ── Slow gates (Docker), before pushing ────────────────────
+      - id: semgrep
+        name: Semgrep (pinned rules, against scan-exceptions.toml)
+        language: system
+        entry: python3 scripts/ci/iac-gate.py semgrep
+        pass_filenames: false
+        stages: [pre-push]
+      - id: checkov
+        name: Checkov (rendered targets, against scan-exceptions.toml)
+        language: system
+        entry: python3 scripts/ci/iac-gate.py checkov
+        pass_filenames: false
+        stages: [pre-push]

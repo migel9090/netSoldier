@@ -3,6 +3,7 @@ import type { ActionResult } from './api'
 import {
   actionTypeChoices,
   approveQuestion,
+  approverWords,
   autoBlockStatus,
   awaitingConfirmation,
   defaultChoice,
@@ -14,9 +15,11 @@ import {
   endedBy,
   failureKind,
   hasSettled,
+  historyOutcomeFrom,
   isBeingLifted,
   isStillEnforced,
   operationInFlight,
+  pageOf,
   progressWords,
   reportsInFlight,
   stateWords,
@@ -444,5 +447,29 @@ describe('ordering', () => {
     expect(oldestFirst(items).map((i) => i.id)).toEqual(['c', 'a', 'b'])
     expect(oldestFirst([...items].reverse()).map((i) => i.id)).toEqual(['c', 'a', 'b'])
     expect(newestFirst(items).map((i) => i.id)).toEqual(['a', 'b', 'c'])
+  })
+})
+
+describe('history', () => {
+  it('pages a list, clamping the page to the ones there are', () => {
+    const items = Array.from({ length: 120 }, (_, i) => i)
+    expect(pageOf(items, 0, 50)).toMatchObject({ page: 0, pages: 3, total: 120 })
+    expect(pageOf(items, 2, 50).items).toEqual(items.slice(100))
+    expect(pageOf(items, 7, 50).page).toBe(2)
+    expect(pageOf(items, -1, 50).page).toBe(0)
+    expect(pageOf([], 3, 50)).toEqual({ items: [], page: 0, pages: 1, total: 0 })
+  })
+
+  it('takes the outcome filter from the URL, and only one it knows', () => {
+    expect(historyOutcomeFrom(new URLSearchParams('outcome=rejected'))).toBe('rejected')
+    expect(historyOutcomeFrom(new URLSearchParams('outcome=apply_failed'))).toBe('apply_failed')
+    expect(historyOutcomeFrom(new URLSearchParams('outcome=active'))).toBe('')
+    expect(historyOutcomeFrom(new URLSearchParams())).toBe('')
+  })
+
+  it('says who approved: a person, the policy, or nobody', () => {
+    expect(approverWords({ approved_by: 'Anna', auto_approved: false })).toBe('Anna')
+    expect(approverWords({ approved_by: '', auto_approved: true })).toBe('the policy (automatic)')
+    expect(approverWords({ auto_approved: false })).toBe('—')
   })
 })

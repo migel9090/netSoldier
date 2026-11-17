@@ -331,6 +331,8 @@ AUTO_POLICY=shipped
 AUTO_ENV_SAVED=
 KS_AUTO_ENV='[.spec.template.spec.containers[] | select(.name == "killswitch-controller") | .env[]? | select(.name == "POLICY_AUTO_BLOCK")][0]'
 
+ks_answers() { [[ -n $(ks GET /policy | body | jq -r '.auto_block // empty' 2>/dev/null) ]]; }
+
 auto_policy() { # on|off
   local env patch
   case $1 in
@@ -350,6 +352,10 @@ auto_policy() { # on|off
   k -n "$NS" patch deploy/killswitch-controller --type=strategic -p "$patch" >/dev/null ||
     { say "could not switch the killswitch policy $1"; return 1; }
   k -n "$NS" rollout status deploy/killswitch-controller --timeout=180s >/dev/null
+  # The rollout is done when the new pod is Ready; its Service can still
+  # refuse for a moment after that, and a read in that moment comes back
+  # empty and looks like a policy that was not applied.
+  retry 30 ks_answers || say "the killswitch does not answer GET /policy after the rollout"
   AUTO_POLICY=$1
   say "killswitch policy $1: $(k -n "$NS" logs deploy/killswitch-controller | jq -r 'select(.msg == "policy loaded") |
     "auto_block=\(.auto_block) auto_block_allowed=\(.auto_block_allowed) auto_confidence=\(.auto_confidence) auto_severity=\(.auto_severity) allowlist_entries=\(.allowlist_entries)"' | tail -1)"

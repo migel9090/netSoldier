@@ -31,3 +31,21 @@ netsoldier-tlsfp.zeek — first-party (deploy/docker/zeek/scripts/)
 The JA3 package runs inside the BSD-licensed Zeek process; the GPL-3.0
 Go services consume only the resulting log records via ClickHouse. See
 docs/adr/0003-first-party-ja4.md for the licensing analysis.
+
+================================================================================
+Never-block list (libs/indicator/neverblock.txt, compiled into the Go
+services that link libs/indicator)
+================================================================================
+
+Majestic Million — https://majestic.com/reports/majestic-million
+    The "popular" entries were selected from the Majestic Million of
+    2026-11-17. Copyright (c) Majestic-12 Ltd. Licensed under the Creative
+    Commons Attribution 3.0 Unported licence,
+    https://creativecommons.org/licenses/by/3.0/. Changes: the rows were
+    reduced to registrable domains, most were left out by hand, and
+    related hosts of the same operators were added; netSoldier is not
+    endorsed by Majestic-12 Ltd.
+
+The other entries (CDN, shared-hosting and dynamic-DNS apexes, public
+resolvers) are first-party, factual entries. Public-suffix data comes
+from golang.org/x/net/publicsuffix (the Public Suffix List, MPL-2.0).

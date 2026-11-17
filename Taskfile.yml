@@ -78,10 +78,16 @@ tasks:
       - go test -v -race -count=1 ./internal/pcapreplay/...
 
   test:corpus:
-    desc: Replay the malware/C2 PCAP corpus through Suricata + Zeek (needs docker)
-    dir: detections/pcap-corpus
+    desc: Replay the PCAP corpus through the digest-pinned Suricata and Zeek (needs docker)
+    deps: [ci:deps]
     cmds:
-      - ./test/verify.py {{.CLI_ARGS}}
+      - scripts/ci/pcap-corpus.sh {{.CLI_ARGS}}
+
+  test:corpus:zeek-image:
+    desc: Build deploy/docker/zeek and replay the PCAP corpus through that image (needs docker)
+    deps: [ci:deps]
+    cmds:
+      - scripts/ci/pcap-corpus.sh --zeek-image {{.CLI_ARGS}}
 
   test:python:
     desc: Run Python tests
@@ -91,26 +97,68 @@ tasks:
       - pytest --tb=short -q || [ $? -eq 5 ]
 
   lint:
-    desc: Run all linters
+    desc: Run all linters (the lint job and the static-checks workflow)
     cmds:
       - task: lint:go
       - task: lint:python
+      - task: lint:shell
+      - task: lint:actions
+      - task: lint:quadlet
+      - task: lint:prometheus
 
+  # The same commands as the lint job of .github/workflows/ci.yml, so the job
+  # can call these targets: gofmt, then vet of every module including
+  # libs/ and the tag-gated tests/e2e (a plain vet there matches nothing).
   lint:go:
-    desc: Run Go vet on all modules
+    desc: gofmt check and go vet of every module, libs/ and tests/e2e included
+    env:
+      GOWORK: "off"
     cmds:
       - |
-        for dir in apps/*/; do
+        unformatted=$(gofmt -l apps libs tests)
+        if [ -n "$unformatted" ]; then
+          echo "These files are not gofmt-formatted. Run 'task fmt':"
+          echo "$unformatted"
+          exit 1
+        fi
+      - |
+        for dir in apps/*/ libs/*/; do
           if find "$dir" -name '*.go' -print -quit | grep -q .; then
             echo "==> vet $dir"
             (cd "$dir" && go vet ./...)
           fi
         done
+        echo "==> vet tests/e2e"
+        (cd tests/e2e && go vet -tags=e2e ./... && go vet -tags=integration ./...)
 
   lint:python:
-    desc: Run ruff linter on ml-anomaly
+    desc: ruff on ml-anomaly, with the hash-pinned ruff
+    deps: [ci:deps]
     cmds:
       - ruff check apps/ml-anomaly/
+
+  lint:shell:
+    desc: ShellCheck (pinned) on every tracked shell script, errors and warnings
+    cmds:
+      - scripts/ci/lint-shell.sh {{.CLI_ARGS}}
+
+  lint:actions:
+    desc: actionlint (pinned) on every workflow, with the pinned ShellCheck for run blocks
+    cmds:
+      - |
+        bin=$(scripts/ci/tools.sh install actionlint shellcheck)
+        "$bin/actionlint" -shellcheck "$bin/shellcheck" -pyflakes= {{.CLI_ARGS}}
+
+  lint:quadlet:
+    desc: Quadlet dry run of deploy/podman/units on Podman 5.4 (needs docker)
+    cmds:
+      - scripts/ci/quadlet-check.sh
+
+  lint:prometheus:
+    desc: promtool check rules, and promtool test rules when observability/tests/ exists
+    deps: [ci:deps]
+    cmds:
+      - scripts/ci/promtool-check.sh
 
   fmt:
     desc: Format all code
@@ -131,9 +179,10 @@ tasks:
       - bash scripts/backup-restore-test.sh
 
   # ── CI gates ───────────────────────────────────────────────────
-  # Each runs the same script the workflow runs, so a green run here is a
-  # green job there. The scanners need Docker; tools land in
-  # ~/.cache/netsoldier (NETSOLDIER_TOOLS overrides).
+  # The workflows call these targets (with the pinned Task from
+  # scripts/ci/tools.sh), so a green run here is a green job there. The
+  # scanners need Docker; tools land in ~/.cache/netsoldier
+  # (NETSOLDIER_TOOLS overrides).
 
   ci:deps:
     desc: Install the gates' hash-pinned Python tools (use a virtualenv)
@@ -141,9 +190,20 @@ tasks:
       - python3 -m pip install --quiet --require-hashes -r scripts/ci/requirements.txt
 
   tools:
-    desc: Install the pinned, checksum-verified gate binaries (kustomize, kubeconform, hadolint)
+    desc: Install the pinned, checksum-verified gate binaries (scripts/ci/tools.sh)
     cmds:
       - scripts/ci/tools.sh install
+
+  ci:prove-gates:
+    desc: Plant one defect per gate in a copy of the tree and show each gate failing (needs docker)
+    deps: [ci:deps]
+    cmds:
+      - scripts/ci/prove-gates.sh {{.CLI_ARGS}}
+
+  ci:branch-protection:
+    desc: Compare main's live protection with .github/branch-protection.json (read-only)
+    cmds:
+      - python3 scripts/ci/branch-protection.py --check
 
   validate:
     desc: Run the validate job (configs, every rendered target, first-party images)
@@ -173,22 +233,28 @@ tasks:
     desc: Run security scanners locally
     cmds:
       - task: scan:secrets
+      - task: scan:sops
       - task: scan:sast
       - task: scan:iac
 
   scan:secrets:
-    desc: Scan for leaked secrets
+    desc: gitleaks (pinned) over the whole git history, .gitleaksignore applied
     cmds:
-      - gitleaks detect --source . --verbose --no-banner
+      - |
+        bin=$(scripts/ci/tools.sh install gitleaks)
+        "$bin/gitleaks" git --redact --no-banner --exit-code 1 {{.CLI_ARGS}} .
+
+  scan:sops:
+    desc: No readable Secret committed, real SOPS recipients (scripts/sops-check.sh)
+    deps: [ci:deps]
+    cmds:
+      - scripts/sops-check.sh
 
   scan:sast:
-    desc: Run Semgrep SAST scan
+    desc: Semgrep (pinned, with the pinned rules) against scan-exceptions.toml
+    deps: [ci:deps]
     cmds:
-      - semgrep scan
-          --config=p/default
-          --config=p/security-audit
-          --config=p/owasp-top-ten
-          --metrics=off .
+      - python3 scripts/ci/iac-gate.py semgrep {{.CLI_ARGS}}
 
   scan:iac:
     desc: Run the IaC gates (Checkov, KICS, hadolint) against scan-exceptions.toml

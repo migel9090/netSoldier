@@ -12,34 +12,45 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+// ── Legacy server ────────────────────────────────────────────────────────
+//
+// startClickHouse, runMigrations, chExec, chInsert and chQueryRows run the
+// deployment's image with an open `default` account and apply the
+// migrations statement by statement over HTTP. They remain only for tests
+// that have not moved to startProdClickHouse (clickhouse_harness_test.go),
+// which runs the repository's users-override.xml and migrate.sh as the
+// migrate account: killswitch_audit_integration_test.go.
+
 func startClickHouse(t *testing.T) string {
 	return startClickHouseContainer(t, nil)
 }
 
-// startClickHouseContainer starts clickhouse-server with the cold-tier
-// storage policy mounted: migration 018 requires the `tiered` policy to
-// exist. customize lets the cold-tier test attach the container to a Docker
-// network with a live Garage; without it the s3_cold disk points at an
-// unreachable endpoint, which skip_access_check tolerates — parts simply
-// stay on the hot volume.
+// startClickHouseContainer starts the deployment's clickhouse-server image
+// with its storage.xml (migration 018 requires the `tiered` policy; the cold
+// disk's endpoint does not resolve, which skip_access_check tolerates) and
+// an open `default` account with access management.
 func startClickHouseContainer(t *testing.T, customize func(*testcontainers.ContainerRequest)) string {
 	t.Helper()
 	ctx := context.Background()
 
+	storage := filepath.Join(t.TempDir(), "storage.xml")
+	if err := os.WriteFile(storage, []byte(clickhouseConfig(t)["storage.xml"]), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	req := testcontainers.ContainerRequest{
-		Image:        "clickhouse/clickhouse-server:24.8",
+		Image:        clickhouseImage(t),
 		ExposedPorts: []string{"8123/tcp"},
 		Env:          map[string]string{"CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT": "1"},
 		Files: []testcontainers.ContainerFile{{
-			HostFilePath:      writeStorageXML(t),
+			HostFilePath:      storage,
 			ContainerFilePath: "/etc/clickhouse-server/config.d/storage.xml",
 			FileMode:          0o644,
 		}},
@@ -76,23 +87,8 @@ func startClickHouseContainer(t *testing.T, customize func(*testcontainers.Conta
 
 func runMigrations(t *testing.T, chURL string) {
 	t.Helper()
-
-	root := repoRoot(t)
-	dir := filepath.Join(root, "deploy", "clickhouse", "migrations")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read migrations dir: %v", err)
-	}
-
-	var files []string
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".sql") {
-			files = append(files, e.Name())
-		}
-	}
-	sort.Strings(files)
-
-	for _, f := range files {
+	dir := filepath.Join(repoRoot(t), "deploy", "clickhouse", "migrations")
+	for _, f := range migrationFiles(t) {
 		data, err := os.ReadFile(filepath.Join(dir, f))
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
@@ -107,7 +103,7 @@ func runMigrations(t *testing.T, chURL string) {
 
 // splitStatements splits a migration file into individual statements for the
 // HTTP interface (one statement per request). "--" comment lines are dropped
-// first: the production init path (clickhouse-client multiquery) parses them,
+// first: the production path (clickhouse-client --multiquery) parses them,
 // but a naive ";" split would break on semicolons inside comment text.
 func splitStatements(sql string) []string {
 	var kept []string
@@ -186,298 +182,196 @@ func chQueryRows(baseURL, database, query string, dest any) error {
 	return json.Unmarshal(envelope.Data, dest)
 }
 
-// TestClickHouseSchema verifies all migrations run cleanly against a real
-// ClickHouse server and tests insert+query roundtrips for each critical table.
+// ── The deployment's server ──────────────────────────────────────────────
+
+// TestClickHouseSchema applies every migration the way the migration Job
+// does (migrate.sh as the migrate account, on the deployment's image and
+// configuration), checks the tables that exist afterwards, that the runner's
+// record is complete and a second run changes nothing, and round-trips a row
+// through each table a service writes, as that service's account.
 func TestClickHouseSchema(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
-
-	chURL := startClickHouse(t)
-	runMigrations(t, chURL)
+	srv := startProdClickHouse(t, chOptions{})
 
 	t.Run("AllTablesCreated", func(t *testing.T) {
 		expected := []string{
-			"alerts", "audit_log", "connections", "detection_feedback",
-			"device_events", "devices", "dns_queries", "events",
-			"ml_anomalies", "ml_beacons", "network_flows", "suricata_alerts",
-			"suricata_dns", "suricata_tls", "zeek_conn", "zeek_dns",
-			"zeek_http", "zeek_intel", "zeek_ssl", "zeek_x509",
+			"alerts:ReplacingMergeTree", "audit_log:MergeTree", "detection_feedback:ReplacingMergeTree",
+			"device_events:MergeTree", "devices:ReplacingMergeTree", "dns_queries:MergeTree",
+			"ml_anomalies:ReplacingMergeTree", "ml_beacons:ReplacingMergeTree", "network_flows:View",
+			"schema_migrations:MergeTree", "suricata_alerts:MergeTree", "suricata_dns:MergeTree",
+			"suricata_tls:MergeTree", "zeek_conn:MergeTree", "zeek_dns:MergeTree", "zeek_http:MergeTree",
+			"zeek_intel:MergeTree", "zeek_ssl:MergeTree", "zeek_x509:MergeTree",
 		}
-
-		type tableRow struct {
-			Name string `json:"name"`
+		var tables []struct {
+			Name   string `json:"name"`
+			Engine string `json:"engine"`
 		}
-		var tables []tableRow
-		if err := chQueryRows(chURL, "netsoldier",
-			"SELECT name FROM system.tables WHERE database = 'netsoldier' ORDER BY name",
-			&tables); err != nil {
+		if err := srv.query("migrate",
+			"SELECT name, engine FROM system.tables WHERE database = 'netsoldier' ORDER BY name", &tables); err != nil {
 			t.Fatalf("list tables: %v", err)
 		}
-
 		var got []string
 		for _, tbl := range tables {
-			got = append(got, tbl.Name)
+			got = append(got, tbl.Name+":"+tbl.Engine)
 		}
+		if strings.Join(got, " ") != strings.Join(expected, " ") {
+			t.Fatalf("tables\n got %v\nwant %v", got, expected)
+		}
+	})
 
-		if len(got) != len(expected) {
-			t.Fatalf("expected %d tables, got %d: %v", len(expected), len(got), got)
+	t.Run("RunnerRecordAndRerun", func(t *testing.T) {
+		files := migrationFiles(t)
+		if n := srv.count(t, "migrate", "SELECT count() AS n FROM schema_migrations"); n != len(files) {
+			t.Errorf("schema_migrations has %d rows, %d files exist", n, len(files))
 		}
-		for i, want := range expected {
-			if got[i] != want {
-				t.Errorf("table[%d] = %q, want %q", i, got[i], want)
-			}
+		out, code := srv.migrate(t, "", "apply")
+		if code != 0 || !strings.Contains(out, "nothing to apply") {
+			t.Errorf("second run: exit %d\n%s", code, out)
+		}
+		if out, code := srv.migrate(t, "", "status"); code != 0 {
+			t.Errorf("status after apply: exit %d\n%s", code, out)
 		}
 	})
 
 	t.Run("AlertRoundtrip", func(t *testing.T) {
-		if err := chInsert(chURL, "netsoldier", "alerts", map[string]any{
-			"timestamp":   "2026-05-20 10:00:00",
-			"id":          "DET-INT-1",
-			"domain":      "malware.evil.com",
-			"client_ip":   "192.168.1.42",
-			"query_type":  "A",
-			"matched_ioc": "evil.com",
-			"severity":    "critical",
-			"source":      "threatfox",
-		}); err != nil {
-			t.Fatalf("insert: %v", err)
+		srv.mustInsert(t, "detection", "alerts", map[string]any{
+			"timestamp": "2026-05-20 10:00:00", "observed_at": "2026-05-20 09:59:58.250",
+			"id": "DET-INT-1", "summary": "DNS query for malware.evil.com matches threatfox domain indicator evil.com",
+			"domain": "malware.evil.com", "client_ip": "192.168.1.42", "client_mac": "aa:bb:cc:dd:ee:ff",
+			"query_type": "A", "matched_ioc": "evil.com", "ioc_type": "domain", "severity": "critical",
+			"source": "threatfox", "signal_class": "ioc", "confidence": 95, "target_type": "domain",
+			"target_value": "evil.com", "suppressed": 0,
+		})
+		var rows []struct {
+			ID, Domain, ClientMAC, Severity, Summary, ObservedAt string
 		}
-
-		type row struct {
-			ID       string `json:"id"`
-			Domain   string `json:"domain"`
-			ClientIP string `json:"client_ip"`
-			Severity string `json:"severity"`
-			Source   string `json:"source"`
+		if err := srv.query("grafana", "SELECT id AS ID, domain AS Domain, client_mac AS ClientMAC, severity AS Severity, "+
+			"summary AS Summary, toString(observed_at) AS ObservedAt FROM alerts WHERE id = 'DET-INT-1'", &rows); err != nil {
+			t.Fatal(err)
 		}
-		var rows []row
-		if err := chQueryRows(chURL, "netsoldier",
-			"SELECT id, domain, client_ip, severity, source FROM alerts WHERE id = 'DET-INT-1'",
-			&rows); err != nil {
-			t.Fatalf("query: %v", err)
+		if len(rows) != 1 || rows[0].ClientMAC != "aa:bb:cc:dd:ee:ff" || rows[0].ObservedAt != "2026-05-20 09:59:58.250" ||
+			rows[0].Summary == "" {
+			t.Fatalf("alerts: %+v", rows)
 		}
-
-		if len(rows) != 1 {
-			t.Fatalf("expected 1 row, got %d", len(rows))
-		}
-		assertEq(t, "id", "DET-INT-1", rows[0].ID)
-		assertEq(t, "domain", "malware.evil.com", rows[0].Domain)
-		assertEq(t, "client_ip", "192.168.1.42", rows[0].ClientIP)
-		assertEq(t, "severity", "critical", rows[0].Severity)
-		assertEq(t, "source", "threatfox", rows[0].Source)
 	})
 
 	t.Run("DeviceEventRoundtrip", func(t *testing.T) {
-		if err := chInsert(chURL, "netsoldier", "device_events", map[string]any{
-			"timestamp":  "2026-05-20 10:00:00",
-			"mac":        "aa:bb:cc:dd:ee:ff",
-			"ip":         "192.168.1.100",
-			"hostname":   "iot-sensor",
-			"vendor":     "Espressif",
-			"protocol":   "dhcp",
-			"event_type": "seen",
-		}); err != nil {
-			t.Fatalf("insert: %v", err)
+		srv.mustInsert(t, "inventory", "device_events", map[string]any{
+			"timestamp": "2026-05-20 10:00:00.123", "mac": "aa:bb:cc:dd:ee:ff", "ip": "192.168.1.100",
+			"hostname": "iot-sensor", "vendor": "Espressif", "protocol": "dhcp", "event_type": "seen",
+		})
+		if n := srv.count(t, "grafana", "SELECT count() AS n FROM device_events WHERE mac = 'aa:bb:cc:dd:ee:ff'"); n != 1 {
+			t.Fatalf("device_events: %d rows", n)
 		}
-
-		type row struct {
-			MAC      string `json:"mac"`
-			IP       string `json:"ip"`
-			Hostname string `json:"hostname"`
-			Protocol string `json:"protocol"`
-		}
-		var rows []row
-		if err := chQueryRows(chURL, "netsoldier",
-			"SELECT mac, ip, hostname, protocol FROM device_events WHERE mac = 'aa:bb:cc:dd:ee:ff'",
-			&rows); err != nil {
-			t.Fatalf("query: %v", err)
-		}
-
-		if len(rows) != 1 {
-			t.Fatalf("expected 1 row, got %d", len(rows))
-		}
-		assertEq(t, "mac", "aa:bb:cc:dd:ee:ff", rows[0].MAC)
-		assertEq(t, "ip", "192.168.1.100", rows[0].IP)
-		assertEq(t, "hostname", "iot-sensor", rows[0].Hostname)
-		assertEq(t, "protocol", "dhcp", rows[0].Protocol)
 	})
 
 	t.Run("DNSQueryRoundtrip", func(t *testing.T) {
-		if err := chInsert(chURL, "netsoldier", "dns_queries", map[string]any{
-			"timestamp":   "2026-05-20 10:00:00",
-			"client_ip":   "192.168.1.42",
-			"domain":      "google.com",
-			"query_type":  "A",
-			"answer":      "142.250.80.46",
-			"status":      "noerror",
-			"response_ms": 12,
-			"blocked":     0,
-		}); err != nil {
-			t.Fatalf("insert: %v", err)
+		srv.mustInsert(t, "detection", "dns_queries", map[string]any{
+			"timestamp": time.Now().Unix(), "client_ip": "192.168.1.42", "domain": "google.com",
+			"query_type": "A", "answer": "142.250.80.46", "status": "NOERROR", "response_ms": 12,
+			"blocked": 0, "reason": "NotFilteredNotFound", "threat_source": "", "threat_name": "",
+		})
+		var rows []struct {
+			Domain string `json:"domain"`
+			Reason string `json:"reason"`
 		}
-
-		type row struct {
-			Domain    string `json:"domain"`
-			ClientIP  string `json:"client_ip"`
-			QueryType string `json:"query_type"`
-			Answer    string `json:"answer"`
-			Blocked   int    `json:"blocked"`
+		if err := srv.query("inventory", "SELECT domain, reason FROM dns_queries WHERE client_ip = '192.168.1.42'", &rows); err != nil {
+			t.Fatal(err)
 		}
-		var rows []row
-		if err := chQueryRows(chURL, "netsoldier",
-			"SELECT domain, client_ip, query_type, answer, blocked FROM dns_queries WHERE domain = 'google.com'",
-			&rows); err != nil {
-			t.Fatalf("query: %v", err)
-		}
-
-		if len(rows) != 1 {
-			t.Fatalf("expected 1 row, got %d", len(rows))
-		}
-		assertEq(t, "domain", "google.com", rows[0].Domain)
-		assertEq(t, "client_ip", "192.168.1.42", rows[0].ClientIP)
-		assertEq(t, "answer", "142.250.80.46", rows[0].Answer)
-		if rows[0].Blocked != 0 {
-			t.Errorf("blocked: want 0, got %d", rows[0].Blocked)
+		if len(rows) != 1 || rows[0].Domain != "google.com" || rows[0].Reason != "NotFilteredNotFound" {
+			t.Fatalf("dns_queries: %+v", rows)
 		}
 	})
 
-	t.Run("ConnectionRoundtrip", func(t *testing.T) {
-		if err := chInsert(chURL, "netsoldier", "connections", map[string]any{
-			"timestamp":       "2026-05-20 10:00:00",
-			"src_mac":         "aa:bb:cc:dd:ee:ff",
-			"src_hostname":    "iot-sensor",
-			"src_vendor":      "Espressif",
-			"src_os":          "FreeRTOS",
-			"src_device_type": "iot",
-			"src_ip":          "192.168.1.100",
-			"src_port":        54321,
-			"dst_ip":          "1.1.1.1",
-			"dst_domain":      "one.one.one.one",
-			"dst_port":        443,
-			"protocol":        6,
-			"bytes_in":        1024,
-			"bytes_out":       2048,
-			"packets_in":      10,
-			"packets_out":     15,
-			"duration_ms":     500,
-			"tcp_flags":       18,
-			"vlan_id":         0,
-		}); err != nil {
-			t.Fatalf("insert: %v", err)
+	t.Run("FlowViewOverZeekConn", func(t *testing.T) {
+		srv.mustInsert(t, "zeek", "zeek_conn", map[string]any{
+			"timestamp": time.Now().UTC().Format("2006-01-02 15:04:05"), "uid": "CflowView1", "src_ip": "192.168.1.100",
+			"src_port": 54321, "dst_ip": "1.1.1.1", "dst_port": 443, "proto": "tcp", "service": "ssl",
+			"duration_ms": 500, "orig_bytes": 2048, "resp_bytes": 1024, "conn_state": "SF", "local_orig": 1,
+			"local_resp": 0, "history": "ShADadFf", "orig_pkts": 15, "resp_pkts": 10,
+		}, map[string]any{
+			"timestamp": time.Now().UTC().Format("2006-01-02 15:04:05"), "uid": "CflowView2", "src_ip": "fd00::5",
+			"dst_ip": "2001:db8::1", "proto": "icmp", "orig_pkts": 1, "resp_pkts": 1,
+		})
+		var rows []struct {
+			UID      string      `json:"uid"`
+			Protocol json.Number `json:"protocol"`
+			BytesIn  json.Number `json:"bytes_in"`
+			BytesOut json.Number `json:"bytes_out"`
+			PktsOut  json.Number `json:"packets_out"`
 		}
-
-		type row struct {
-			SrcMAC    string      `json:"src_mac"`
-			SrcIP     string      `json:"src_ip"`
-			DstIP     string      `json:"dst_ip"`
-			DstDomain string      `json:"dst_domain"`
-			DstPort   json.Number `json:"dst_port"`
-			BytesIn   json.Number `json:"bytes_in"`
+		if err := srv.query("inventory", "SELECT uid, protocol, bytes_in, bytes_out, packets_out FROM network_flows "+
+			"WHERE uid IN ('CflowView1', 'CflowView2') ORDER BY uid", &rows); err != nil {
+			t.Fatal(err)
 		}
-		var rows []row
-		if err := chQueryRows(chURL, "netsoldier",
-			"SELECT src_mac, src_ip, dst_ip, dst_domain, dst_port, bytes_in FROM connections WHERE src_mac = 'aa:bb:cc:dd:ee:ff'",
-			&rows); err != nil {
-			t.Fatalf("query: %v", err)
+		if len(rows) != 2 || rows[0].Protocol.String() != "6" || rows[0].BytesIn.String() != "1024" ||
+			rows[0].BytesOut.String() != "2048" || rows[0].PktsOut.String() != "15" || rows[1].Protocol.String() != "58" {
+			t.Fatalf("network_flows over zeek_conn: %+v (want bytes_out = the originator's, ICMPv6 = 58)", rows)
 		}
-
-		if len(rows) != 1 {
-			t.Fatalf("expected 1 row, got %d", len(rows))
-		}
-		assertEq(t, "src_mac", "aa:bb:cc:dd:ee:ff", rows[0].SrcMAC)
-		assertEq(t, "dst_domain", "one.one.one.one", rows[0].DstDomain)
-		assertEq(t, "dst_port", "443", rows[0].DstPort.String())
-		assertEq(t, "bytes_in", "1024", rows[0].BytesIn.String())
 	})
 
 	t.Run("AuditLogRoundtrip", func(t *testing.T) {
-		if err := chInsert(chURL, "netsoldier", "audit_log", map[string]any{
-			"timestamp":    "2026-05-20 10:00:00",
-			"action_id":    "KS-INT-1",
-			"from_state":   "pending",
-			"to_state":     "active",
-			"actor":        "auto",
-			"reason":       "confidence >= 90",
-			"detection_id": "DET-INT-1",
-			"target_mac":   "aa:bb:cc:dd:ee:ff",
-			"target_ip":    "192.168.1.100",
-			"action_type":  "dns_sinkhole",
-		}); err != nil {
-			t.Fatalf("insert: %v", err)
+		srv.mustInsert(t, "killswitch", "audit_log", map[string]any{
+			"timestamp": "2026-05-20 10:00:00.250", "action_id": "KS-INT-1", "from_state": "pending",
+			"to_state": "active", "actor": "auto", "reason": "confidence >= 90", "detection_id": "DET-INT-1",
+			"target_mac": "aa:bb:cc:dd:ee:ff", "target_ip": "192.168.1.100", "action_type": "dns_sinkhole",
+		})
+		if n := srv.count(t, "grafana", "SELECT count() AS n FROM audit_log WHERE action_id = 'KS-INT-1'"); n != 1 {
+			t.Fatalf("audit_log: %d rows", n)
 		}
+	})
 
-		type row struct {
-			ActionID    string `json:"action_id"`
-			FromState   string `json:"from_state"`
-			ToState     string `json:"to_state"`
-			Actor       string `json:"actor"`
-			DetectionID string `json:"detection_id"`
-			ActionType  string `json:"action_type"`
+	// Each account holds the grants its code uses and no more. The vector
+	// account in particular: a users.xml account without a <grants> element
+	// has every privilege, and its grants were removed in step 125.10.
+	t.Run("Grants", func(t *testing.T) {
+		denied := []struct{ account, query string }{
+			{"vector", "INSERT INTO dns_queries (domain) VALUES ('x')"},
+			{"vector", "INSERT INTO alerts (id) VALUES ('x')"},
+			{"vector", "SELECT count() FROM zeek_conn"},
+			{"detection", "SELECT count() FROM dns_queries"},
+			{"detection", "SELECT count() FROM alerts"},
+			{"detection", "INSERT INTO zeek_conn (uid) VALUES ('x')"},
+			{"inventory", "INSERT INTO alerts (id) VALUES ('x')"},
+			{"inventory", "SELECT count() FROM audit_log"},
+			{"zeek", "INSERT INTO suricata_alerts (src_ip) VALUES ('x')"},
+			{"grafana", "INSERT INTO alerts (id) VALUES ('x')"},
+			{"grafana", "DROP TABLE alerts"},
+			{"migrate", "CREATE USER intruder IDENTIFIED WITH no_password"},
+			{"migrate", "SELECT count() FROM system.users"},
 		}
-		var rows []row
-		if err := chQueryRows(chURL, "netsoldier",
-			"SELECT action_id, from_state, to_state, actor, detection_id, action_type FROM audit_log WHERE action_id = 'KS-INT-1'",
-			&rows); err != nil {
-			t.Fatalf("query: %v", err)
+		for _, d := range denied {
+			if err := srv.exec(d.account, d.query); err == nil || !strings.Contains(err.Error(), "ACCESS_DENIED") &&
+				!strings.Contains(err.Error(), "Not enough privileges") {
+				t.Errorf("%s: %q = %v, want access denied", d.account, d.query, err)
+			}
 		}
-
-		if len(rows) != 1 {
-			t.Fatalf("expected 1 row, got %d", len(rows))
-		}
-		assertEq(t, "action_id", "KS-INT-1", rows[0].ActionID)
-		assertEq(t, "from_state", "pending", rows[0].FromState)
-		assertEq(t, "to_state", "active", rows[0].ToState)
-		assertEq(t, "action_type", "dns_sinkhole", rows[0].ActionType)
-		assertEq(t, "detection_id", "DET-INT-1", rows[0].DetectionID)
 	})
 }
 
-// TestDeviceInventoryClickHouse verifies device-inventory runs against a real
-// ClickHouse whose schema was created by the migrations. The service used to
-// create its own tables at start-up; it no longer does — the schema belongs to
-// the migrations alone — so this test applies them first and then checks the
-// service comes up ready and serves its API.
+// TestDeviceInventoryClickHouse verifies device-inventory runs against the
+// deployment's ClickHouse with its own account: it checks its tables, comes
+// up ready and serves its API. The service used to create its own tables at
+// start-up; the schema belongs to the migrations alone.
 func TestDeviceInventoryClickHouse(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
+	srv := startProdClickHouse(t, chOptions{})
 
-	chURL := startClickHouse(t)
-	runMigrations(t, chURL)
-
-	type tableRow struct {
-		Name string `json:"name"`
-	}
-	var tables []tableRow
-	if err := chQueryRows(chURL, "netsoldier",
-		"SELECT name FROM system.tables WHERE database = 'netsoldier' ORDER BY name",
-		&tables); err != nil {
-		t.Fatalf("query tables: %v", err)
-	}
-	want := map[string]bool{"devices": false, "device_events": false}
-	for _, tbl := range tables {
-		if _, ok := want[tbl.Name]; ok {
-			want[tbl.Name] = true
-		}
-	}
-	for name, found := range want {
-		if !found {
-			t.Fatalf("migrations did not create table %q", name)
-		}
-	}
-
-	root := repoRoot(t)
-	invBin := goBuild(t, root, "apps/device-inventory")
-
+	invBin := goBuild(t, repoRoot(t), "apps/device-inventory")
 	invAddr := freeAddr(t)
 	stopInv := startProc(t, invBin, map[string]string{
-		"LISTEN_ADDR":         invAddr,
-		"DB_PATH":             filepath.Join(t.TempDir(), "devices.db"),
-		"CLICKHOUSE_URL":      chURL,
-		"CLICKHOUSE_DATABASE": "netsoldier",
-		"DEVICE_API_KEY":      e2eAPIKey,
-		"DISCOVERY_LISTENERS": "none",
+		"LISTEN_ADDR":             invAddr,
+		"DB_PATH":                 filepath.Join(t.TempDir(), "devices.db"),
+		"CLICKHOUSE_URL":          srv.URL,
+		"CLICKHOUSE_DATABASE":     "netsoldier",
+		"CLICKHOUSE_USER":         "inventory",
+		"CLICKHOUSE_PASSWORD":     srv.passwords["inventory"],
+		"DEVICE_API_KEY":          e2eAPIKey,
+		"NETAGENT_EXPECT_CAPTURE": "none",
 	})
 	t.Cleanup(stopInv)
 

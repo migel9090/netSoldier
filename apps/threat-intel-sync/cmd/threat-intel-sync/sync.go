@@ -6,7 +6,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/feedhttp"
+	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/guard"
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/ioc"
+	"github.com/migel9090/netSoldier/libs/indicator"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -80,12 +83,58 @@ var (
 		Name:      "ready",
 		Help:      "1 once there is an indicator set worth serving; exports answer 503 until then.",
 	})
+
+	// Step 134: the never-block list, the volume guard and freshness.
+	indicatorsNeverBlock = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "threat_intel",
+		Name:      "source_indicators_never_block_total",
+		Help:      "Feed rows dropped because they name a host on the never-block list, per source and reason.",
+	}, []string{"source", "reason"})
+	quarantined = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "threat_intel",
+		Name:      "source_quarantined",
+		Help:      "1 while a fetch of the source is held by the volume guard; the previous set is still served.",
+	}, []string{"source"})
+	quarantinedIndicators = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "threat_intel",
+		Name:      "source_quarantined_indicators",
+		Help:      "Distinct indicators in the source's held fetch (0 when nothing is held).",
+	}, []string{"source"})
+	quarantineTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "threat_intel",
+		Name:      "source_quarantine_total",
+		Help:      "Fetches held by the volume guard, per source and reason (growth, collapse, first_sync, total_growth).",
+	}, []string{"source", "reason"})
+	quarantineResolved = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "threat_intel",
+		Name:      "source_quarantine_resolved_total",
+		Help:      "Held fetches resolved, per source and action (released, discarded, superseded).",
+	}, []string{"source", "action"})
+	volumeBaseline = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "threat_intel",
+		Name:      "source_volume_baseline",
+		Help:      "The source's usual size the volume guard judges fetches against (median of its last applied fetches; 0 before the first).",
+	}, []string{"source"})
+	freshnessObjective = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "threat_intel",
+		Name:      "source_freshness_objective_seconds",
+		Help:      "Freshness objective per source (SOURCE_MAX_AGE): the source is stale once its last success is older.",
+	}, []string{"source"})
+)
+
+// Resolution actions, label values of quarantineResolved.
+const (
+	actionReleased   = "released"
+	actionDiscarded  = "discarded"
+	actionSuperseded = "superseded"
 )
 
 func init() {
 	prometheus.MustRegister(syncLastSuccess, syncFailures, indicatorsFetched,
 		indicatorsRejected, indicatorsDropped, sourceEnabled, storeSize, storeCapacity,
-		storePersistent, storePersistErrors, indicatorsPruned, cycleLastComplete, readyGauge)
+		storePersistent, storePersistErrors, indicatorsPruned, cycleLastComplete, readyGauge,
+		indicatorsNeverBlock, quarantined, quarantinedIndicators, quarantineTotal,
+		quarantineResolved, volumeBaseline, freshnessObjective, fresh)
 }
 
 // initSourceMetrics creates every per-source series up front. They used to
@@ -104,9 +153,42 @@ func initSourceMetrics(cfg config, lastSuccess map[string]time.Time) {
 		indicatorsFetched.WithLabelValues(src.name)
 		indicatorsRejected.WithLabelValues(src.name)
 		indicatorsDropped.WithLabelValues(src.name)
+		for _, r := range indicator.NeverBlockReasons() {
+			indicatorsNeverBlock.WithLabelValues(src.name, r)
+		}
+		for _, r := range guard.Reasons() {
+			quarantineTotal.WithLabelValues(src.name, r)
+		}
+		for _, a := range []string{actionReleased, actionDiscarded, actionSuperseded} {
+			quarantineResolved.WithLabelValues(src.name, a)
+		}
+		quarantined.WithLabelValues(src.name)
+		quarantinedIndicators.WithLabelValues(src.name)
+		volumeBaseline.WithLabelValues(src.name)
+		feedhttp.InitSourceMetrics(src.name)
+		if src.maxAge > 0 {
+			freshnessObjective.WithLabelValues(src.name).Set(src.maxAge.Seconds())
+		}
 	}
 	for _, d := range cfg.disabled {
 		sourceEnabled.WithLabelValues(d.name).Set(0)
+	}
+}
+
+// initGuardMetrics reports the guard state restored with the store: a fetch
+// held before a restart keeps its alert up after it.
+func initGuardMetrics(cfg config, g *guard.Manager) {
+	for _, src := range cfg.sources {
+		if base, ok := g.Baseline(src.name); ok {
+			volumeBaseline.WithLabelValues(src.name).Set(float64(base))
+		}
+		if h, ok := g.Get(src.name); ok {
+			quarantined.WithLabelValues(src.name).Set(1)
+			quarantinedIndicators.WithLabelValues(src.name).Set(float64(h.Size))
+		} else {
+			quarantined.WithLabelValues(src.name).Set(0)
+			quarantinedIndicators.WithLabelValues(src.name).Set(0)
+		}
 	}
 }
 
@@ -153,76 +235,127 @@ func (r *readiness) Ready() (bool, string) {
 
 // sourceResult is what one fetch of one source amounted to.
 type sourceResult struct {
-	fetched  int
-	stats    ioc.UpsertStats
-	err      error
-	success  bool
-	finished time.Time
+	fetched     int
+	stats       ioc.UpsertStats
+	outcome     guard.Outcome
+	err         error
+	success     bool
+	quarantined bool
+	finished    time.Time
 }
 
-// syncSource fetches one source and applies the partial-result policy:
+// syncSource fetches one source, passes it through the volume guard and
+// applies the partial-result policy:
 //
 //   - Whatever validated is kept, even when the fetch also failed (body cap,
 //     decode error half-way, MISP page cap or deadline). Those rows are
-//     current assertions and are stamped as such.
+//     current assertions and are stamped as such — unless the guard holds
+//     them: a partial fetch ten times the usual size is held like a
+//     complete one.
 //   - The fetch counts as successful only if it returned without error and,
 //     when it delivered any rows at all, at least one was accepted. A 200
 //     whose every row is rejected (a changed format, a poisoned feed) is a
 //     failure of that source. A well-formed empty list is a success with
-//     zero indicators.
+//     zero indicators — unless the source usually lists hundreds, which the
+//     guard holds as a collapse.
+//   - A held fetch is neither: the previous set keeps being served, the
+//     source's last success does not move (so its freshness objective will
+//     eventually report it stale too), and the alert metric
+//     threat_intel_source_quarantined is 1 until the fetch is released,
+//     discarded or superseded by a fetch that passes.
 //   - Only a success records the source's last-success time, which is what
-//     allows its unasserted indicators to expire: a failed or partial fetch
-//     never ages anything out. The time recorded is when the fetch started,
-//     before any of its rows were stamped, so the rows of the latest
+//     allows its unasserted indicators to expire: a failed, partial or held
+//     fetch never ages anything out. The time recorded is when the fetch
+//     started, before any of its rows were stamped, so the rows of the latest
 //     successful answer never count as "withdrawn since" however long the
 //     feed is unreachable afterwards.
-func syncSource(ctx context.Context, store *ioc.Store, src source, timeout time.Duration) sourceResult {
+func syncSource(ctx context.Context, g *guard.Manager, store *ioc.Store, src source, timeout time.Duration) sourceResult {
 	started := time.Now().UTC()
 	fetchCtx, cancel := context.WithTimeout(ctx, timeout)
 	inds, err := src.fetch(fetchCtx)
 	cancel()
 
 	res := sourceResult{fetched: len(inds), err: err}
-	if len(inds) > 0 {
-		res.stats = store.UpsertFeed(src.name, inds)
-	}
+	out := g.Ingest(src.name, inds, err == nil, started)
+	res.outcome, res.stats = out, out.Stats
 	res.finished = time.Now().UTC()
-	indicatorsRejected.WithLabelValues(src.name).Add(float64(res.stats.Rejected))
-	indicatorsDropped.WithLabelValues(src.name).Add(float64(res.stats.Dropped))
-	if res.stats.Err != nil {
+	indicatorsRejected.WithLabelValues(src.name).Add(float64(out.Prepare.Rejected))
+	indicatorsDropped.WithLabelValues(src.name).Add(float64(out.Stats.Dropped))
+	for reason, n := range out.Prepare.NeverBlock {
+		indicatorsNeverBlock.WithLabelValues(src.name, reason).Add(float64(n))
+	}
+	if out.Stats.Err != nil {
 		storePersistErrors.Inc()
-		slog.Error("indicator database write failed; serving from memory", "source", src.name, "error", res.stats.Err)
+		slog.Error("indicator database write failed; serving from memory", "source", src.name, "error", out.Stats.Err)
+	}
+	if out.PersistErr != nil {
+		storePersistErrors.Inc()
+		slog.Error("indicator database write failed", "source", src.name, "error", out.PersistErr)
+	}
+	if n := out.Prepare.NeverBlocked(); n > 0 {
+		slog.Warn("source listed hosts that must never be blocked; dropped", "source", src.name,
+			"never_block", n, "by_reason", out.Prepare.NeverBlock)
 	}
 
 	switch {
+	case out.Held != nil:
+		res.quarantined = true
+		h := out.Held
+		quarantineTotal.WithLabelValues(src.name, h.Reason).Inc()
+		quarantined.WithLabelValues(src.name).Set(1)
+		quarantinedIndicators.WithLabelValues(src.name).Set(float64(h.Size))
+		if err != nil {
+			syncFailures.WithLabelValues(src.name).Inc()
+		}
+		slog.Error("QUARANTINE: fetch held by the volume guard; the previous indicator set is still served",
+			"source", src.name, "reason", h.Reason, "detail", h.Detail, "size", h.Size,
+			"baseline", h.Baseline, "new", h.NewKeys, "partial", h.Partial, "id", h.ID,
+			"fetch_error", errString(err),
+			"hint", "inspect GET /quarantine/"+src.name+", then POST /quarantine/"+src.name+
+				"/release with {\"id\":\""+h.ID+"\"} or POST /quarantine/"+src.name+"/discard")
 	case err != nil:
 		syncFailures.WithLabelValues(src.name).Inc()
 		slog.Error("source failed", "source", src.name, "error", err,
-			"kept_from_partial_response", res.stats.Accepted, "rejected", res.stats.Rejected)
+			"kept_from_partial_response", res.stats.Accepted, "rejected", out.Prepare.Rejected)
 	case res.fetched > 0 && res.stats.Accepted == 0:
 		syncFailures.WithLabelValues(src.name).Inc()
 		slog.Error("source returned rows but none were accepted", "source", src.name,
-			"fetched", res.fetched, "rejected", res.stats.Rejected, "dropped", res.stats.Dropped)
+			"fetched", res.fetched, "rejected", out.Prepare.Rejected,
+			"never_block", out.Prepare.NeverBlocked(), "dropped", res.stats.Dropped)
 	default:
 		res.success = true
 		syncLastSuccess.WithLabelValues(src.name).Set(float64(res.finished.Unix()))
 		indicatorsFetched.WithLabelValues(src.name).Set(float64(res.stats.Accepted))
-		if err := store.MarkFeedSuccess(src.name, started); err != nil {
-			storePersistErrors.Inc()
-			slog.Error("indicator database write failed", "source", src.name, "error", err)
-		}
 		if res.fetched == 0 {
 			slog.Warn("source returned an empty list", "source", src.name)
 		}
+		if s := out.Superseded; s != nil {
+			quarantineResolved.WithLabelValues(src.name, actionSuperseded).Inc()
+			quarantined.WithLabelValues(src.name).Set(0)
+			quarantinedIndicators.WithLabelValues(src.name).Set(0)
+			slog.Warn("quarantine superseded: the source answered normally again; the held fetch is discarded",
+				"source", src.name, "id", s.ID, "reason", s.Reason, "held_at", s.HeldAt)
+		}
 	}
-	if res.stats.Rejected > 0 {
+	if base, ok := g.Baseline(src.name); ok {
+		volumeBaseline.WithLabelValues(src.name).Set(float64(base))
+	}
+	if out.Prepare.Rejected > 0 {
 		slog.Warn("source returned unusable indicators",
-			"source", src.name, "rejected", res.stats.Rejected, "accepted", res.stats.Accepted)
+			"source", src.name, "rejected", out.Prepare.Rejected, "accepted", res.stats.Accepted)
 	}
-	slog.Info("source synced", "source", src.name, "success", res.success, "fetched", res.fetched,
-		"accepted", res.stats.Accepted, "rejected", res.stats.Rejected, "dropped", res.stats.Dropped,
-		"store_total", store.Len())
+	slog.Info("source synced", "source", src.name, "success", res.success, "quarantined", res.quarantined,
+		"fetched", res.fetched, "distinct", out.Distinct, "accepted", res.stats.Accepted,
+		"rejected", out.Prepare.Rejected, "never_block", out.Prepare.NeverBlocked(),
+		"dropped", res.stats.Dropped, "store_total", store.Len())
 	return res
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func pruneAndReport(store *ioc.Store, indicatorTTL time.Duration, anySucceeded bool) {
@@ -239,9 +372,13 @@ func pruneAndReport(store *ioc.Store, indicatorTTL time.Duration, anySucceeded b
 // success, exponential backoff after a failure (backoffMin doubling up to
 // backoffMax), never sooner than the source's own minimum interval. A failed
 // first cycle used to wait a full SYNC_INTERVAL (6 h) before trying again,
-// and one failing source cannot force the healthy ones to be re-fetched.
+// and one failing source cannot force the healthy ones to be re-fetched. A
+// held fetch is not a failure of the download: the source is fetched again
+// after SYNC_INTERVAL, by when an operator may have decided, or the feed
+// recovered.
 type scheduler struct {
 	store      *ioc.Store
+	guard      *guard.Manager
 	sources    []source
 	interval   time.Duration
 	ttl        time.Duration
@@ -254,9 +391,10 @@ type scheduler struct {
 	failures map[string]int
 }
 
-func newScheduler(cfg config, store *ioc.Store, ready *readiness) *scheduler {
+func newScheduler(cfg config, store *ioc.Store, g *guard.Manager, ready *readiness) *scheduler {
 	s := &scheduler{
 		store:      store,
+		guard:      g,
 		sources:    cfg.sources,
 		interval:   cfg.syncInterval,
 		ttl:        cfg.indicatorTTL,
@@ -270,8 +408,14 @@ func newScheduler(cfg config, store *ioc.Store, ready *readiness) *scheduler {
 	// After a restart with a persisted set, a source that succeeded recently
 	// is not fetched again straight away: the set is already being served,
 	// and the feeds' fair-use rules (Spamhaus: an hour apart) still apply.
+	// A held fetch was a download too.
 	now := time.Now()
 	last := store.FeedSuccess()
+	for feed, h := range store.HeldSets() {
+		if h.Started.After(last[feed]) {
+			last[feed] = h.Started
+		}
+	}
 	for _, src := range s.sources {
 		s.next[src.name] = now
 		if t, ok := last[src.name]; ok {
@@ -300,8 +444,8 @@ func (s *scheduler) runDue(ctx context.Context, now time.Time) {
 		if ctx.Err() != nil {
 			return
 		}
-		res := syncSource(ctx, s.store, src, s.timeout)
-		s.reschedule(src, res.success, res.finished)
+		res := syncSource(ctx, s.guard, s.store, src, s.timeout)
+		s.reschedule(src, res.success || (res.quarantined && res.err == nil), res.finished)
 		if res.success {
 			anySucceeded = true
 			s.ready.trust()

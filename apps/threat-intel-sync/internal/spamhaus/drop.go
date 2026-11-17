@@ -12,11 +12,15 @@ import (
 	"github.com/migel9090/netSoldier/apps/threat-intel-sync/internal/ioc"
 )
 
-// dropURL is the DROP list in text form. EDROP is no longer fetched:
+// DROPURL is the DROP list in text form, on the pinned host Host (see
+// feedhttp.NewClient: no redirect may leave it). EDROP is no longer fetched:
 // Spamhaus merged it into DROP on 2024-04-10
 // (https://www.spamhaus.org/blocklists/do-not-route-or-peer/), and fetching
 // the retired URL made every cycle report this source as failed.
-const dropURL = "https://www.spamhaus.org/drop/drop.txt"
+const (
+	Host    = "www.spamhaus.org"
+	DROPURL = "https://" + Host + "/drop/drop.txt"
+)
 
 // MinFetchInterval is Spamhaus' own rule: "Automated downloads must be at
 // least one hour apart". Retries after a failure respect it as well.
@@ -33,8 +37,8 @@ type Client struct {
 // body (0 = feedhttp.DefaultMaxBodyBytes).
 func NewClient(maxBytes int64) *Client {
 	return &Client{
-		http:     &http.Client{Timeout: 30 * time.Second},
-		dropURL:  dropURL,
+		http:     feedhttp.NewClient("spamhaus", 30*time.Second),
+		dropURL:  DROPURL,
 		maxBytes: maxBytes,
 	}
 }

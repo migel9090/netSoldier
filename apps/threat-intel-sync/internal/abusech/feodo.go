@@ -30,8 +30,8 @@ type FeodoClient struct {
 // addresses of C2s that have gone away.
 func NewFeodoClient(opts ...Option) *FeodoClient {
 	return &FeodoClient{
-		csvURL: "https://feodotracker.abuse.ch/downloads/ipblocklist.csv",
-		http:   &http.Client{Timeout: 60 * time.Second},
+		csvURL: FeodoURL,
+		http:   feedhttp.NewClient("feodo", 60*time.Second),
 		opts:   buildOptions(opts),
 	}
 }

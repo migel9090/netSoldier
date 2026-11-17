@@ -49,7 +49,9 @@ func TestAuditValidateBypass(t *testing.T) {
 
 	s := NewStore()
 	accepted, rejected := s.UpsertAll(append(refused,
-		Indicator{Type: TypeIP, Value: "8.8.8.8", Source: "feed"},
+		// A public address, not a public resolver: 8.8.8.8 used to stand
+		// here, and is now refused by the never-block list (step 134).
+		Indicator{Type: TypeIP, Value: "203.0.113.50", Source: "feed"},
 		Indicator{Type: TypeDomain, Value: "c2.evil.example", Source: "feed"},
 	))
 	if accepted != 2 || rejected != len(refused) {

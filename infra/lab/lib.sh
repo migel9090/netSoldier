@@ -25,20 +25,58 @@ LAB_KNOWN_HOSTS=$LAB_STATE/known_hosts
 # whitespace; empty by default.
 LAB_SSH_EXTRA_OPTS=${LAB_SSH_EXTRA_OPTS:-}
 
+# Optional build host. With LAB_BUILD_HOST (an ssh destination) set, images.sh
+# builds the lab images there instead of on this machine, pushes them to a
+# registry on that host and has the lab node pull from it; this machine only
+# copies the checkout over. LAB_BUILD_REGISTRY is that registry as the lab
+# node reaches it (host:port). It is spoken to over plain HTTP: a lab
+# convenience on a trusted segment, not a way to ship images.
+LAB_BUILD_HOST=${LAB_BUILD_HOST:-}
+LAB_BUILD_REGISTRY=${LAB_BUILD_REGISTRY:-}
+LAB_BUILD_KNOWN_HOSTS=${LAB_BUILD_KNOWN_HOSTS:-$LAB_CONFIG/known_hosts_build}
+
 lab_die() {
   echo "error: $*" >&2
   exit 1
+}
+
+# lab_build_ssh_opts: prints the ssh options for the build host, one per line
+# (the host key must already be in $LAB_BUILD_KNOWN_HOSTS).
+lab_build_ssh_opts() {
+  local -a extra
+  read -ra extra <<<"$LAB_SSH_EXTRA_OPTS"
+  printf '%s\n' -i "$LAB_SSH_KEY" -o IdentitiesOnly=yes \
+    -o "UserKnownHostsFile=$LAB_BUILD_KNOWN_HOSTS" -o StrictHostKeyChecking=yes \
+    -o BatchMode=yes -o ConnectTimeout=10 "${extra[@]}"
+}
+
+# lab_build_ssh ARGS...: ssh to the build host.
+lab_build_ssh() {
+  local -a opts
+  mapfile -t opts < <(lab_build_ssh_opts)
+  # The command is meant to be expanded here, like lab_ssh's.
+  # shellcheck disable=SC2029
+  ssh "${opts[@]}" "$LAB_BUILD_HOST" "$@"
 }
 
 # lab_target: prints "user host port" of the single lab host in the
 # generated inventory.
 lab_target() {
   [[ -s $LAB_INVENTORY ]] || lab_die "no inventory at $LAB_INVENTORY (run: task lab:inventory)"
-  "$LAB_VENV/bin/ansible-inventory" -i "$LAB_INVENTORY" --list 2>/dev/null |
+  # ansible-inventory costs about a second of CPU and the scripts ssh dozens
+  # of times: its answer is kept until the inventory file changes.
+  local cache=$LAB_STATE/.target target
+  if [[ -s $cache && $cache -nt $LAB_INVENTORY ]]; then
+    cat "$cache"
+    return
+  fi
+  target=$("$LAB_VENV/bin/ansible-inventory" -i "$LAB_INVENTORY" --list 2>/dev/null |
     jq -er '._meta.hostvars | to_entries
             | if length == 1 then .[0].value else error("expected exactly one lab host") end
-            | "\(.ansible_user) \(.ansible_host) \(.ansible_port // 22)"' ||
+            | "\(.ansible_user) \(.ansible_host) \(.ansible_port // 22)"') ||
     lab_die "the inventory does not hold exactly one lab host (is the VM up?)"
+  printf '%s\n' "$target" >"$cache.$$" && mv "$cache.$$" "$cache"
+  printf '%s\n' "$target"
 }
 
 # lab_ssh ARGS...: ssh to the lab host, trusting only the lab's known_hosts.

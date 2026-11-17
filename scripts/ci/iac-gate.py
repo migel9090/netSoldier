@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""IaC and Dockerfile gate: Checkov, KICS and hadolint, judged one way.
+"""Scan gate: Checkov, KICS, hadolint and Semgrep, judged one way.
 
-    scripts/ci/iac-gate.py {checkov|kics|hadolint} [--rendered DIR] [--sarif FILE]
+    scripts/ci/iac-gate.py {checkov|kics|hadolint|semgrep} [--rendered DIR] [--sarif FILE]
 
-(`task scan:checkov`, `task scan:kics`, `task scan:hadolint`; CI runs the
-same command, .github/workflows/iac-scan.yml.)
+(`task scan:checkov`, `task scan:kics`, `task scan:hadolint`,
+`task scan:sast`; CI runs the same targets, .github/workflows/iac-scan.yml
+and sast.yml.)
 
 What is scanned
   Kubernetes objects are judged as they are deployed: every target that
@@ -20,6 +21,13 @@ What is scanned
   Argo CD install) and deploy/helm/ (chart templates that no target renders
   yet).
 
+  Semgrep reads the source code too (Go, Python, TypeScript, shell, the
+  workflows and Dependabot configuration), including scripts that live next
+  to the manifests (deploy/kustomize/base/garage/bootstrap.py); only the
+  YAML of the directories above is left to the rendered targets. It runs the
+  pinned rules of scripts/ci/semgrep-rules.txt, offline, and keeps its
+  default ignore list (test directories and *_test.go are not scanned).
+
 How it is judged
   A finding fails the gate unless an exception in scan-exceptions.toml
   covers it: same tool, same rule, and the finding's object (Kind/namespace/
@@ -27,8 +35,9 @@ How it is judged
   listed. Each exception carries a reason and a review date; once the date
   passes it no longer applies. There is no baseline and no soft fail. KICS
   gates on HIGH and CRITICAL, as before; Checkov reports no severity without
-  a commercial key, so every Checkov finding gates; hadolint gates on every
-  rule.
+  a commercial key, so every Checkov finding gates; hadolint and Semgrep
+  gate on every rule and every level (Semgrep's `--error`, with reviewed
+  exceptions instead of an all-or-nothing switch).
 
   The SARIF written for code scanning holds exactly the findings that
   failed, so a code-scanning alert and a red job always mean the same thing.
@@ -69,7 +78,11 @@ SOURCE_ONLY = ["deploy/kustomize/", "deploy/adguard/", "deploy/argocd/patches/",
 
 # An exception is reviewed at least once a year.
 MAX_HORIZON = dt.timedelta(days=366)
-TOOL_NAMES = ("checkov", "kics", "hadolint")
+TOOL_NAMES = ("checkov", "kics", "hadolint", "semgrep")
+# Tools whose exceptions share the file: "sops" is read by
+# scripts/sops-check.sh, "validate" by scripts/validate-configs.py.
+EXCEPTION_TOOLS = (*TOOL_NAMES, "sops", "validate")
+SEMGREP_RULES_LIST = REPO / "scripts" / "ci" / "semgrep-rules.txt"
 EXCEPTION_KEYS = {"tool", "rule", "resources", "files", "until", "reason"}
 RESOURCE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*/([a-z0-9.-]+/)?[a-z0-9.-]+$")
 
@@ -141,8 +154,8 @@ def load_exceptions(tool: str, today: dt.date) -> tuple[list[Entry], list[Entry]
         if bad:
             problems.append(f"{label}: unknown keys {bad}")
             continue
-        if e.get("tool") not in TOOL_NAMES:
-            problems.append(f"{label}: tool must be one of {TOOL_NAMES}")
+        if e.get("tool") not in EXCEPTION_TOOLS:
+            problems.append(f"{label}: tool must be one of {EXCEPTION_TOOLS}")
             continue
         if not isinstance(e.get("rule"), str) or not e["rule"]:
             problems.append(f"{label}: rule is required")
@@ -474,10 +487,96 @@ def scan_hadolint(_rendered: Path, out: Path) -> list[tuple[Path, str]]:
     return [(sarif, "repo")]
 
 
+def registry_ids(rules_dir: Path, listed: list[str]) -> dict[str, str]:
+    """Semgrep's local rule id -> the registry id, for every pinned rule.
+
+    Semgrep names a rule loaded from a directory `<directory path>.<id>`,
+    the path being wherever the rules are cached, so the same rule would get
+    a new id on every machine and code scanning would see new alerts. The
+    registry id, which the existing alerts and scan-exceptions.toml use, is
+    `<path of the file inside semgrep-rules, without .yaml>.<id>`.
+    """
+    out: dict[str, str] = {}
+    for rel in listed:
+        doc = yaml.safe_load((rules_dir / rel).read_text()) or {}
+        stem = rel.rsplit(".", 1)[0].replace("/", ".")
+        folder = str(Path(rel).parent).replace("/", ".")
+        for rule in doc.get("rules") or []:
+            out[f"{folder}.{rule['id']}"] = f"{stem}.{rule['id']}"
+    return out
+
+
+def registry_rule_id(rule_id: str, ids: dict[str, str]) -> str:
+    parts = rule_id.split(".")
+    for i in range(len(parts)):
+        if (suffix := ".".join(parts[i:])) in ids:
+            return ids[suffix]
+    raise GateError(f"semgrep reported rule {rule_id}, which is not a pinned rule")
+
+
+def scan_semgrep(rendered: Path, out: Path) -> list[tuple[Path, str]]:
+    # stdout is the path tools.sh prints; its progress and errors go to the log.
+    tools = [str(TOOLS), "install", "semgrep"]
+    bin_dir = subprocess.run(tools, check=True, stdout=subprocess.PIPE, text=True).stdout.strip()  # noqa: S603
+    argv = [str(TOOLS), "rules", "semgrep"]
+    rules = subprocess.run(argv, check=True, stdout=subprocess.PIPE, text=True).stdout.strip()  # noqa: S603
+    listed = [
+        line.strip()
+        for line in SEMGREP_RULES_LIST.read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    ids = registry_ids(Path(rules), listed)
+    # Offline and quiet: no metrics, no version check, no registry. The YAML
+    # of the kustomize sources is judged in its rendered form below; scripts
+    # in those directories are still read as code.
+    flags = [
+        "--config",
+        rules,
+        "--sarif",
+        "--metrics",
+        "off",
+        "--disable-version-check",
+        "--quiet",
+    ]
+    env = {**os.environ, "SEMGREP_SEND_METRICS": "off", "SEMGREP_ENABLE_VERSION_CHECK": "0"}
+    excludes = [
+        x for p in SOURCE_ONLY for x in ("--exclude", f"{p}**/*.yaml", "--exclude", f"{p}**/*.yml")
+    ]
+    runs = [
+        (REPO, [*flags, *excludes, "--output", str(out / "repo.sarif"), "."], "repo"),
+        (rendered, [*flags, "--output", str(out / "rendered.sarif"), "."], "rendered"),
+    ]
+    files = []
+    for cwd, args, origin in runs:
+        cmd = [f"{bin_dir}/semgrep", "scan", *args]
+        print("+ (cd " + str(cwd) + ") " + " ".join(cmd), file=sys.stderr, flush=True)
+        # Without --error Semgrep exits 0 whatever it finds; anything else
+        # means it did not finish (bad rule, crash), which must not pass.
+        rc = subprocess.run(cmd, cwd=cwd, env=env, check=False).returncode  # noqa: S603
+        if rc != 0:
+            raise GateError(f"semgrep exited {rc}")
+        sarif = Path(args[args.index("--output") + 1])
+        if not sarif.is_file():
+            raise GateError(f"semgrep wrote no SARIF at {sarif}")
+        doc = json.loads(sarif.read_text())
+        for run_ in doc.get("runs", []):
+            drv = run_["tool"]["driver"]
+            for r in drv.get("rules", []):
+                r["id"] = registry_rule_id(r["id"], ids)
+                # The short name is the local id too; code scanning shows it.
+                r["name"] = r["id"]
+            for res in run_.get("results", []):
+                res["ruleId"] = registry_rule_id(res.get("ruleId", ""), ids)
+        sarif.write_text(json.dumps(doc))
+        files.append((sarif, origin))
+    return files
+
+
 SCANNERS = {
     "checkov": (scan_checkov, lambda _level: True),
     "kics": (scan_kics, lambda level: level == "error"),  # HIGH and CRITICAL
     "hadolint": (scan_hadolint, lambda _level: True),
+    "semgrep": (scan_semgrep, lambda _level: True),
 }
 
 

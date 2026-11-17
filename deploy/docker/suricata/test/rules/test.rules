@@ -1,0 +1,5 @@
+# Rules for test/run.sh. 9900001 has the shape of the production IoC rules
+# (deploy/kustomize/base/suricata/local-rules-cm.yaml): a sticky buffer
+# checked against an ndjson dataset loaded from the data directory.
+alert tls any any -> any any (msg:"NETSOLDIER image test: TLS SNI in IoC dataset"; tls.sni; dataset:isset,ioc-domains, type string, load /var/lib/suricata/data/ioc-domains.json, format ndjson, value_key domain, context_key threat_intel; classtype:trojan-activity; sid:9900001; rev:1;)
+alert udp any any -> 192.0.2.1 9 (msg:"NETSOLDIER image test: live capture"; content:"netsoldier-live-test"; classtype:misc-activity; sid:9900002; rev:1;)

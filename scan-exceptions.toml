@@ -1,6 +1,8 @@
-# Exceptions for the IaC and Dockerfile gates: Checkov, KICS and hadolint
+# Exceptions for the scan gates: Checkov, KICS and hadolint
 # (scripts/ci/iac-gate.py, run by .github/workflows/iac-scan.yml and by
-# `task scan:iac`).
+# `task scan:iac`), Semgrep (the same script, sast.yml, `task scan:sast`)
+# and the SOPS check (scripts/sops-check.sh, secret-scan.yml,
+# `task scan:sops`).
 #
 # The gates fail on every finding that is not listed here (KICS: on HIGH and
 # CRITICAL). Fix a finding when it can be fixed; an entry is acceptable only
@@ -22,8 +24,9 @@
 #   files      repository paths, for findings outside Kubernetes manifests
 #
 #   [[exception]]
-#   tool = "checkov"            # checkov | kics | hadolint
-#   rule = "CKV_K8S_19"         # Checkov id, KICS query id, hadolint code
+#   tool = "checkov"            # checkov | kics | hadolint | semgrep | sops
+#   rule = "CKV_K8S_19"         # Checkov id, KICS query id, hadolint code,
+#                               # Semgrep registry rule id, sops-check rule
 #   resources = ["DaemonSet/netsoldier/netagent"]
 #   until = 2027-05-15
 #   reason = """Why it is deliberate, where that is decided."""
@@ -311,13 +314,18 @@ the command."""
 [[exception]]
 tool = "checkov"
 rule = "CKV_DOCKER_2"
-files = ["apps/ml-anomaly/Dockerfile", "deploy/docker/zeek/Dockerfile"]
+files = [
+  "apps/ml-anomaly/Dockerfile",
+  "deploy/docker/zeek/Dockerfile",
+  "deploy/docker/suricata/Dockerfile",
+]
 until = 2027-05-15
 reason = """Run only by Kubernetes (proxmox-soc), which ignores HEALTHCHECK.
 ml-anomaly is one image for three containers on three ports (beacon-sync,
 flow-anomaly, scoring-api), each probed on its own port by its manifest; a
-single HEALTHCHECK cannot be right for all three. Zeek is a passive sensor
-with no endpoint to check."""
+single HEALTHCHECK cannot be right for all three. Zeek and Suricata are
+passive sensors with no endpoint to check; the Suricata image also serves
+the rule init and updater containers, which run to completion."""
 
 # ── infra/lab/smoke.yaml ─────────────────────────────────────────────────────
 
@@ -428,7 +436,7 @@ tool = "hadolint"
 rule = "DL3018"
 files = ["apps/netagent/Dockerfile"]
 until = 2027-05-15
-reason = """The setcap stage installs libcap from Alpine 3.22 only to write the
+reason = """The setcap stage installs libcap from Alpine 3.24 only to write the
 file capability onto the netagent binary; nothing from that stage ships but
 the binary. Alpine drops superseded package versions from its mirrors, so an
 exact pin would break the build at the next security update; the stage's
@@ -439,7 +447,211 @@ tool = "hadolint"
 rule = "DL3008"
 files = ["deploy/docker/zeek/Dockerfile"]
 until = 2027-05-15
-reason = """git and libcap2-bin are build tools for zkg and setcap. Debian
-drops superseded patch versions between point releases, so exact pins break
-the build (the reason already given next to the line); the Zeek base image
-tag is fixed."""
+reason = """Two unpinned apt installs: libcap2-bin (setcap) in the build stage,
+and in the runtime the Debian shared libraries the upstream zeek binary links
+against. Debian keeps only the current version of a package in its archive,
+so an exact pin breaks the build at the next security update (the reason is
+also given next to the lines); the base images are pinned by digest, and the
+build fails if a library the binary needs is missing (ldd check)."""
+
+[[exception]]
+tool = "hadolint"
+rule = "DL3008"
+files = ["deploy/docker/suricata/Dockerfile"]
+until = 2027-05-15
+reason = """Suricata and suricata-update from trixie-backports, and libcap2-bin
+(setcap), removed again in the same layer. Debian keeps only the current
+version of a package in its archive (backports included), so an exact pin
+breaks the build at the next security update; the base image is pinned by
+digest, and test/run.sh asserts the Suricata major version."""
+
+# ════════════════════════════════════════════════════════════════════════════
+# Semgrep (rule ids as the registry names them; scripts/ci/semgrep-rules.txt)
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── False positives in the services ──────────────────────────────────────────
+
+[[exception]]
+tool = "semgrep"
+rule = "go.lang.security.audit.crypto.math_random.math-random-used"
+files = ["apps/netagent/internal/peer/peer.go"]
+until = 2027-05-15
+reason = """False positive: math/rand/v2 only jitters the reconnect backoff
+(Backoff.Next spreads each wait over 80-120 percent so agents do not retry in
+lockstep). Nothing secret or guessable-is-dangerous comes from it; tokens are
+configuration, never generated here."""
+
+[[exception]]
+tool = "semgrep"
+rule = "go.lang.security.audit.database.string-formatted-query.string-formatted-query"
+files = [
+  "apps/device-inventory/internal/store/query.go",
+  "apps/killswitch-controller/internal/actions/store.go",
+]
+until = 2027-05-15
+reason = """False positive: the flagged statements concatenate compile-time
+text only: the const deviceColumns list, terminalList (built once from the
+events package's state constants by quoteStates) and the const schemaVersion
+in PRAGMA user_version, which SQLite cannot bind. Every value that comes from
+a request or a row is a bound parameter; the 2026-11-16 audit found no SQL
+injection in either store. Re-check when these files change."""
+
+[[exception]]
+tool = "semgrep"
+rule = "javascript.express.security.x-frame-options-misconfiguration.x-frame-options-misconfiguration"
+files = ["apps/web-ui/src/hooks.server.ts"]
+until = 2027-05-15
+reason = """False positive: an Express taint rule that reads the SvelteKit
+handle hook's arguments as a request reaching the header, but the value set
+is the literal DENY (withSecurityHeaders in hooks.server.ts); no request data
+reaches any response header there."""
+
+[[exception]]
+tool = "semgrep"
+rule = "javascript.lang.security.audit.hardcoded-hmac-key.hardcoded-hmac-key"
+files = ["apps/web-ui/src/hooks.server.test.ts"]
+until = 2027-05-15
+reason = """False positive: the test suite's fixed session key, used to forge
+session cookies that the tests then expect the server to refuse (expired,
+reserved actor names). It exists only in the test and is never a deployed
+secret; the server reads SESSION_SECRET from its environment."""
+
+# ── Deployment scripts and configuration ─────────────────────────────────────
+
+[[exception]]
+tool = "semgrep"
+rule = "python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected"
+files = ["deploy/kustomize/base/garage/bootstrap.py"]
+until = 2027-02-15
+reason = """The URL is the in-cluster Garage admin endpoint from the bootstrap
+Job's own environment (GARAGE_ADMIN_URL, set by the manifest), plus fixed API
+paths; no request or user input reaches it. The rule's concern is urllib
+following a file:// or other scheme; the script should refuse anything but
+http(s) before calling urlopen (deploy/ change, reported to its owner), and
+this entry goes when it does."""
+
+[[exception]]
+tool = "semgrep"
+rule = "package_managers.npm.npm-missing-minimum-release-age.npm-missing-minimum-release-age"
+files = [".npmrc"]
+until = 2027-02-15
+reason = """min-release-age exists from npm 11.10; the web UI builds with the
+npm bundled with Node 22.23.5 (ci.yml, apps/web-ui/Dockerfile), which does not
+know the key, so setting it would only print a warning and protect nothing.
+Dependabot already waits (cooldown in .github/dependabot.yml). Add
+`min-release-age=7` to .npmrc when the web UI moves to npm 11.10 or newer."""
+
+# ── Kubernetes objects (rendered targets and standalone manifests) ──────────
+
+[[exception]]
+tool = "semgrep"
+rule = "yaml.kubernetes.security.hostnetwork-pod.hostnetwork-pod"
+resources = [
+  "DaemonSet/netsoldier/netagent",
+  "Deployment/netsoldier/ntopng",
+  "Deployment/netsoldier/suricata",
+  "Deployment/netsoldier/zeek",
+]
+until = 2027-05-15
+reason = """The same four host-network pods as Checkov's CKV_K8S_19 entries
+above: netagent (ADR-0004, the one first-party component with raw network
+access) and the three passive sensors of proxmox-soc, which capture the
+mirrored traffic on the node's interface. The reasons are given there."""
+
+[[exception]]
+tool = "semgrep"
+rule = "yaml.kubernetes.security.run-as-non-root.run-as-non-root"
+files = [
+  "deploy/kyverno/policies/disallow-privilege-escalation.yaml",
+  "deploy/kyverno/policies/require-drop-all-capabilities.yaml",
+  "deploy/kyverno/policies/require-non-root.yaml",
+  "deploy/kyverno/policies/require-read-only-root-fs.yaml",
+  "deploy/kyverno/policies/require-resource-limits.yaml",
+  "deploy/kyverno/policies/require-seccomp-runtime-default.yaml",
+]
+until = 2027-05-15
+reason = """False positive: these are Kyverno ClusterPolicy objects, and the
+`spec.containers` the rule sees is the policy's match pattern, not a pod.
+require-non-root.yaml is the policy that enforces runAsNonRoot on every pod."""
+
+# ════════════════════════════════════════════════════════════════════════════
+# SOPS check (scripts/sops-check.sh)
+# ════════════════════════════════════════════════════════════════════════════
+
+[[exception]]
+tool = "sops"
+rule = "recipient"
+files = [".sops.yaml"]
+until = 2026-12-31
+reason = """.sops.yaml names ${NETSOLDIER_AGE_RECIPIENT}, which SOPS does not
+expand, so nothing can be encrypted on a fresh clone (audit CI-8). Choosing
+the project's real age recipient, whose private key the owners hold, is
+roadmap step 125.7 (GitOps secrets). Waived only until then; the plaintext and
+deploys-example checks are not waived."""
+
+# ════════════════════════════════════════════════════════════════════════════
+# validate (scripts/validate-configs.py): home-network values outside sites/
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Roadmap 125.12: the owner's LAN prefix and capture interface (the pattern
+# HOME_NETWORK in validate-configs.py) may appear only in a site
+# (deploy/kustomize/sites/), an example file, tests and the dated audit
+# records. These files carried them when the check was added; each entry
+# names where the value goes instead, and the check warns when a file is
+# clean so its entry can be removed.
+
+[[exception]]
+tool = "validate"
+rule = "home-network"
+files = [
+  "deploy/kustomize/base/ntopng/configmap.yaml",
+  "deploy/kustomize/base/suricata/configmap.yaml",
+  "deploy/kustomize/base/zeek/deployment.yaml",
+]
+until = 2026-12-31
+reason = """The capture interface name is hard-coded in the proxmox-soc sensor
+bases. It is the site's SPAN interface and moves into sites/<name> with the
+other network-dependent values (roadmap 125.12)."""
+
+[[exception]]
+tool = "validate"
+rule = "home-network"
+files = [
+  "deploy/helm/netsoldier/values-pi-edge.yaml",
+  "deploy/helm/netsoldier/values-proxmox-soc.yaml",
+]
+until = 2026-12-31
+reason = """The vestigial Helm chart that no target renders, which decision D2
+removes (roadmap 125.12); its profile values carry a Vector host address and
+a SPAN interface from one household."""
+
+[[exception]]
+tool = "validate"
+rule = "home-network"
+files = [
+  "infra/README.md",
+  "infra/lab/proxmox-token.sh",
+  "infra/terraform/outputs.tf",
+  "infra/terraform/variables.tf",
+]
+until = 2026-12-31
+reason = """Lab tooling defaults from the owner's network (the Proxmox
+endpoint, the lab VM address, gateway and DNS). They move to untracked lab
+configuration ($LAB_CONFIG/lab.env, an extra *.auto.tfvars) with terraform
+plan showing no change for the existing VM (lab follow-up of step 125.6)."""
+
+[[exception]]
+tool = "validate"
+rule = "home-network"
+files = [
+  "apps/killswitch-controller/internal/policy/allowlist.go",
+  "apps/ml-anomaly/src/ml_anomaly/beacon.py",
+  "apps/web-ui/src/lib/server/config.ts",
+  "docs/user-guide.md",
+]
+until = 2026-12-31
+reason = """Illustrations, not configuration: code comments, the web UI's
+"ORIGIN is not set" message and an ALLOWLIST_IPS example in the user guide
+use addresses from the owner's LAN prefix. They should use the documentation
+range 192.0.2.0/24 or point at the site configuration (backend and docs
+owners)."""

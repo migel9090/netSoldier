@@ -8,7 +8,8 @@ import { promisify } from 'node:util'
 
 /**
  * The real backends for tests/browser/real-backends.spec.ts: the three Go
- * services built from this tree and started the way tests/e2e starts them
+ * services the UI proxies to, and threat-intel-sync (read for the status
+ * page), built from this tree and started the way tests/e2e starts them
  * (testhelpers_test.go, phase1_test.go), on 127.0.0.1 ephemeral ports, with
  * authentication on. Around them, the two things a test machine does not
  * have:
@@ -64,6 +65,8 @@ export type Upstreams = Record<Service, { url: string; key: string }>
 
 export interface RealStack {
   upstreams: Upstreams
+  /** threat-intel-sync's base URL (THREAT_INTEL_URL for the UI). */
+  threatIntel: string
   /** The test's control port: querylog entries, sinkhole rules, agent confirmations. */
   control: string
   close(): Promise<void>
@@ -341,10 +344,15 @@ export async function startRealStack(repoRoot: string, logDir: string): Promise<
   }
 
   try {
-    const [ks, inv, det] = await Promise.all(
-      (['killswitch-controller', 'device-inventory', 'detection-engine'] as const).map((app) =>
-        build(repoRoot, app, work),
-      ),
+    const [ks, inv, det, tis] = await Promise.all(
+      (
+        [
+          'killswitch-controller',
+          'device-inventory',
+          'detection-engine',
+          'threat-intel-sync',
+        ] as const
+      ).map((app) => build(repoRoot, app, work)),
     )
 
     const querylog: QueryLogEntry[] = []
@@ -447,6 +455,18 @@ export async function startRealStack(repoRoot: string, logDir: string): Promise<
       OTEL_EXPORTER_OTLP_ENDPOINT: 'localhost:1',
     })
 
+    // No feed is reachable from a test machine, and none may be contacted:
+    // every download goes through a proxy address nothing listens on, so it
+    // fails at once and the service runs as it does while its feeds are
+    // down. COMMERCIAL_MODE leaves only Spamhaus enabled.
+    const noProxy = `http://127.0.0.1:${await freePort()}`
+    const tisURL = await run('threat-intel-sync', tis, {
+      INDICATOR_DB_PATH: join(work, 'indicators.db'),
+      COMMERCIAL_MODE: 'true',
+      HTTPS_PROXY: noProxy,
+      HTTP_PROXY: noProxy,
+    })
+
     // The test's levers: put a DNS query in AdGuard's log, read the
     // sinkhole rules, confirm held isolations (and releases, when held).
     const control = http.createServer(async (req, res) => {
@@ -483,6 +503,7 @@ export async function startRealStack(repoRoot: string, logDir: string): Promise<
         'device-inventory': { url: invURL, key: TOKENS.device },
         'detection-engine': { url: detURL, key: TOKENS.detection },
       },
+      threatIntel: tisURL,
       control: controlURL,
       close,
       kill: () => children.forEach((c) => c.kill('SIGKILL')),

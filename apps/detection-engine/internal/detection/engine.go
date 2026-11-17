@@ -45,6 +45,9 @@ const (
 	queryLogCursor = "adguard_querylog"
 	// maxSeenEntries caps the de-duplication memory of the overlap window.
 	maxSeenEntries = 200000
+	// maxPageGrowth bounds how far a page may grow (as a multiple of the page
+	// size) when its boundary is too dense to move; see poll.
+	maxPageGrowth = 8
 )
 
 // CursorStore persists how far an input has been read (*store.Cursors).
@@ -135,6 +138,16 @@ var (
 		Name:      "poll_batch_saturated_total",
 		Help:      "Same as querylog_gaps_total; kept for existing alert rules.",
 	})
+	// A dense boundary is a page so full that even the largest page lay
+	// within QUERYLOG_OVERLAP of its oldest entry; the next page then starts
+	// at that entry, and a slow-answered query logged just before the page
+	// can be missed. Only a flood of several hundred queries a second does
+	// that.
+	queryLogDenseBoundaries = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "detection_engine",
+		Name:      "querylog_dense_boundaries_total",
+		Help:      "Querylog pages too dense to page past with the overlap; a slow-answered query at such a boundary may be unchecked.",
+	})
 	cursorClamped = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "detection_engine",
 		Name:      "ingest_cursor_clamped_total",
@@ -152,7 +165,8 @@ var (
 
 func init() {
 	prometheus.MustRegister(queriesChecked, alertsGenerated, threatlistDomains, pollErrors,
-		queryLogPages, queryLogGaps, pollBatchSaturated, cursorClamped, macResolutionFailures)
+		queryLogPages, queryLogGaps, pollBatchSaturated, queryLogDenseBoundaries, cursorClamped,
+		macResolutionFailures)
 	p := defaultIDPrefix()
 	idPrefix.Store(&p)
 }
@@ -293,6 +307,10 @@ type Engine struct {
 	// OnDNSAnswer receives every A/AAAA answer a client got, for the TLS
 	// heuristics' per-client resolution cache.
 	OnDNSAnswer func(client, ip, domain string, ttl int)
+	// OnQuery receives every querylog entry once it has been checked (the
+	// DNS query log copy in ClickHouse). It must not block: it runs on the
+	// poller.
+	OnQuery func(Query)
 
 	// ResolveClient maps a client IP to its MAC and friendly name. The
 	// killswitch allowlist checks MAC first and home DHCP leases move, so a
@@ -389,11 +407,26 @@ type queryLogPosition struct {
 // cannot stall the poller; reaching the bound is a gap, which is counted and
 // logged, because the queries in it are detections that may have been
 // missed.
+//
+// Where the next page starts. AdGuard fills a page with the entries logged
+// most recently (before older_than) and sorts them by time only afterwards,
+// and an entry is logged when its answer is back but stamped with the time
+// the query arrived. So the oldest entry on a page can be a slow lookup that
+// was logged after entries which arrived later than it — and those are on
+// the next page, newer than this page's oldest. Starting the next page below
+// that oldest entry skipped them, on every poll. Everything logged before a
+// page arrived before its oldest entry plus the slowest answer, which the
+// overlap covers, so the next page starts that much higher; what it reads
+// again is skipped as seen. A page that lies wholly within the overlap of its
+// own oldest entry would ask for itself again: the page grows instead, up to
+// maxPageGrowth times the page size, and past that the next page starts at
+// the oldest entry after all, which is counted (querylog_dense_boundaries).
 func (e *Engine) poll(ctx context.Context) {
 	e.start()
 	horizon := e.lastSeen.Add(-e.overlap())
 	newest := e.lastSeen
 	limit := e.pageSize()
+	maxLimit := limit * maxPageGrowth
 
 	var olderThan, oldestRead time.Time
 	pages, reached := 0, false
@@ -408,7 +441,11 @@ func (e *Engine) poll(ctx context.Context) {
 		}
 		pages++
 		queryLogPages.Inc()
+		ignored := false
 		for _, entry := range page.Entries {
+			if !olderThan.IsZero() && !entry.Time.Before(olderThan) {
+				ignored = true
+			}
 			if entry.Time.Before(horizon) {
 				reached = true
 				continue
@@ -427,12 +464,23 @@ func (e *Engine) poll(ctx context.Context) {
 			reached = true // nothing older left
 			break
 		}
-		if !olderThan.IsZero() && !page.Oldest.Before(olderThan) {
-			// The server did not move back (it ignores older_than): there is
-			// no way to read further, which is a gap like the bound.
+		if ignored {
+			// The server returned entries it was asked to leave out (it
+			// ignores older_than): there is no way to read further, which is
+			// a gap like the bound.
 			break
 		}
-		olderThan, oldestRead = page.Oldest, page.Oldest
+		oldestRead = page.Oldest
+		next := page.Oldest.Add(e.overlap())
+		switch {
+		case olderThan.IsZero() || next.Before(olderThan):
+			olderThan = next
+		case limit < maxLimit:
+			limit = min(2*limit, maxLimit)
+		default:
+			queryLogDenseBoundaries.Inc()
+			olderThan = page.Oldest
+		}
 	}
 	if !reached {
 		queryLogGaps.Inc()
@@ -454,6 +502,28 @@ func (e *Engine) poll(ctx context.Context) {
 	e.forget()
 }
 
+// Query is one querylog entry as the engine checked it, for OnQuery.
+type Query struct {
+	// Time is when the query arrived (AdGuard's stamp).
+	Time time.Time
+	// Client is the address that asked, canonical where it parses.
+	Client string
+	// Domain is the queried name, lower case, without the trailing dot.
+	Domain    string
+	QueryType string
+	// Answers are the values of the answer records, in AdGuard's order.
+	Answers []string
+	// Status is the response code, Reason AdGuard's filtering verdict.
+	Status string
+	Reason string
+	// Elapsed is how long the answer took; 0 when AdGuard did not say.
+	Elapsed time.Duration
+	// ThreatSource and ThreatName name the indicator the query matched
+	// (the name, or one of its answers), "" when it matched none.
+	ThreatSource string
+	ThreatName   string
+}
+
 // check matches one querylog entry against the indicators.
 func (e *Engine) check(entry adguard.QueryLogEntry, key string) {
 	queriesChecked.Inc()
@@ -467,17 +537,54 @@ func (e *Engine) check(entry adguard.QueryLogEntry, key string) {
 		}
 	}
 
+	var hit *iocmatch.IoC
 	if ioc, ok := e.matcher.MatchDomain(domain); ok {
+		hit = &ioc
 		e.emitAlert(entry, key, domain, "", ioc)
 	}
 
 	for _, ans := range entry.Answer {
 		if ans.Type == "A" || ans.Type == "AAAA" {
 			if ioc, ok := e.matcher.MatchIP(ans.Value); ok {
+				if hit == nil {
+					hit = &ioc
+				}
 				e.emitAlert(entry, key, domain, ans.Value, ioc)
 			}
 		}
 	}
+
+	if e.OnQuery != nil {
+		e.OnQuery(queryOf(entry, domain, hit))
+	}
+}
+
+func queryOf(entry adguard.QueryLogEntry, domain string, hit *iocmatch.IoC) Query {
+	q := Query{
+		Time:      entry.Time,
+		Client:    canonicalOrRaw(entry.Client),
+		Domain:    domain,
+		QueryType: entry.Question.Type,
+		Status:    entry.Status,
+		Reason:    entry.Reason,
+	}
+	if ms, err := strconv.ParseFloat(entry.ElapsedMs, 64); err == nil && ms > 0 {
+		// An hour bounds any real answer and keeps the conversion in range.
+		q.Elapsed = time.Duration(min(ms, 3.6e6) * float64(time.Millisecond))
+	}
+	if len(entry.Answer) > 0 {
+		q.Answers = make([]string, 0, len(entry.Answer))
+		for _, a := range entry.Answer {
+			q.Answers = append(q.Answers, a.Value)
+		}
+	}
+	if hit != nil {
+		q.ThreatSource, q.ThreatName = hit.Source, hit.Threat
+		if q.ThreatSource == "" {
+			q.ThreatSource = "local"
+		}
+	}
+	return q
 }
 
 // entryKey identifies one querylog entry. AdGuard stamps entries with

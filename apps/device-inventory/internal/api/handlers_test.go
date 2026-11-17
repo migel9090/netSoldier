@@ -247,9 +247,18 @@ func fakeClickHouse(t *testing.T, fail bool) *httptest.Server {
 		}
 		q := r.URL.Query().Get("query")
 		switch {
-		case strings.Contains(q, "FROM connections"):
+		case strings.Contains(q, "FROM zeek_ssl"): // the connection history
 			fmt.Fprint(w, `{"meta":[],"data":[{"timestamp":"2026-11-16 12:00:00","dst_ip":"1.1.1.1","dst_domain":"one.one",
-				"dst_port":443,"protocol":6,"bytes_in":"18446744073709551615","bytes_out":"42","duration_ms":7}],"rows":1}`)
+				"dst_port":443,"protocol":6,"bytes_in":"18446744073709551615","bytes_out":"42","duration_ms":"7",
+				"service":"ssl"}],"rows":1}`)
+		case strings.Contains(q, "FROM alerts"):
+			if r.URL.Query().Get("param_mac") != "aa:bb:cc:dd:ee:ff" || r.URL.Query().Get("param_ip") != "192.168.1.100" {
+				http.Error(w, "Code: 456. DB::Exception: Substitution `mac` is not set", http.StatusBadRequest)
+				return
+			}
+			fmt.Fprint(w, `{"data":[{"timestamp":"2026-11-16 12:00:00","id":"DET-x-1","summary":"DNS query for c2.example",
+				"domain":"c2.example","query_type":"A","matched_ioc":"c2.example","severity":"high","source":"threatfox",
+				"signal_class":"ioc","threat":"","suppressed":1}]}`)
 		case strings.Contains(q, "FROM network_flows"):
 			fmt.Fprint(w, `{"data":[{"src_ip":"192.168.1.100","dst_ip":"1.1.1.1","total_bytes":"1000",
 				"total_packets":"10","flow_count":"2"}]}`)
@@ -268,8 +277,17 @@ func TestClickHouseViewsDecodeQuotedUInt64(t *testing.T) {
 	seen(t, db, arp("aa:bb:cc:dd:ee:ff", "192.168.1.100"))
 
 	code, _, body := get(t, srv.URL+"/devices/aa:bb:cc:dd:ee:ff/connections")
-	if code != 200 || !strings.Contains(string(body), `"bytes_in":18446744073709551615`) || !strings.Contains(string(body), `"bytes_out":42`) {
+	if code != 200 || !strings.Contains(string(body), `"bytes_in":18446744073709551615`) || !strings.Contains(string(body), `"bytes_out":42`) ||
+		!strings.Contains(string(body), `"duration_ms":7`) {
 		t.Errorf("connections: %d %s", code, body)
+	}
+
+	// Alerts are looked up by the device's MAC as well as its address, and
+	// carry what detection-engine adds (migration 030).
+	code, _, body = get(t, srv.URL+"/devices/aa:bb:cc:dd:ee:ff/alerts")
+	if code != 200 || !strings.Contains(string(body), `"summary":"DNS query for c2.example"`) ||
+		!strings.Contains(string(body), `"suppressed":true`) {
+		t.Errorf("alerts: %d %s", code, body)
 	}
 
 	topo := getJSON[topoResponse](t, srv.URL+"/topology")

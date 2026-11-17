@@ -42,6 +42,7 @@ func TestVerticalSlice(t *testing.T) {
 	detAddr := freeAddr(t)
 	stopDet := startProc(t, detBin, map[string]string{
 		"LISTEN_ADDR":                 detAddr,
+		"DB_PATH":                     filepath.Join(t.TempDir(), "detection-engine.db"),
 		"ADGUARD_URL":                 ag.url,
 		"ADGUARD_USER":                "admin",
 		"ADGUARD_PASSWORD":            "test",

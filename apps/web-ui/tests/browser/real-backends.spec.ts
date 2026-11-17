@@ -317,6 +317,70 @@ test('a detection recorded while silenced is shown as silenced', async ({ page }
   test.skip(!sent, 'detection-engine does not send `suppressed` on GET /alerts yet')
 })
 
+test('the health and policy pages show what the real services report about themselves', async ({
+  page,
+}) => {
+  await signIn(page, 'Michal')
+  await page.goto('/health')
+  const services = page.getByTestId('services-table')
+  for (const s of ['killswitch', 'detection-engine', 'device-inventory', 'threat-intel-sync']) {
+    const row = services.locator(`tr[data-service="${s}"]`)
+    await expect(row, s).toHaveAttribute('data-up', 'true')
+    // The probes answered and /metrics was read: the names the UI asks for exist.
+    await expect(row.locator('td').nth(2), s).toHaveText('read')
+    await expect(row.locator('td').last(), s).toHaveText('—')
+  }
+  const finding = (key: string) => page.getByTestId(`finding-${key}`)
+  // The two devices the stand-in agent registered.
+  await expect(page.getByTestId('capture-devices')).toHaveText(String(REAL_DEVICES.length))
+  // device-inventory runs with NETAGENT_EXPECT_CAPTURE=none: healthy while
+  // the agent's one heartbeat is recent, "none expected" once it is not.
+  await expect(finding('capture')).toHaveAttribute('data-verdict', /^(ok|off)$/)
+  // The engine reads AdGuard's query log every second.
+  await expect(finding('dns')).toHaveAttribute('data-verdict', 'ok')
+  // No ClickHouse here: no packet sensor is read, and the page says so.
+  await expect(finding('sensors')).toHaveAttribute('data-verdict', 'off')
+  await expect(page.getByTestId('sensors-none')).toBeVisible()
+  // threat-intel-sync cannot reach a feed from a test: not ready, and each
+  // feed it runs has never synced; the abuse.ch ones are off (COMMERCIAL_MODE).
+  await expect(finding('intel')).toHaveAttribute('data-verdict', 'fail')
+  await expect(page.getByTestId('intel-ready')).toContainText('NOT ready')
+  const feeds = page.getByTestId('feeds-table')
+  await expect(feeds.locator('tr[data-source="spamhaus"]')).toHaveAttribute('data-verdict', 'fail')
+  await expect(feeds.locator('tr[data-source="threatfox"]')).toContainText('disabled')
+
+  await page.goto('/killswitch/policy')
+  const policy = await apiGet<{
+    auto_block_allowed: boolean
+    auto_block_disabled_reason: string
+    unavailable_action_types: Record<string, string>
+    available_action_types: string[]
+  }>(page, '/api/killswitch/policy')
+  await expect(page.getByTestId('mode-auto-block')).toHaveAttribute(
+    'data-on',
+    String(policy.auto_block_allowed),
+  )
+  if (!policy.auto_block_allowed) {
+    await expect(page.getByTestId('mode-auto-block-reason')).toHaveText(
+      policy.auto_block_disabled_reason,
+    )
+  }
+  const types = page.getByTestId('action-types')
+  for (const t of policy.available_action_types) {
+    await expect(types.locator(`tr[data-type="${t}"]`), t).toHaveAttribute('data-available', 'true')
+  }
+  expect(Object.keys(policy.unavailable_action_types).length).toBeGreaterThan(0)
+  for (const [t, why] of Object.entries(policy.unavailable_action_types)) {
+    const row = types.locator(`tr[data-type="${t}"]`)
+    await expect(row, t).toHaveAttribute('data-available', 'false')
+    await expect(row.getByTestId('unavailable-reason'), t).toHaveText(why)
+  }
+  // ALLOWLIST_IPS=192.168.1.1 in the stack.
+  await expect(
+    page.getByTestId('protected-table').locator('tr[data-value="192.168.1.1"]'),
+  ).toBeVisible()
+})
+
 test('devices from the hardened inventory show where their values came from', async ({ page }) => {
   await signIn(page, 'Michal')
   await page.goto('/devices')

@@ -22,19 +22,22 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 # non-root process gets a capability only from file caps that are also in the
 # container's bounding set (securityContext.capabilities.add: [NET_RAW]) — a
 # plain capabilities.add does nothing without them (audit DP-7/DI-4). File
-# caps are honoured even with allowPrivilegeEscalation:false (no_new_privs),
-# so no root init container and no runtime setcap are needed. This mirrors
-# deploy/docker/zeek/Dockerfile. amd64/arm64 both support xattr file caps.
+# caps are honoured even with allowPrivilegeEscalation:false (no_new_privs)
+# for the binary the runtime executes directly, which the agent is (it is
+# the entrypoint; started from a shell it would get nothing), so no root
+# init container and no runtime setcap are needed. This mirrors
+# deploy/docker/zeek/Dockerfile, whose test shows both cases. amd64/arm64
+# both support xattr file caps.
 # The stage runs on the BUILD platform like the compile stage: setcap only
 # writes an extended attribute, which does not depend on the binary's
 # architecture, so the arm64 image needs no emulator (QEMU) on the amd64
 # runner.
-FROM --platform=$BUILDPLATFORM alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f AS setcap
+FROM --platform=$BUILDPLATFORM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS setcap
 RUN apk add --no-cache libcap
 COPY --from=build /netagent /netagent
 RUN setcap cap_net_raw+ep /netagent && getcap /netagent
 
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
 
 # COPY --from preserves the file capability xattr (BuildKit carries xattrs
 # across stages). Nothing else is in the image.

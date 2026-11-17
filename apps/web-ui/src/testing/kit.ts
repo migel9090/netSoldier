@@ -1,4 +1,5 @@
-import type { Cookies, Handle, RequestEvent } from '@sveltejs/kit'
+import type { Cookies, RequestEvent } from '@sveltejs/kit'
+import type { Handle } from '@sveltejs/kit/hooks'
 
 /**
  * A minimal stand-in for SvelteKit's request pipeline, for driving the whole
@@ -22,7 +23,7 @@ export const PAGE_CSP = "script-src 'self' 'nonce-test'"
 
 interface SetCookie {
   value: string
-  options: Parameters<Cookies['set']>[2]
+  options: NonNullable<Parameters<Cookies['set']>[2]>
 }
 
 function serialize(name: string, value: string, o: SetCookie['options']): string {
@@ -71,11 +72,15 @@ export async function invokeHandle(
       setCookies.has(name) ? setCookies.get(name)!.value : requestCookies[name],
     getAll: () => Object.entries(requestCookies).map(([name, value]) => ({ name, value })),
     set: (name: string, value: string, options: SetCookie['options']) => {
-      if (!options?.path) throw new Error('cookies.set requires a path, as in SvelteKit')
+      if (!options?.path)
+        throw new Error(
+          'cookies.set without a path: SvelteKit 3 would default it to /, and the device cookie must stay on /api/login',
+        )
       setCookies.set(name, { value, options })
     },
     delete: (name: string, options: SetCookie['options']) => {
-      if (!options?.path) throw new Error('cookies.delete requires a path, as in SvelteKit')
+      if (!options?.path)
+        throw new Error('cookies.delete without a path: SvelteKit 3 would default it to /')
       setCookies.set(name, { value: '', options: { ...options, maxAge: 0 } })
     },
     serialize: (name: string, value: string, options: SetCookie['options']) =>

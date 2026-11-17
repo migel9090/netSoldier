@@ -594,6 +594,43 @@ export function endedBy(a: EnforcementAction): string {
   }
 }
 
+/** Who approved an action, in words: the operator, the policy, or nobody yet. */
+export function approverWords(a: Pick<EnforcementAction, 'approved_by' | 'auto_approved'>): string {
+  if (a.approved_by) return describeActor(a.approved_by)
+  return a.auto_approved ? describeActor('auto-policy') : '—'
+}
+
+// ── History ───────────────────────────────────────────────────────────
+
+/** The outcomes the history can be narrowed to; '' is every finished action. */
+export const HISTORY_OUTCOMES: readonly { value: string; label: string }[] = [
+  { value: '', label: 'All' },
+  { value: 'reverted', label: 'Reverted' },
+  { value: 'rejected', label: 'Rejected' },
+  { value: 'expired', label: 'Expired' },
+  { value: 'apply_failed', label: 'Failed' },
+]
+
+export function historyOutcomeFrom(params: Pick<URLSearchParams, 'get'>): string {
+  const v = params.get('outcome') ?? ''
+  return HISTORY_OUTCOMES.some((o) => o.value === v) ? v : ''
+}
+
+export interface Paged<T> {
+  items: T[]
+  /** 0-based, clamped to the pages there are. */
+  page: number
+  pages: number
+  total: number
+}
+
+/** Page `page` of `items`, `size` to a page. */
+export function pageOf<T>(items: readonly T[], page: number, size: number): Paged<T> {
+  const pages = Math.max(1, Math.ceil(items.length / size))
+  const p = Math.min(Math.max(0, Math.floor(page)), pages - 1)
+  return { items: items.slice(p * size, (p + 1) * size), page: p, pages, total: items.length }
+}
+
 function capitalise(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }

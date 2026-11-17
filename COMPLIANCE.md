@@ -61,12 +61,17 @@ commercial-safe intel remains (your own MISP + Spamhaus DROP).
 | AdGuard Home | GPL-3.0 | ✅ | — |
 | Spamhaus DROP | Free ToU (incl. commercial) | ✅ | **Attribution required**; keep the ©/date line. **Do NOT use "Spamhaus" in marketing.** |
 | IEEE OUI data | factual (no license) | ✅ | Our `internal/oui` table is first-party (not Wireshark's GPL `manuf`). |
+| Majestic Million (never-block list, `libs/indicator/neverblock.txt`, step 134) | CC BY 3.0 | ✅ | **Attribution required** — kept in the file's header and in `NOTICE`, with the snapshot date and the changes made. Only the hand-picked "popular" entries come from it. |
+| Public Suffix List (via `golang.org/x/net/publicsuffix`) | MPL-2.0 | ✅ | Unmodified, inside the Go dependency. |
+| Cloudflare Radar domain ranking | CC BY-NC 4.0 — non-commercial | ❌ | **Not used** for the never-block list (checked 2026-11-17). |
+| Cisco Umbrella popularity list, Tranco | no licence granted / combines Radar and Umbrella | ❌ | **Not used** for the never-block list (checked 2026-11-17). |
 | First-party DHCP fingerprints | our own (GPL-3.0) | ✅ | `internal/dhcpfp` — not Fingerbank. |
 
 ## Standing obligations (do these before selling)
 
 1. **Attribution:** DB-IP geolocation credit in the UI; Spamhaus DROP copyright
-   line retained wherever the list is used.
+   line retained wherever the list is used; the Majestic Million credit in
+   `libs/indicator/neverblock.txt` and `NOTICE`.
 2. **Trademark / naming — nominative use only, never in product name, domain,
    logo, or marketing copy:** Grafana®, Loki®, Prometheus®, ClickHouse,
    Suricata®, AdGuard®, Zeek (modified builds), and **Spamhaus** (strictest —

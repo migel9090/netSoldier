@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { fetchDevices, formatTime } from '$lib/api'
-  import { bindingWords, conflictCount, sourceName } from '$lib/devices'
-  import type { Device } from '$lib/types'
+  import { fetchDevices, formatTime } from '#lib/api.ts'
+  import { bindingWords, conflictCount, sourceName } from '#lib/devices.ts'
+  import type { Device } from '#lib/types.ts'
 
   let devices: Device[] = $state([])
   let total: number = $state(0)

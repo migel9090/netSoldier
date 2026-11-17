@@ -10,17 +10,23 @@
     alertObservedDomain,
     falsePositiveQuestion,
     falsePositiveVerdict,
+    isComposite,
     isSilenced,
+    liftNote,
     liftQuestion,
     liftRequest,
+    signalBreakdown,
     signalClasses,
+    sortSuppressions,
     suppressionAnchor,
     suppressionDays,
     suppressionEnds,
     suppressionFor,
     suppressionPeriod,
-    suppressionScope,
-  } from '$lib/alerts'
+  } from '#lib/alerts.ts'
+  import AlertsNav from '#lib/components/AlertsNav.svelte'
+  import SignalTable from '#lib/components/SignalTable.svelte'
+  import SuppressionTable from '#lib/components/SuppressionTable.svelte'
   import {
     ALERTS_LIMIT,
     ALERTS_MAX_LIMIT,
@@ -31,9 +37,9 @@
     liftSuppression,
     normaliseMac,
     submitFeedback,
-  } from '$lib/api'
-  import { newestFirst } from '$lib/order'
-  import type { Alert, Suppression } from '$lib/types'
+  } from '#lib/api.ts'
+  import { newestFirst } from '#lib/order.ts'
+  import type { Alert, Suppression } from '#lib/types.ts'
 
   const SEVERITIES = ['critical', 'high', 'medium', 'low'] as const
 
@@ -159,42 +165,28 @@
     )
   }
 
+  let lifting: Set<string> = $state(new Set())
+
   async function lift(s: Suppression) {
     if (!confirm(liftQuestion(s, suppressions))) return
-    const what = `the suppression of ${s.matched_ioc} (${s.signal_class}) ${suppressionScope(s)}`
+    const anchor = suppressionAnchor(s)
+    lifting = new Set(lifting).add(anchor)
     try {
-      const r = await liftSuppression(liftRequest(s))
-      if (!r.inForce) {
-        note(
-          'warn',
-          `Nothing to lift: ${what} was no longer in force (lifted already, or it expired).`,
-        )
-      } else if (r.persisted === false) {
-        const end = suppressionEnds(s)
-        note(
-          'warn',
-          `Lifted ${what}. It applies now but was NOT saved: when the detection engine restarts, ` +
-            `the suppression comes back${end ? ` (until ${formatTime(end.at)})` : ''}.`,
-        )
-      } else {
-        note('ok', `Lifted ${what}.${r.persisted ? ' Saved.' : ''}`)
-      }
+      const n = liftNote(s, await liftSuppression(liftRequest(s)))
+      note(n.tone, n.text)
     } catch (e) {
       note('fail', e instanceof Error ? e.message : 'Failed to lift the suppression')
     } finally {
+      const next = new Set(lifting)
+      next.delete(anchor)
+      lifting = next
       await loadSuppressions()
     }
   }
 
   async function loadSuppressions() {
     try {
-      // GET /feedback comes in map order: newest first, stably.
-      suppressions = (await fetchSuppressions()).sort(
-        (x, y) =>
-          Date.parse(y.timestamp) - Date.parse(x.timestamp) ||
-          x.matched_ioc.localeCompare(y.matched_ioc) ||
-          (x.client_ip ?? '').localeCompare(y.client_ip ?? ''),
-      )
+      suppressions = sortSuppressions(await fetchSuppressions())
       suppressionsError = ''
     } catch (e) {
       suppressionsError = e instanceof Error ? e.message : 'Failed to load suppressions'
@@ -214,9 +206,22 @@
       const el = document.getElementById(id)
       if (!el) return
       scrolledTo = id
+      // An alert someone linked to opens with its signals shown.
+      const linked = el.getAttribute('data-alert-id')
+      if (linked) expanded = new Set(expanded).add(linked)
       el.scrollIntoView({ block: 'center' })
     })
   })
+
+  // Alerts whose signals are shown, by id.
+  let expanded: Set<string> = $state(new Set())
+
+  function toggleSignals(id: string) {
+    const next = new Set(expanded)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    expanded = next
+  }
 
   // GET /alerts returns the newest `limit` alerts; "show more" asks for more.
   let limit = $state(ALERTS_LIMIT)
@@ -262,6 +267,7 @@
     >
   {/if}
 </div>
+<AlertsNav />
 
 {#if feedbackNotes.length > 0}
   <ul class="notes" aria-live="polite">
@@ -350,7 +356,7 @@
         </tr>
       </thead>
       <tbody>
-        {#each filtered as a}
+        {#each filtered as a (a.id)}
           {@const client = alertClient(a)}
           {@const mac = normaliseMac(client.mac)}
           {@const observed = alertObservedDomain(a)}
@@ -358,6 +364,8 @@
           {@const suppressed = suppressionFor(a, suppressions)}
           {@const silenced = isSilenced(a)}
           {@const anchor = alertAnchor(a)}
+          {@const signals = signalBreakdown(a)}
+          {@const open = expanded.has(a.id)}
           <tr
             id={anchor}
             data-alert-id={a.id}
@@ -448,8 +456,34 @@
                   Mark FP
                 </button>
               {/if}
+              {#if signals.length > 0}
+                <button
+                  class="signals-btn"
+                  data-testid="signals-toggle"
+                  aria-expanded={open}
+                  aria-controls="{anchor}-signals"
+                  onclick={() => toggleSignals(a.id)}
+                  >{open ? '▾' : '▸'}
+                  {signals.length} signal{signals.length === 1 ? '' : 's'}{isComposite(a)
+                    ? ' (combined)'
+                    : ''}</button
+                >
+              {/if}
             </td>
           </tr>
+          {#if open}
+            <tr
+              id="{anchor}-signals"
+              class="signals-row"
+              data-signals-of={a.id}
+              class:silenced
+              data-testid="alert-signals"
+            >
+              <td colspan="9">
+                <SignalTable rows={signals} composite={isComposite(a)} />
+              </td>
+            </tr>
+          {/if}
         {/each}
       </tbody>
     </table>
@@ -476,47 +510,7 @@
   {:else if suppressions.length === 0}
     <p class="empty">Nothing is suppressed.</p>
   {:else}
-    <table data-testid="suppressions-table">
-      <thead>
-        <tr>
-          <th>Indicator</th>
-          <th>Signal</th>
-          <th>Device</th>
-          <th>Marked by</th>
-          <th>Marked</th>
-          <th>Ends</th>
-          <th>Reason</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each suppressions as s (`${s.matched_ioc}|${s.client_ip ?? ''}|${s.signal_class}`)}
-          {@const anchor = suppressionAnchor(s)}
-          {@const end = suppressionEnds(s)}
-          <tr id={anchor} data-ioc={s.matched_ioc} class:targeted={target === anchor}>
-            <td class="mono truncate" title={s.matched_ioc}>{s.matched_ioc}</td>
-            <td>{s.signal_class}</td>
-            <td class="mono">{s.client_ip || 'every device'}</td>
-            <td>{s.analyst || '—'}</td>
-            <td class="nowrap">{formatTime(s.timestamp)}</td>
-            <td class="nowrap" data-testid="suppression-ends">
-              {#if end}
-                {end.estimated ? `about ${formatTime(end.at)}` : formatTime(end.at)}
-                <span class="secondary"
-                  >{end.estimated
-                    ? `estimated: the engine did not say; ${SUPPRESSION_DAYS} days is its default`
-                    : formatTimeLeft(end.at)}</span
-                >
-              {:else}
-                —
-              {/if}
-            </td>
-            <td class="truncate" title={s.reason}>{s.reason || '—'}</td>
-            <td><button class="fp-btn" onclick={() => lift(s)}>Lift</button></td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
+    <SuppressionTable {suppressions} {target} onlift={lift} {lifting} />
   {/if}
 </section>
 
@@ -723,6 +717,23 @@
   tr.targeted td,
   tr.targeted:hover td {
     background: rgba(88, 166, 255, 0.12);
+  }
+  .signals-btn {
+    display: block;
+    margin-top: 0.25rem;
+    background: transparent;
+    color: var(--accent);
+    border: none;
+    font-size: 0.6875rem;
+    padding: 0;
+    cursor: pointer;
+  }
+  .signals-btn:hover {
+    text-decoration: underline;
+  }
+  tr.signals-row td {
+    background: var(--bg-primary);
+    border-top: none;
   }
   .fp-btn:disabled {
     opacity: 0.5;

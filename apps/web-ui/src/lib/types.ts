@@ -257,13 +257,45 @@ export interface AuditEntry {
   policy_rule: string
 }
 
-/** GET /policy: the part of it the approval page uses. */
+/**
+ * GET /policy (killswitch-controller cmd/killswitch-controller/api.go
+ * handleGetPolicy). Everything but `available_action_types` and
+ * `unavailable_action_types` is optional: older controllers send less.
+ */
 export interface KillswitchPolicy {
   /** What an operator may choose in an approve right now. */
   available_action_types: string[]
+  /** Every known action type that cannot be chosen now, with the controller's reason. */
+  unavailable_action_types: Record<string, string>
   default_action?: string
+  /** POLICY_AUTO_BLOCK as configured: `on` or `off` (off by choice). */
+  auto_block?: string
+  /** Whether automatic blocking can happen now (configured on and nothing holds it back). */
   auto_block_allowed?: boolean
   auto_block_disabled_reason?: string
+  /** Automatic blocking: at least this confidence (0–100) and this severity. */
+  auto_min_confidence?: number
+  auto_min_severity?: string
+  /** A composite needs at least this many distinct signal classes to be blocked automatically. */
+  auto_min_signals?: number
+  auto_require_known_bad?: boolean
+  /** What the automatic path enforces with (always the DNS sinkhole). */
+  auto_action_type?: string
+  /** Proposing a block for approval: at least this confidence and this severity. */
+  pend_min_confidence?: number
+  pend_min_severity?: string
+  /** Seconds a block stays before it is lifted on its own. */
   default_ttl?: number
+  /** Seconds a proposal waits for approval before it expires. */
   pending_ttl_seconds?: number
+  /** Entries in the operator's never-enforce list (GET /allowlist). */
+  allowlist_entries?: number
+  /** Protection entries refused at start-up (malformed); they protect nothing. */
+  rejected_protection_entries?: number
+}
+
+/** GET /allowlist: the operator's never-enforce list, canonical MACs and addresses or prefixes. */
+export interface Allowlist {
+  macs: string[]
+  ips: string[]
 }

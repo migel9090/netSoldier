@@ -1,13 +1,12 @@
-import { json } from '@sveltejs/kit'
 import type { RequestHandler } from './$types'
-import { validateActor } from '$lib/actor'
-import { csrfTokenFor, issueSession, safeEqual } from '$lib/server/auth'
-import { readConfig } from '$lib/server/config'
-import { setDeviceCookie, setSessionCookies } from '$lib/server/cookies'
-import { DEVICE_COOKIE, issueDeviceToken, verifyDeviceToken } from '$lib/server/device'
-import { log } from '$lib/server/log'
-import { countLogin, countLoginFailure } from '$lib/server/metrics'
-import { loginLimiter } from '$lib/server/ratelimit'
+import { validateActor } from '#lib/actor.ts'
+import { csrfTokenFor, issueSession, safeEqual } from '#lib/server/auth.ts'
+import { readConfig } from '#lib/server/config.ts'
+import { setDeviceCookie, setSessionCookies } from '#lib/server/cookies.ts'
+import { DEVICE_COOKIE, issueDeviceToken, verifyDeviceToken } from '#lib/server/device.ts'
+import { log } from '#lib/server/log.ts'
+import { countLogin, countLoginFailure } from '#lib/server/metrics.ts'
+import { loginLimiter } from '#lib/server/ratelimit.ts'
 
 /**
  * POST /api/login — exchanges the household password for a session.
@@ -21,14 +20,14 @@ const MAX_PASSWORD_LENGTH = 1024
 
 export const POST: RequestHandler = async (event) => {
   const result = readConfig()
-  if (!result.ok) return json({ error: 'web-ui is not configured' }, { status: 503 })
+  if (!result.ok) return Response.json({ error: 'web-ui is not configured' }, { status: 503 })
   const config = result.config
   const client = event.getClientAddress()
 
   const body = await readBody(event.request)
   if (!body.ok) {
     countLoginFailure('invalid_request')
-    return json({ error: body.error }, { status: body.status })
+    return Response.json({ error: body.error }, { status: body.status })
   }
 
   // Checked before the password so the household gets a useful message
@@ -36,7 +35,7 @@ export const POST: RequestHandler = async (event) => {
   const actor = validateActor(body.actor)
   if (!actor.ok) {
     countLoginFailure('invalid_actor')
-    return json({ error: actor.message, field: 'actor' }, { status: 400 })
+    return Response.json({ error: actor.message, field: 'actor' }, { status: 400 })
   }
 
   const now = Date.now()
@@ -53,7 +52,7 @@ export const POST: RequestHandler = async (event) => {
       retry_after_s: gate.retryAfterSeconds,
     })
     const minutes = Math.max(1, Math.ceil(gate.retryAfterSeconds / 60))
-    return json(
+    return Response.json(
       {
         error:
           gate.scope === 'client'
@@ -74,7 +73,7 @@ export const POST: RequestHandler = async (event) => {
       known_device: gate.trusted,
       failures_in_window: failures,
     })
-    return json({ error: 'invalid credentials' }, { status: 401 })
+    return Response.json({ error: 'invalid credentials' }, { status: 401 })
   }
 
   loginLimiter.succeed(client, deviceId, gate.trusted)
@@ -89,7 +88,7 @@ export const POST: RequestHandler = async (event) => {
   countLogin()
   log('INFO', 'signed in', { client, actor: session.actor, known_device: deviceId !== null })
 
-  return json({ status: 'ok', actor: session.actor })
+  return Response.json({ status: 'ok', actor: session.actor })
 }
 
 type Body =

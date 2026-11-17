@@ -11,19 +11,28 @@ on:
 permissions:
   contents: read
 
-# Checkov, KICS and hadolint all run through scripts/ci/iac-gate.py, the
-# command a developer runs too (task scan:checkov / scan:kics / scan:hadolint).
-# It renders every deployable target and judges the rendered objects, not the
-# kustomize bases and patch fragments; it scans the rest of the repository
-# (Dockerfiles, Terraform, Ansible, workflows, standalone manifests) as files;
-# and it fails on every finding that scan-exceptions.toml does not cover with
-# a reason and an unexpired review date. No baseline, no soft fail. The
-# scanners are pinned by image digest or by checksum (scripts/ci/tools.sh)
-# and run without network access.
+# Checkov, KICS and hadolint all run through scripts/ci/iac-gate.py, behind
+# the Taskfile targets a developer runs too (task scan:checkov / scan:kics /
+# scan:hadolint). It renders every deployable target and judges the rendered
+# objects, not the kustomize bases and patch fragments; it scans the rest of
+# the repository (Dockerfiles, Terraform, Ansible, workflows, standalone
+# manifests) as files; and it fails on every finding that
+# scan-exceptions.toml does not cover with a reason and an unexpired review
+# date. No baseline, no soft fail. The scanners are pinned by image digest or
+# by checksum (scripts/ci/tools.sh) and run without network access.
 #
 # The SARIF it writes holds only the findings that failed the gate, so the
 # code-scanning check and the job always agree. It is uploaded even when the
 # gate fails, so the findings show on the pull request.
+#
+# Egress: block mode where every endpoint a job needs is known from its own
+# runs. checkov, kics and infra-lab-static pull images from Docker Hub,
+# whose layers come from CDNs that Docker changes without notice (runs so
+# far: registry-1.docker.io, auth.docker.io, production.cloudfront.docker.com,
+# docker-images-prod.s3.dualstack.us-east-1.amazonaws.com; Docker documents
+# docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com
+# too). A wrong list would fail every pull request, so those jobs stay in
+# audit mode until a few runs confirm the list.
 
 jobs:
   checkov:
@@ -34,26 +43,19 @@ jobs:
       security-events: write
       actions: read
     steps:
-      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: '3.12'
-
-      - name: Install the gate's Python tools
-        run: pip install --quiet --require-hashes -r scripts/ci/requirements.txt
+      - uses: ./.github/actions/gate-setup
 
       - name: Checkov
-        env:
-          NETSOLDIER_TOOLS: ${{ runner.temp }}/tools
-        run: python scripts/ci/iac-gate.py checkov --sarif checkov.sarif
+        run: task scan:checkov -- --sarif checkov.sarif
 
       - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@87557b9c84dde89fdd9b10e88954ac2f4248e463 # v4.36.1
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         if: always() && hashFiles('checkov.sarif') != ''
         with:
           sarif_file: checkov.sarif
@@ -67,29 +69,22 @@ jobs:
       security-events: write
       actions: read
     steps:
-      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: '3.12'
-
-      - name: Install the gate's Python tools
-        run: pip install --quiet --require-hashes -r scripts/ci/requirements.txt
+      - uses: ./.github/actions/gate-setup
 
       # Gates on HIGH and CRITICAL, as before. The *.example.yaml secrets
       # need no exclusion any more: they are not part of any rendered target,
       # and as files they raise nothing at that level.
       - name: KICS
-        env:
-          NETSOLDIER_TOOLS: ${{ runner.temp }}/tools
-        run: python scripts/ci/iac-gate.py kics --sarif kics.sarif
+        run: task scan:kics -- --sarif kics.sarif
 
       - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@87557b9c84dde89fdd9b10e88954ac2f4248e463 # v4.36.1
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         if: always() && hashFiles('kics.sarif') != ''
         with:
           sarif_file: kics.sarif
@@ -106,26 +101,27 @@ jobs:
       security-events: write
       actions: read
     steps:
-      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            files.pythonhosted.org:443
+            github.com:443
+            objects.githubusercontent.com:443
+            pypi.org:443
+            release-assets.githubusercontent.com:443
+            uploads.github.com:443
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: '3.12'
-
-      - name: Install the gate's Python tools
-        run: pip install --quiet --require-hashes -r scripts/ci/requirements.txt
+      - uses: ./.github/actions/gate-setup
 
       - name: hadolint
-        env:
-          NETSOLDIER_TOOLS: ${{ runner.temp }}/tools
-        run: python scripts/ci/iac-gate.py hadolint --sarif hadolint.sarif
+        run: task scan:hadolint -- --sarif hadolint.sarif
 
       - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@87557b9c84dde89fdd9b10e88954ac2f4248e463 # v4.36.1
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         if: always() && hashFiles('hadolint.sarif') != ''
         with:
           sarif_file: hadolint.sarif
@@ -141,11 +137,19 @@ jobs:
       run:
         working-directory: infra/terraform
     steps:
-      - uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            checkpoint-api.hashicorp.com:443
+            github.com:443
+            objects.githubusercontent.com:443
+            registry.terraform.io:443
+            release-assets.githubusercontent.com:443
+            releases.hashicorp.com:443
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Without a version the action installs whatever Terraform is newest,
       # which can fall outside versions.tf's `~> 1.17.2` and changes under an
@@ -163,3 +167,31 @@ jobs:
 
       - name: Validate
         run: terraform validate
+
+  # What `task lab:validate` checks, with no credentials and no VM: the
+  # pinned lab tools (Ansible from a hash-locked virtualenv, its collections,
+  # kubectl by checksum), terraform fmt/init/validate in the digest-pinned
+  # image the lab uses (infra/lab/tf.sh), ansible-playbook --syntax-check and
+  # ansible-lint of the lab playbooks, and bash -n of the lab scripts.
+  # Locations point into the runner's temp directory; LAB_CONFIG is empty.
+  infra-lab-static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/gate-setup
+        with:
+          python-deps: 'false'
+
+      - name: Lab static checks (task lab:validate)
+        env:
+          LAB_VENV: ${{ runner.temp }}/lab/venv
+          LAB_STATE: ${{ runner.temp }}/lab/state
+          LAB_CACHE: ${{ runner.temp }}/lab/cache
+          LAB_CONFIG: ${{ runner.temp }}/lab/config
+        run: task lab:validate

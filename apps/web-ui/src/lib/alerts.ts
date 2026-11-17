@@ -1,4 +1,4 @@
-import { formatTime, type FeedbackVerdict, type LiftRequest } from './api'
+import { formatTime, type FeedbackVerdict, type LiftRequest, type LiftResult } from './api'
 import type { Alert, AlertSignal, DeviceAlert, Suppression } from './types'
 
 /**
@@ -52,6 +52,62 @@ export function signalClasses(a: Alert): string[] {
     .filter(Boolean)
   if (classes.length === 0 && text(a.signal_class)) classes.push(text(a.signal_class))
   return [...new Set(classes)]
+}
+
+/** One signal of a detection, as the breakdown shows it; '' and null where it says nothing. */
+export interface SignalRow {
+  class: string
+  confidence: number | null
+  indicator: string
+  indicatorType: string
+  source: string
+}
+
+/**
+ * What a detection is made of: each signal with its own class, confidence,
+ * indicator and source. A composite (signal_class `composite`) combines
+ * corroborating signals about one device, and its confidence is the
+ * combination's, not any one signal's. Older engines send the classes as
+ * plain strings, which give the class alone.
+ */
+export function signalBreakdown(a: Pick<Alert, 'signals' | 'signal_class'>): SignalRow[] {
+  const raw: (AlertSignal | string)[] = Array.isArray(a.signals) ? a.signals : []
+  const rows: SignalRow[] = []
+  for (const s of raw) {
+    if (typeof s === 'string') {
+      if (text(s))
+        rows.push({
+          class: text(s),
+          confidence: null,
+          indicator: '',
+          indicatorType: '',
+          source: '',
+        })
+      continue
+    }
+    if (!s || typeof s !== 'object' || !text(s.class)) continue
+    rows.push({
+      class: text(s.class),
+      confidence:
+        typeof s.confidence === 'number' && Number.isFinite(s.confidence) ? s.confidence : null,
+      indicator: text(s.indicator),
+      indicatorType: text(s.indicator_type),
+      source: text(s.source),
+    })
+  }
+  return rows
+}
+
+export function isComposite(a: Pick<Alert, 'signal_class'>): boolean {
+  return text(a.signal_class) === 'composite'
+}
+
+/** The alert with this id among `alerts`, if it is there. */
+export function alertById<T extends Pick<Alert, 'id'>>(
+  alerts: readonly T[],
+  id: string,
+): T | undefined {
+  return id ? alerts.find((a) => a.id === id) : undefined
 }
 
 // ── False-positive feedback (detection-engine internal/feedback) ──────
@@ -211,6 +267,42 @@ export function liftRequest(s: Suppression): LiftRequest {
     signal_class: s.signal_class,
     reason: 'suppression lifted in the web UI',
   }
+}
+
+export interface Note {
+  tone: 'ok' | 'warn' | 'fail'
+  text: string
+}
+
+/** What a lift did, in words: ended, ended but not saved, or nothing to end. */
+export function liftNote(s: Suppression, r: LiftResult): Note {
+  const what = `the suppression of ${s.matched_ioc} (${s.signal_class}) ${suppressionScope(s)}`
+  if (!r.inForce) {
+    return {
+      tone: 'warn',
+      text: `Nothing to lift: ${what} was no longer in force (lifted already, or it expired).`,
+    }
+  }
+  if (r.persisted === false) {
+    const end = suppressionEnds(s)
+    return {
+      tone: 'warn',
+      text:
+        `Lifted ${what}. It applies now but was NOT saved: when the detection engine restarts, ` +
+        `the suppression comes back${end ? ` (until ${formatTime(end.at)})` : ''}.`,
+    }
+  }
+  return { tone: 'ok', text: `Lifted ${what}.${r.persisted ? ' Saved.' : ''}` }
+}
+
+/** GET /feedback comes in map order: newest first, stably. */
+export function sortSuppressions(list: readonly Suppression[]): Suppression[] {
+  return [...list].sort(
+    (x, y) =>
+      Date.parse(y.timestamp) - Date.parse(x.timestamp) ||
+      x.matched_ioc.localeCompare(y.matched_ioc) ||
+      (x.client_ip ?? '').localeCompare(y.client_ip ?? ''),
+  )
 }
 
 /** Where a suppression applies, in words. */

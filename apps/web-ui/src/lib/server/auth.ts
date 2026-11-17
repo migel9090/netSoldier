@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual, randomBytes } from 'node:crypto'
-import { isValidActor } from '$lib/actor'
+import { isValidActor } from '#lib/actor.ts'
 
 /**
  * Interim session authentication for the household UI.

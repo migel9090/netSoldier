@@ -73,10 +73,16 @@ def sha256_file(path: str) -> str:
 
 
 def docker(args, image, mounts, command):
-    # The sensors run as root in the container, so anything they write to the
-    # bind-mounted output dir lands root-owned; hand it back before exiting or
-    # the host user cannot clean up the temp dir.
-    command = f"{command}; rc=$?; chown -R {os.getuid()}:{os.getgid()} /out 2>/dev/null; exit $rc"
+    # The upstream sensor images run as root in the container, so anything
+    # they write to the bind-mounted output dir lands root-owned; hand it
+    # back before exiting or the host user cannot clean up the temp dir. The
+    # netSoldier zeek image runs as nobody instead, which can neither write
+    # the host user's directory nor chown: the output dir is opened to it
+    # (run_zeek) and umask 0 keeps what it writes removable by the host user.
+    command = (
+        f"umask 0000; {command}; rc=$?; "
+        f"chown -R {os.getuid()}:{os.getgid()} /out 2>/dev/null; exit $rc"
+    )
     cmd = ["docker", "run", "--rm"]
     for src, dst, mode in mounts:
         cmd += ["-v", f"{src}:{dst}:{mode}" if mode else f"{src}:{dst}"]
@@ -179,6 +185,8 @@ def run_suricata(args, names, workdir):
 def run_zeek(args, names, workdir):
     out = os.path.join(workdir, "zeek-out")
     os.makedirs(out, exist_ok=True)
+    # Writable for the non-root user of the netSoldier zeek image (--zeek-image).
+    os.chmod(out, 0o777)  # noqa: S103 — a private temp dir, removed on exit
 
     script = " ".join(
         f"mkdir -p /out/{n} && cd /out/{n} && "
